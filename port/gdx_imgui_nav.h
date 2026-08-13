@@ -9,7 +9,7 @@
 //    has claimed ImGuiBackendFlags_HasGamepad — two writers on one ImGuiKey stall ImGui's event
 //    queue (see the check in gdx_imgui_nav.cpp).
 //
-// 2. Keeps ImGuiConfigFlags_NavEnableGamepad in sync with (gControlNav && menu visible) every
+// 2. Keeps ImGuiConfigFlags_NavEnableGamepad in sync with Gui's effective navigation policy every
 //    frame; libultraship only re-evaluates it when its own toggle key fires.
 //
 // Called from GdxFast3dGui::ImGuiWMNewFrame (port/gdx_gui.cpp): after the platform backend's

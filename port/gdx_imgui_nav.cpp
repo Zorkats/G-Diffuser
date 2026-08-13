@@ -66,19 +66,6 @@ void FeedAxis(ImGuiIO& io, SDL_GameController* c, SDL_GameControllerAxis axis, I
     io.AddKeyAnalogEvent(posKey, pos > 0.0f, pos);
 }
 
-bool MenuVisible() {
-    auto ctx = Ship::Context::GetInstance();
-    if (ctx == nullptr) {
-        return false;
-    }
-    auto window = ctx->GetWindow();
-    if (window == nullptr) {
-        return false;
-    }
-    auto gui = window->GetGui();
-    return gui != nullptr && gui->GetMenuOrMenubarVisible();
-}
-
 } // namespace
 
 extern "C" void gdx_imgui_nav_tick(void) {
@@ -93,11 +80,12 @@ extern "C" void gdx_imgui_nav_tick(void) {
         sOwnsFeed = false;
     }
 
-    // libultraship recomputes this flag only on the frame its own toggle key fires (Gui.cpp
-    // DrawMenu), so closing the menu with B or its close button left ImGui nav live over the running
-    // game. Re-asserting LUS's own rule every frame keeps it honest whatever closed the menu.
+    auto ctx = Ship::Context::GetInstance();
+    auto window = ctx != nullptr ? ctx->GetWindow() : nullptr;
+    auto gui = window != nullptr ? window->GetGui() : nullptr;
     const bool navOn = CVarGetInteger("gControlNav", 0) != 0;
-    if (navOn && MenuVisible()) {
+    const bool canUseNavigation = gui != nullptr && gui->CanUseGamepadNavigation();
+    if (canUseNavigation) {
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
     } else {
         io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;

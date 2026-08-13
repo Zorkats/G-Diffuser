@@ -1119,7 +1119,7 @@ void GdxMenu::RegisterMenu() {
     AddWidget("Dev Tools", "General", SECTION_COLUMN_1,
               WidgetInfo{ .name = "Multi-viewport docking", .cVar = "gEnableMultiViewports",
                           .type = GdxUI::WIDGET_CVAR_CHECKBOX }
-                  .Options(UIWidgets::CheckboxOptions().DefaultValue(true).Tooltip(
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(false).Tooltip(
                       "Lets popped-out tool windows leave the main window (multi-monitor docking).\n"
                       "Applies on restart."))
                   .Note("(restart)")
