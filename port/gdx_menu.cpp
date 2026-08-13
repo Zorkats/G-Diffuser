@@ -791,7 +791,8 @@ void GdxMenu::DrawElement() {
 }
 
 void GdxMenu::DrawHeader() {
-    const bool navActive = CVarGetInteger("gControlNav", 0) != 0;
+    auto gui = GdxGui();
+    const bool navActive = gui != nullptr && gui->CanUseGamepadNavigation();
 
     // Shoulder buttons cycle the header tabs (wrapping). ImGui spends L1/R1 on window-cycling only
     // while FaceLeft is held, and on slider tweak-speed only while a slider is being dragged, so a

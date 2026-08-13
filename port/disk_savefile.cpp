@@ -24,10 +24,12 @@
 #include "disk_savefile.h"
 #include "port_log.h"
 #include "libultraship/bridge/consolevariablebridge.h" /* one-shot DD-format CVar (Workshop menu) */
+#include "ship/Context.h"
 
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -147,43 +149,65 @@ uint64_t getU64(const unsigned char* p) {
 
 /* --- path resolution (mirrors gdx_ghost_io.c) ------------------------------- */
 
-bool executableDirectory(std::string& out) {
-#ifdef _WIN32
-    char path[MAX_PATH];
-    DWORD n = GetModuleFileNameA(nullptr, path, (DWORD)sizeof(path));
-    if (n == 0 || n >= sizeof(path)) {
+bool savesDirectory(std::string& out) {
+    std::error_code error;
+    std::filesystem::path savesPath = Ship::Context::GetPathRelativeToAppDirectory("saves");
+
+    std::filesystem::create_directories(savesPath, error);
+    if (error) {
         return false;
     }
-    char* slash = strrchr(path, '\\');
-    if (slash == nullptr) {
-        return false;
-    }
-    *slash = '\0';
-    out = path;
+    out = savesPath.string();
     return true;
-#else
-    out = ".";
-    return true;
-#endif
 }
 
-bool savesDirectory(std::string& out) {
-    std::string base;
-    if (!executableDirectory(base)) {
-        return false;
+void migrateLegacySidecars(const std::string& canonicalGddPath, const std::string& canonicalBakPath) {
+#ifndef _WIN32
+    std::error_code error;
+    const std::filesystem::path canonicalGdd(canonicalGddPath);
+    const std::filesystem::path canonicalBak(canonicalBakPath);
+    const bool canonicalGddExists = std::filesystem::exists(canonicalGdd, error);
+    if (error) {
+        return;
     }
-#ifdef _WIN32
-    out = base + "\\saves";
-    if (!CreateDirectoryA(out.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) {
-        return false;
+    const bool canonicalBakExists = std::filesystem::exists(canonicalBak, error);
+    if (error || canonicalGddExists || canonicalBakExists) {
+        return;
+    }
+
+    const std::filesystem::path currentDirectory = std::filesystem::current_path(error);
+    if (error) {
+        return;
+    }
+    const std::filesystem::path legacyDirectory = currentDirectory / "saves";
+    const std::filesystem::path absoluteLegacyDirectory = std::filesystem::absolute(legacyDirectory, error);
+    if (error) {
+        return;
+    }
+    const std::filesystem::path absoluteCanonicalDirectory =
+        std::filesystem::absolute(canonicalGdd.parent_path(), error);
+    if (error || absoluteLegacyDirectory.lexically_normal() == absoluteCanonicalDirectory.lexically_normal()) {
+        return;
+    }
+
+    const std::filesystem::path legacyGdd = legacyDirectory / canonicalGdd.filename();
+    const std::filesystem::path legacyBak = legacyGdd.string() + ".bak";
+
+    if (std::filesystem::is_regular_file(legacyGdd, error) &&
+        std::filesystem::copy_file(legacyGdd, canonicalGdd, std::filesystem::copy_options::none, error)) {
+        gdx_port_logf("[disk-save] migrated legacy sidecar %s to %s\n", legacyGdd.string().c_str(),
+                      canonicalGdd.string().c_str());
+    }
+    error.clear();
+    if (std::filesystem::is_regular_file(legacyBak, error) &&
+        std::filesystem::copy_file(legacyBak, canonicalBak, std::filesystem::copy_options::none, error)) {
+        gdx_port_logf("[disk-save] migrated legacy backup %s to %s\n", legacyBak.string().c_str(),
+                      canonicalBak.string().c_str());
     }
 #else
-    out = base + "/saves";
-    if (mkdir(out.c_str(), 0755) != 0 && errno != EEXIST) {
-        return false;
-    }
+    (void) canonicalGddPath;
+    (void) canonicalBakPath;
 #endif
-    return true;
 }
 
 std::string baseName(const char* name) {
@@ -378,6 +402,7 @@ void gdx_disk_save_init(const char* diskName, const unsigned char* pristine, uns
     g_gddPath = dir + sep + leaf + ".gdd";
     g_bakPath = g_gddPath + ".bak";
     g_tmpPath = g_gddPath + ".tmp";
+    migrateLegacySidecars(g_gddPath, g_bakPath);
     g_active = true;
 
     /* Primary sidecar, else the rolled backup, else pristine-only. A sidecar whose
@@ -404,13 +429,6 @@ void gdx_disk_save_init(const char* diskName, const unsigned char* pristine, uns
     g_ranges.clear();
     if (primary == LoadStatus::Missing && backup == LoadStatus::Missing) {
         gdx_port_logf("[disk-save] no disk save found, pristine (sidecar: %s)\n", g_gddPath.c_str());
-        /* Fresh install: no sidecar exists at all, so there is nothing to protect. Arm the
-         * one-shot DD-format gate for THIS boot so the MFS RAM area initializes without a
-         * manual Workshop opt-in or a restart. Transient runtime state only -- do NOT
-         * CVarSave() it; gdx_disk_allow_format() consumes and clears it when the format
-         * runs. Deliberately NOT armed in the rejected-sidecar branch below: an existing
-         * but unreadable save must never be auto-formatted. */
-        CVarSetInteger("gEnhancements.Workshop.AllowDDFormatOnce", 1);
     } else {
         gdx_port_logf("[disk-save] backup %s unusable (%s); pristine-only\n", g_bakPath.c_str(),
                       statusText(backup == LoadStatus::Missing ? primary : backup));
@@ -536,11 +554,9 @@ int gdx_disk_allow_format(void) {
      * the flag never fires again unprompted. The format lands in the in-memory image and,
      * through the dirty-range journal, in the sidecar -- never in the user's .ndd.
      *
-     * TERMINAL-ONLY CONSUMPTION: call this only from genuinely terminal not-initialized
-     * sites -- func_i1_80404830's second-pass failure (mfs_ram.c) and func_80706518's
-     * media-init recovery (sys_leo_dd.c). The transient wiped-cache first pass inside
-     * Mfs_ValidateRamVolume must not reach it, or the armed one-shot is consumed
-     * spuriously and formats from a stale/empty cache. */
+     * CONSUME ONLY AFTER MFS PROVES THE SAVE AREA UNUSABLE: terminal invalid-volume paths
+     * and the Course Edit working-directory lookup may use this authorization. Transient
+     * validation passes must not consume it, or the one-shot could format from a stale cache. */
     if (CVarGetInteger("gEnhancements.Workshop.AllowDDFormatOnce", 0) != 0) {
         CVarSetInteger("gEnhancements.Workshop.AllowDDFormatOnce", 0);
         CVarSave();
