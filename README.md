@@ -8,6 +8,7 @@
 [![Renderer](https://img.shields.io/badge/renderer-D3D11%20%7C%20OpenGL-8A2BE2)](#platforms)
 [![Built on](https://img.shields.io/badge/built%20on-libultraship-informational)](https://github.com/Kenix3/libultraship)
 [![Decomp](https://img.shields.io/badge/decomp-inspectredc%2Ffzerox-brightgreen)](https://github.com/inspectredc/fzerox)
+![Discord](https://img.shields.io/badge/Discord-https%3A%2F%2Fdiscord.gg%2FgpaM8qK9NK-informational?style=flat)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 </div>
