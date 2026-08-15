@@ -7,6 +7,7 @@ endif()
 
 set(DECOMP "${CMAKE_CURRENT_SOURCE_DIR}/../decomp")
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
+set(GDX_DISPLAY_VERSION "1.0.2-rc2" CACHE STRING "Version shown in the About menu")
 
 # Warning flags for the port's own targets under GCC/Clang; the decomp library and vendored cxd4
 # stay -w (not ours to fix). No -Werror: a Linux first-configure should surface warnings, not fail.
@@ -142,6 +143,18 @@ add_library(gdiffuser_game OBJECT ${GAME_SOURCES}
     "${CMAKE_CURRENT_SOURCE_DIR}/gen/LinkStubs.c")         # placeholder defs so bring-up links
 
 if(GDX_EXPANSION_KIT)
+    # The decomp directly includes generated zero-filled storage definitions. Keep generation in
+    # the build graph so a clean or partially cleaned tree cannot compile before they exist. The
+    # compile-only mode is load-bearing: the full generator rewrites curated runtime binding sizes.
+    add_custom_target(gdiffuser_ek_compile_assets
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/../tools/gen_ek_assets.py"
+                --compile-assets-only
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.."
+        COMMENT "Generating Expansion Kit compile assets"
+        VERBATIM)
+    add_dependencies(gdiffuser_game gdiffuser_ek_compile_assets)
+
     target_sources(gdiffuser_game PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/n64_leo.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gen/EkAssetBindings.c"
@@ -296,7 +309,10 @@ if(GDX_EXPANSION_KIT)
     target_compile_definitions(G-Diffuser PRIVATE EXPANSION_KIT=1)
 endif()
 
-target_compile_definitions(G-Diffuser PRIVATE ${GDX_DEV_TOOLS_DEFS} ${GDX_JP_INPUT_DEFS})
+target_compile_definitions(G-Diffuser PRIVATE
+    ${GDX_DEV_TOOLS_DEFS}
+    ${GDX_JP_INPUT_DEFS}
+    GDX_VERSION_STRING="${GDX_DISPLAY_VERSION}")
 
 if(WIN32)
     set_target_properties(G-Diffuser PROPERTIES WIN32_EXECUTABLE TRUE)
@@ -626,6 +642,7 @@ if(GDX_BUILD_JP)
         "${CMAKE_CURRENT_SOURCE_DIR}/gen/LinkStubs.jp.c")
 
     if(GDX_EXPANSION_KIT)
+        add_dependencies(gdiffuser_game_jp gdiffuser_ek_compile_assets)
         target_sources(gdiffuser_game_jp PRIVATE
             "${CMAKE_CURRENT_SOURCE_DIR}/n64_leo.c"
             "${CMAKE_CURRENT_SOURCE_DIR}/gen/EkAssetBindings.c"   # US-EK bindings reused; jp/ek TODO
@@ -724,6 +741,7 @@ if(GDX_BUILD_JP)
         ${GDX_DEV_TOOLS_DEFS}
         PORT=1 GDIFFUSER_PORT=1 F3DEX_GBI_2=1 _LANGUAGE_C=1 VERSION_JP=1
         GDX_ALLOW_JP_INPUTS=1
+        GDX_VERSION_STRING="${GDX_DISPLAY_VERSION}"
         ASSET_VERSION=jp ASSET_REVISION=rev0)
 
     if(GDX_EXPANSION_KIT)

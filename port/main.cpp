@@ -85,6 +85,53 @@ static void logStep(const char* s) {
     gdx_port_logf("[G-Diffuser] %s\n", s);
 }
 
+static void loadControllerDatabase() {
+    const std::string databasePath = Ship::Context::LocateFileAcrossAppDirs("gamecontrollerdb.txt");
+    std::error_code error;
+
+    if (!std::filesystem::is_regular_file(databasePath, error)) {
+        if (error) {
+            gdx_port_logf("[input] controller database unavailable: %s (%d: %s)\n", databasePath.c_str(),
+                          error.value(), error.message().c_str());
+        } else {
+            gdx_port_logf("[input] controller database missing: %s\n", databasePath.c_str());
+        }
+        return;
+    }
+
+    const int mappingsAdded = SDL_GameControllerAddMappingsFromFile(databasePath.c_str());
+    if (mappingsAdded < 0) {
+        gdx_port_logf("[input] controller database load FAILED: %s (%s)\n", databasePath.c_str(), SDL_GetError());
+        return;
+    }
+
+    gdx_port_logf("[input] controller database loaded: %s (%d mapping(s))\n", databasePath.c_str(), mappingsAdded);
+}
+
+static void logConnectedJoysticks() {
+    const int joystickCount = SDL_NumJoysticks();
+    if (joystickCount < 0) {
+        gdx_port_logf("[input] SDL_NumJoysticks FAILED: %s\n", SDL_GetError());
+        return;
+    }
+
+    for (int index = 0; index < joystickCount; ++index) {
+        const SDL_JoystickGUID guid = SDL_JoystickGetDeviceGUID(index);
+        char guidString[33] = {};
+        SDL_JoystickGetGUIDString(guid, guidString, sizeof(guidString));
+
+        const char* name = SDL_JoystickNameForIndex(index);
+        gdx_port_logf(
+            "[input] joystick %d: name=\"%s\" guid=%s vendor=0x%04X product=0x%04X version=0x%04X "
+            "gamecontroller=%s\n",
+            index, name != nullptr ? name : "<unknown>", guidString,
+            static_cast<unsigned int>(SDL_JoystickGetDeviceVendor(index)),
+            static_cast<unsigned int>(SDL_JoystickGetDeviceProduct(index)),
+            static_cast<unsigned int>(SDL_JoystickGetDeviceProductVersion(index)),
+            SDL_IsGameController(index) == SDL_TRUE ? "yes" : "no");
+    }
+}
+
 // ── Dev Tools gate layer <-> console-variable adapters ────────────────────────────────────────
 // port/gdx_dev_gates.c is deliberately dependency-free C (the standalone unit-test executables
 // compile it unchanged), so it receives the CVar entry points as function pointers. These thunks
@@ -684,15 +731,16 @@ int main(int argc, char** argv) {
     // level follows GDX_LOG only; the port's run-log sink opens lazily and honours the CVar.
     gdx_dev_gates_boot_seed(&GdxGateCVarGet);
 
-    // Init order is ControlDeck -> ResourceManager -> Window, and SDL's game-controller subsystem
-    // must come up before the ControlDeck, whose ctor scans for pads: the DX11 backend never calls
-    // SDL_Init(SDL_INIT_VIDEO) and audio only inits AUDIO, so without this SDL_NumJoysticks() is 0
-    // and no controller is ever detected.
+    // SDL classifies already-connected joysticks while initializing this subsystem, so external
+    // mappings must be available before the first init rather than waiting for the later N64 SI
+    // osContInit path.
+    loadControllerDatabase();
     if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) {
         gdx_port_logf("[input] SDL_InitSubSystem(GAMECONTROLLER) FAILED: %s\n", SDL_GetError());
     } else {
         gdx_port_logf("[input] SDL gamecontroller subsystem up; %d joystick(s) present at boot\n",
                       SDL_NumJoysticks());
+        logConnectedJoysticks();
     }
     logStep("construct ControlDeck"); auto controlDeck = std::make_shared<LUS::ControlDeck>();
     logStep("InitControlDeck");       ctx->InitControlDeck(controlDeck);

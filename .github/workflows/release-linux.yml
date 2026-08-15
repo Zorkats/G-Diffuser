@@ -120,21 +120,6 @@ jobs:
           cmake --build build-libzip --target install
           ldconfig
 
-      - name: Generate Expansion Kit asset stubs
-        # decomp sources #include zero-filled payload definitions under decomp/src/assets which
-        # are generated rather than tracked; the runtime fills them from the archive, so no ROM
-        # is involved.
-        #
-        # The restore is load-bearing, not tidiness. The same generator rewrites port/gen/, and
-        # those files are tentative definitions of the same symbols the payloads define, merged
-        # by -fcommon at the larger size. EkAssetBindings.c carries a hand-edited size that wins
-        # that merge and fixes the machine-name texture overflow; regenerating over it drops the
-        # size back and ships the corruption, with the build still green. Restoring port/gen from
-        # the commit reproduces exactly the tree v1.0.0 was built and played through on.
-        run: |
-          python3 tools/gen_ek_assets.py
-          git checkout -- port/gen
-
       - name: Build
         run: |
           cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release

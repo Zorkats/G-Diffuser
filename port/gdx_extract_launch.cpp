@@ -1108,6 +1108,9 @@ bool runExtractorPosix(const fs::path& exe, const std::vector<std::string>& args
         close(pipefd[1]);
         if (!workDir.empty()) {
             if (chdir(workDir.string().c_str()) != 0) {
+                const int launchError = errno;
+                dprintf(STDERR_FILENO, "[launcher] chdir(\"%s\") failed: %s (errno=%d)\n",
+                        workDir.string().c_str(), std::strerror(launchError), launchError);
                 _exit(127);
             }
         }
@@ -1119,7 +1122,10 @@ bool runExtractorPosix(const fs::path& exe, const std::vector<std::string>& args
         }
         argv.push_back(nullptr);
         execv(exeStr.c_str(), argv.data());
-        _exit(127); // exec failed
+        const int launchError = errno;
+        dprintf(STDERR_FILENO, "[launcher] execv(\"%s\") failed: %s (errno=%d)\n", exeStr.c_str(),
+                std::strerror(launchError), launchError);
+        _exit(127);
     }
     // Parent: stream the child's stdout to the log (the Linux progress UX is log-only). The read is
     // bounded by a hard deadline via select(), so a child that stops producing output and never exits

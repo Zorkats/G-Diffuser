@@ -2044,9 +2044,11 @@ void GdxMenu::DrawDevGates() {
     ImGui::BulletText("GDX_INTERP_P1 / GDX_INTERP_P2 - interpolation test overrides (see Graphics)");
 }
 
-// The port's release version, single source of truth for user-facing surfaces. Bumped by hand at
-// release points: a version a human did not choose is a build id, not a version.
-static constexpr const char* kGdxVersionString = "1.0.0";
+// CMake supplies the release label; the fallback keeps standalone source builds identifiable.
+#ifndef GDX_VERSION_STRING
+#define GDX_VERSION_STRING "development"
+#endif
+static constexpr const char* kGdxVersionString = GDX_VERSION_STRING;
 
 void GdxMenu::DrawAboutMenu() {
     // Lazy one-shot load on first open rather than at boot: the About page is visited rarely, and a

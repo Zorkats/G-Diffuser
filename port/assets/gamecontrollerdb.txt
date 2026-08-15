@@ -2,6 +2,8 @@
 # Source: https://github.com/mdqinc/SDL_GameControllerDB
 
 # Windows
+# G-Diffuser user-verified additions
+0300b917d620000019a7000000000000,NSW Wired Controller,platform:Windows,crc:17b9,a:b2,b:b1,x:b3,y:b0,back:b8,guide:b13,start:b9,leftstick:b10,rightstick:b11,leftshoulder:b4,rightshoulder:b5,dpup:h0.1,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,misc1:b12,leftx:a0,lefty:a1,rightx:a2,righty:a3,lefttrigger:b6,righttrigger:b7,
 03000000300f00000a01000000000000,3 In 1 Conversion Box,a:b2,b:b1,back:b9,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,leftshoulder:b6,leftstick:b10,lefttrigger:b4,leftx:a0,lefty:a1,rightshoulder:b7,rightstick:b11,righttrigger:b5,rightx:a3,righty:a2,start:b8,x:b3,y:b0,platform:Windows,
 03000000fa190000918d000000000000,3 In 1 Conversion Box,a:b2,b:b1,back:b9,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,leftshoulder:b6,leftstick:b10,lefttrigger:b4,leftx:a0,lefty:a1,rightshoulder:b7,rightstick:b11,righttrigger:b5,rightx:a3,righty:a2,start:b8,x:b3,y:b0,platform:Windows,
 03000000fa2d00000100000000000000,3dRudder Foot Motion Controller,leftx:a0,lefty:a1,rightx:a5,righty:a2,platform:Windows,

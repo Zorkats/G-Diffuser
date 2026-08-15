@@ -56,20 +56,6 @@ jobs:
           key: vcpkg-windows-2022-${{ hashFiles('libultraship/cmake/dependencies/windows-vcpkg.cmake') }}
           restore-keys: vcpkg-windows-2022-
 
-      - name: Generate Expansion Kit asset stubs
-        # decomp sources #include zero-filled payload definitions under decomp/src/assets which
-        # are generated rather than tracked; the runtime fills them from the archive, so no ROM
-        # is involved.
-        #
-        # The restore is load-bearing, not tidiness. The same generator rewrites port/gen/, and
-        # those files are tentative definitions of the same symbols the payloads define, merged
-        # by the linker at the larger size. EkAssetBindings.c carries a hand-edited size that
-        # wins that merge and fixes the machine-name texture overflow; regenerating over it drops
-        # the size back and ships the corruption, with the build still green.
-        run: |
-          python tools/gen_ek_assets.py
-          git checkout -- port/gen
-
       - name: Build
         # USE_AUTO_VCPKG lets libultraship bootstrap vcpkg into the build tree. --config Release
         # is required: the Visual Studio generator is multi-config and ignores CMAKE_BUILD_TYPE.
