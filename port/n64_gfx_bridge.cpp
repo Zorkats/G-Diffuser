@@ -47,6 +47,8 @@ extern "C" {
 
 extern "C" int gGdxRaceActive;
 extern "C" int gGameMode;
+extern "C" void gdx_ck(const char* s);
+extern "C" void gdx_cki(const char* s, int v);
 
 // ---------------------------------------------------------------------------------------------
 // Segment-reload seqlock (mode-transition TOCTOU guard).
@@ -224,10 +226,12 @@ extern "C" int gdx_mode_owns_segment(unsigned int seg);
 // sharing the same segment number -- is not served the wrong carve's bytes.
 extern "C" int gdx_mode_segment_content_matches(unsigned int seg, unsigned int rom_base);
 extern "C" const char* GDiffuser_LookupLoadedAssetKey(const void* buffer, size_t minSize, int requireUnmodified);
+extern "C" const char* GDiffuser_LookupLoadedAssetKeyAndSize(const void* buffer, size_t* outSize);
 extern "C" const char* gdx_lookup_asset_segment_o2r_key(unsigned int sym_low32);
 // Workshop texture packs (port/gdx_workshop.cpp).
 extern "C" int gdx_workshop_texture_packs_enabled(void);
 extern "C" const char* GdxWorkshopLookupOverridePath(const char* key);
+extern "C" const char* GdxWorkshopLookupOverridePathMinSize(const char* key, size_t minBytes);
 
 namespace {
 
@@ -325,6 +329,7 @@ constexpr uint8_t kOpSetColorImage = 0xFF;
 constexpr uint8_t kOpSetDepthImage = 0xFE;
 constexpr uint8_t kOpSetTextureImage = 0xFD;
 constexpr uint8_t kOpSetTextureImageOtrFilepath = 0x25;
+constexpr uint8_t kOpDlOtrFilepath = 0x27;
 
 constexpr uint8_t kMovewordSegmentIndex = 0x06;
 constexpr size_t kDisplayListValidationCommandLimit = 1 << 16;
@@ -2355,9 +2360,6 @@ static bool sGdxIdemTickCounted = false;
 /* [interp-shot] >=0 while a sub-frame render should be captured; the pass index becomes the file
    suffix. Set by the sub-frame loop, consumed by gdx_gfx_post_run_capture below. */
 int gGdxShotArmedPass = -1;
-/* [interp-idem] Interpreter RDP state as it stood before this tick's FIRST replay. Restored before
-   every later replay so all M sub-frames start from identical state. See the sub-frame loop. */
-static Fast::RDP sGdxRdpSnapshot{};
 size_t gGdxIdemDivergentTicks = 0;
 size_t gGdxIdemMultiPassTicks = 0;
 
@@ -3366,8 +3368,15 @@ class N64DisplayListAdapter {
                     snap = true; // sibling not readable -> snap to cur
                     ++mP1SnappedAbsent;
                 } else if (isProj ? GdxCameraPoseTeleport(offset)
-                                 : gdx_interp::TranslationTeleport(reinterpret_cast<const void*>(prevPtr),
-                                                                   reinterpret_cast<const void*>(origPtr))) {
+                                  : (gdx_interp::TranslationTeleport(reinterpret_cast<const void*>(prevPtr),
+                                                                     reinterpret_cast<const void*>(origPtr)) ||
+                                     // Perfection-plan Slice 3: two objects closer than the
+                                     // teleport threshold can still be a silent mispairing --
+                                     // unrelated orientations give it away. Default-off until
+                                     // owner-validated in a race (gdx_interp.h RotationSnapActive).
+                                     (gdx_interp::RotationSnapActive() &&
+                                      gdx_interp::RotationTeleport(reinterpret_cast<const void*>(prevPtr),
+                                                                   reinterpret_cast<const void*>(origPtr))))) {
                     snap = true; // teleport/cut heuristic (belt-and-suspenders)
                     ++mP1SnappedTeleport;
                 } else {
@@ -3575,6 +3584,7 @@ class N64DisplayListAdapter {
             ((origPtr - base) % sizeof(GdxVpSlot)) != 0) {
             return origPtr;
         }
+
         const size_t flat = (origPtr - base) / sizeof(GdxVpSlot); // 0..11
         const size_t slot = flat % 6;
         const size_t parity = flat / 6;
@@ -4384,7 +4394,7 @@ class N64DisplayListAdapter {
 
                 const uint32_t baseLow = static_cast<uint32_t>(base);
                 const uint32_t offset = raw - baseLow;
-                if (offset < kSegmentOffsetLimit) {
+                if (offset < kSegmentOffsetLimit && candidateCount < kGfxSegmentCount) {
                     candidates[candidateCount++] = SegCandidate{ segment, offset, base + offset };
                 }
             }
@@ -5690,18 +5700,52 @@ class N64DisplayListAdapter {
                            the o2rKey emit. Existence is cached per key per pack epoch; with the
                            CVar off no lookup runs at all. */
                         const char* packPath = nullptr;
+                        bool packViaRdram = false;
                         /* Same multi-tile exclusion as the o2rKey emit above: an RDRAM-backed
                            buffer is a contiguous atlas sampled at many ULS offsets and a
                            single-OTEX override covers only the first band, which garbles every
                            later one (title-screen text corruption with a font pack active). Atlas
-                           replacement needs per-tile keying; until then these keep the raw-copy
-                           path. */
-                        if (!o2rKey && resolutionUsable && !IsRdramHostPointer(translated) &&
-                            gdx_workshop_texture_packs_enabled()) {
-                            const char* assetKey = GDiffuser_LookupLoadedAssetKey(
-                                reinterpret_cast<const void*>(translated), 0, 0);
-                            if (assetKey != nullptr) {
-                                packPath = GdxWorkshopLookupOverridePath(assetKey);
+                           replacement is per-tile keyed ("atlas/<baseKey>/o<byteOffset>/<FMT>/<W>x<H>")
+                           and happens interpreter-side at the LoadBlock/LoadTile loaded.addr
+                           assignment sites (devdocs/MODDING_ATLAS_DESIGN.md, mechanism corrected by
+                           devdocs/POST_1_0_SCOPING.md) -- the bridge deliberately does NO opcode
+                           rewrite for atlases; these buffers keep the raw-copy path so TMEM stays
+                           populated for bands no pack overrides.
+
+                           Exception (issue #27): RDRAM-backed WHOLE-image buffers (portraits,
+                           title art) are registered by the common-asset fast path with their full
+                           size, and were unreachable here -- packs could never override them. The
+                           override is served only when the pack payload covers the whole
+                           registered buffer; a band-sized payload is single-glyph atlas business
+                           and keeps the raw-copy path. */
+                        if (!o2rKey && resolutionUsable && gdx_workshop_texture_packs_enabled()) {
+                            if (!IsRdramHostPointer(translated)) {
+                                const char* assetKey = GDiffuser_LookupLoadedAssetKey(
+                                    reinterpret_cast<const void*>(translated), 0, 0);
+                                if (assetKey != nullptr) {
+                                    packPath = GdxWorkshopLookupOverridePath(assetKey);
+                                }
+                            } else if (!IsVenueBuildingTextureRange(translated)) {
+                                size_t bufSize = 0;
+                                const char* assetKey = GDiffuser_LookupLoadedAssetKeyAndSize(
+                                    reinterpret_cast<const void*>(translated), &bufSize);
+                                if (assetKey != nullptr && bufSize != 0) {
+                                    packPath = GdxWorkshopLookupOverridePathMinSize(assetKey, bufSize);
+                                    packViaRdram = (packPath != nullptr);
+                                }
+                                /* [pack] diagnostic, strip later: issue #27 decision trace. A whole-image
+                                   RDRAM buffer with a registered key is the portrait/title-art path; we
+                                   need to see hit/miss/rejection at runtime. */
+                                if (assetKey != nullptr) {
+                                    static int sPackRdramSettimgLogs = 0;
+                                    if (sPackRdramSettimgLogs < 8) {
+                                        sPackRdramSettimgLogs++;
+                                        gdx_port_logf("[pack] SETTIMG rdram src=%p key=%s bufSize=%zu "
+                                                      "override=%s\n",
+                                                      reinterpret_cast<void*>(translated), assetKey,
+                                                      bufSize, packPath ? packPath : "(none)");
+                                    }
+                                }
                             }
                         }
                         if (o2rKey) {
@@ -5709,7 +5753,7 @@ class N64DisplayListAdapter {
                             outW0 = (outW0 & 0x00FFFFFFu) | (static_cast<uintptr_t>(kOpSetTextureImageOtrFilepath) << 24);
                             outW1 = reinterpret_cast<uintptr_t>(o2rKey);
                         } else if (packPath) {
-                            texCensusPath = "pack-o2r";
+                            texCensusPath = packViaRdram ? "pack-o2r-rdram" : "pack-o2r";
                             outW0 = (outW0 & 0x00FFFFFFu) |
                                     (static_cast<uintptr_t>(kOpSetTextureImageOtrFilepath) << 24);
                             outW1 = reinterpret_cast<uintptr_t>(packPath);
@@ -6129,6 +6173,15 @@ class N64DisplayListAdapter {
 
                 case kOpDl:
                     outW1 = ResolveDisplayListGuarded(in.w1, item.source, i, w1IsHostPointer, w1full);
+                    break;
+
+                case kOpDlOtrFilepath:
+                    /* Module-built trampolines (gdx_model_packs) carry the pack key as a real
+                       host string pointer; forward it verbatim for the interpreter's filepath
+                       handler. The OTR-filepath readability guard below validates outW1. */
+                    if (w1IsHostPointer) {
+                        outW1 = w1full;
+                    }
                     break;
 
                 case kOpMoveword:
@@ -6963,8 +7016,21 @@ static void SeedFramebufferQuad(Fast::Interpreter* interp, const uint16_t* srcPi
     // Copy cycle: GfxDpTextureRectangle auto-applies a TEXEL0 passthrough combine and
     // point filtering (dsdx=0x0400 = 1 texel/pixel, so 320 texels -> 320px).
     interp->GfxSpSetOtherMode(G_MDSFT_CYCLETYPE + 32, 2, static_cast<uint64_t>(G_CYC_COPY) << 32);
+
+    // The CPU framebuffer is top-down, which D3D11 samples correctly. OpenGL samples the same
+    // upload bottom-up, so the logo would appear upside-down on the GL path that bypasses the
+    // post-pass V flip. Start from the top texel (S10.5) and sample downward on OpenGL only.
+    int16_t texT = 0;
+    int16_t dtdy = 0x0400;
+    if (Fast::GfxRenderingAPI* rapi = interp->GetCurrentRenderingAPI()) {
+        if (std::strcmp(rapi->GetName(), "OpenGL") == 0) {
+            texT = static_cast<int16_t>((kFbH - 1) << 5);
+            dtdy = -0x0400;
+        }
+    }
+
     interp->GfxDpTextureRectangle(0, 0, (kFbW - 1) << G_TEXTURE_IMAGE_FRAC, (kFbH - 1) << G_TEXTURE_IMAGE_FRAC,
-                                  kTile, 0, 0, 0x0400, 0x0400, false);
+                                  kTile, 0, texT, 0x0400, dtdy, false);
     interp->Flush();
 }
 
@@ -9075,26 +9141,24 @@ extern "C" void gdx_gfx_run(void* dl, size_t dl_size, GdxTaskUcode taskUcode) {
             // The idea was sound -- every sub-frame should be a pure function of (command buffer,
             // matrices) -- but this is the wrong seam to enforce it at, and it was shipped on a
             // hypothesis that had never been measured. It made things worse for three builds.
-#if 0
-            if (interp != nullptr && interp->mRdp != nullptr) {
-                if (k == 0) {
-                    sGdxRdpSnapshot = *interp->mRdp;
-                } else {
-                    *interp->mRdp = sGdxRdpSnapshot;
-                }
+            // [interp-idem] Reset interpreter state that survives Run() so each replay starts from
+            // the same deterministic baseline. The prior full *mRdp snapshot/restore was reverted:
+            // rewinding loaded_texture live resource handles while the GPU cache moved forward made
+            // later passes bind textures that no longer existed. Starting from a clean default RDP
+            // state avoids stale handles and keeps the emulated TMEM/generation pair in sync with
+            // the content-keyed GPU cache. SpReset() already resets most RSP state but leaves
+            // geometry_mode untouched, so pass 1 was inheriting pass 0's cull/lighting flags.
+            // Perfection-plan Slice 1: the reset now lives in Interpreter::ResetRdpForReplay() and
+            // covers tile descriptors, rasterizer modes, colors, chroma key, viewport/scissor, and
+            // the renderer-side tracked bindings on top of the original TMEM family.
+            if (interp != nullptr && k > 0) {
+                interp->ResetRdpForReplay();
+                gdx_cki("[interp-idem] replay reset tick", (int)gGdxIdemMultiPassTicks);
+                gdx_cki("[interp-idem] replay reset pass", k);
             }
-#endif
             // Is replaying one tick's display list IDEMPOTENT? Kept after the fix as a regression
             // guard: idem_div must stay at 0 now. Any future change that reintroduces cross-replay
             // state will show up here instead of as a bug report about flicker.
-            // flicker appears the instant M > 1 and is clean at M == 1, and phase timing is ruled
-            // out (a true 120 Hz panel gives M == 2 exactly, every phase on screen for 16.67ms --
-            // identical to interpolation off -- and it still strobes). Geometry cannot differ
-            // between replays: the track carries no matrix of its own and the camera is not
-            // rerouted in a Release build. So if the picture differs, the difference is STATE.
-            // mRdp->loaded_texture survives Run(), and StoreLoadedTexture is path-dependent
-            // (interpreter.cpp:4421 erases overlapping entries), so replay 2 begins from replay 1's
-            // end-state. Hash what each replay actually binds and compare against pass 0.
             // [interp-shot] Arm the capture for THIS pass. gdx_gfx_post_run_capture (below) runs
             // inside DrawAndRunGraphicsCommands right after Interpreter::Run, which is the only
             // point where the sub-frame's image exists and nothing has presented yet.
@@ -9141,6 +9205,30 @@ extern "C" void gdx_gfx_run(void* dl, size_t dl_size, GdxTaskUcode taskUcode) {
             const bool delivered = fw->DrawAndRunGraphicsCommands(reinterpret_cast<Gfx*>(converted), {});
             gdx_perf_sub_end(GDX_PERF_SUB_RUN);
             const uint64_t gdxCmdOut = gdxGeoDiag ? adapter.GdxP0HashCommands() : 0ull;
+
+            // Perfection-plan Slice 2: the idempotence divergence counter. sGdxIdemPass0Hash was
+            // declared but never compared; the hash itself accumulates in the interpreter on every
+            // texture bind (gdx_gfx_texbind_hash_reset above clears it per pass). Pass 0 stores the
+            // baseline, every later pass compares: a mismatch means the replay bound different
+            // textures for identical content -- the exact signature of the #28 floor flicker.
+            // Under GDX_INTERP_FORCE_T1=1 with the hermetic reset this must stay at 0.
+            {
+                const unsigned long long texbindHash = gdx_gfx_texbind_hash();
+                if (k == 0) {
+                    sGdxIdemPass0Hash = texbindHash;
+                    sGdxIdemTickCounted = false;
+                } else if (!sGdxIdemTickCounted && texbindHash != sGdxIdemPass0Hash) {
+                    sGdxIdemTickCounted = true;
+                    ++gGdxIdemDivergentTicks;
+                    static size_t sDivergenceLogCount = 0;
+                    if (sDivergenceLogCount < 32) {
+                        ++sDivergenceLogCount;
+                        gdx_port_logf("[interp-idem] DIVERGENT tick=%lu pass=%d/%d hash0=%016llX hashK=%016llX\n",
+                                      (unsigned long) gGdxIdemMultiPassTicks, k, passes,
+                                      (unsigned long long) sGdxIdemPass0Hash, (unsigned long long) texbindHash);
+                    }
+                }
+            }
 
             // [interp-geo] Per-pass geometry census on the dump tick. Owner-confirmed symptom: on
             // replay passes the FLOOR AND CLOUDS ARE NOT DRAWN AT ALL -- not shaded differently,

@@ -63,8 +63,10 @@ extern "C" const char* SDL_GetCurrentAudioDriver(void);
 
 #include "gdx_console_log.h" // Console page: drains the queued port-log lines into the LUS console
 #include "gdx_ghost_io.h" // .gdg ghost import/export C API (Practice tab Export / Import buttons)
+#include "gdx_xcup_seed.h" // M3 X Cup seed codes (Gameplay tab custom block)
 #include "gdx_gui.h"
 #include "gdx_workshop.h"    // Workshop tab: texture-pack listing, override count, reload, dump dir
+#include "gdx_lua.h"         // Workshop tab: Lua script pack status list (DrawScripts)
 #include "gdx_dump_launch.h" // Workshop tab "Asset Dump" section: per-class offline dump launcher
 #include "disk_savefile.h"   // Workshop tab "DD Save" subsection: sidecar status + one-shot format
 #include "rom_buffer.h"      // Data & Files: gdx_rom_buffer/gdx_rom_path (live ROM residency signal)
@@ -483,6 +485,9 @@ GdxMenu::GdxMenu() : Ship::GuiWindow("gOpenMenuBar", false, "G-Diffuser Menu") {
     // grid rather than to screen edges, leaving a few mid-column elements (interval, reverse, the
     // 3P spare minimap) on the stock centred path — a layout judgment call worth its own opt-out.
     CVarRegisterInteger("gEnhancements.Graphics.WidescreenSplitUI", 1);
+    // On (default), a Course Edit TEST DRIVE renders widescreen like a normal race; off keeps the
+    // editor's 4:3 pin for the whole run (stock). port/input_bridge.c gdx_test_drive_active().
+    CVarRegisterInteger("gEnhancements.Graphics.WidescreenTestDrive", 1);
     // UltrawideMode off is bit-exact 16:9 (every consumer collapses to an IEEE-exact 1.0 factor).
     // On, the game-side CPU culls (track chunks, racers, fireworks, stars) widen to the true frame
     // so content stops popping at the edges of 21:9/32:9 windows; 3D hor+ needs no switch because
@@ -493,7 +498,16 @@ GdxMenu::GdxMenu() : Ship::GuiWindow("gOpenMenuBar", false, "G-Diffuser Menu") {
     CVarRegisterInteger("gEnhancements.Graphics.UltrawideMode", 0);
     CVarRegisterFloat("gEnhancements.Graphics.HudMaxAspect", 0.0f);
     CVarRegisterInteger("gEnhancements.Graphics.HideRaceCurtain", 0);
+    CVarRegisterInteger("gEnhancements.Graphics.CourseSelectClipOffscreen", 1);
     CVarRegisterInteger("gEnhancements.Graphics.RemoveBorders", 0);
+    // CRTShader is read live per frame by the interpreter's StartFrame latch and forces the
+    // offscreen render path when on, so a plain write takes effect on the next frame.
+    CVarRegisterInteger("gEnhancements.Graphics.CRTShader", 0);
+    CVarRegisterString("gEnhancements.Graphics.CustomShader", "");
+    // PostPipeline holds the filename of an active .slangp preset in <exe>/shaders/pipelines/.
+    // When non-empty it takes precedence over CRTShader/CustomShader; the latch parses/reloads
+    // the preset each frame so edits on disk are picked up live.
+    CVarRegisterString("gEnhancements.Graphics.PostPipeline", "");
     CVarRegisterInteger("gEnhancements.Graphics.DrawDistance", 100);
     CVarRegisterInteger("gEnhancements.Graphics.ForceMaxMachineLOD", 0);
     // FramePacing and FrameInterpolation are mutually exclusive pacing owners, both read live.
@@ -521,6 +535,11 @@ GdxMenu::GdxMenu() : Ship::GuiWindow("gOpenMenuBar", false, "G-Diffuser Menu") {
     // shipped fix.
     CVarRegisterInteger("gEnhancements.Graphics.InterpRigidBasis", 0);
     CVarRegisterInteger("gEnhancements.Graphics.InterpBasisJump", 0);
+    // InterpRotSnap snaps a paired slot whose basis rotation moved more than ~60 deg in one tick.
+    // It is the Slice-3 mispairing guard for objects closer together than the 300-unit teleport
+    // threshold (adjacent track chunks); default 0 pending owner A/B, pinned on by
+    // GDX_INTERP_ROT_SNAP for testing.
+    CVarRegisterInteger("gEnhancements.Graphics.InterpRotSnap", 0);
 
     // Discord Rich Presence (port/gdx_discord.cpp) is a privacy feature: OFF by default, and while
     // off nothing is initialized — no thread, no socket. The Show* toggles pick which fields the
@@ -547,6 +566,59 @@ GdxMenu::GdxMenu() : Ship::GuiWindow("gOpenMenuBar", false, "G-Diffuser Menu") {
         CVarSave();
     }
 
+    // COURSE EDIT UX. OfficialBack gates the PORT branch in func_xk2_800EB3B4 (19C470.c);
+    // TestDrive* are read by func_xk2_800DEE20 (188850.c): machine 0 follows the player's
+    // last selection, 1-30 pin a roster machine; engine is a percent fed through the stock
+    // slider transform func_8008960C.
+    CVarRegisterInteger("gEnhancements.Gameplay.CourseEditOfficialBack", 1);
+    CVarRegisterInteger("gEnhancements.Gameplay.TestDriveMachine", 0);
+    CVarRegisterInteger("gEnhancements.Gameplay.TestDriveEngine", 50);
+    // EndingVenue gates the 11th Course Edit scene option (VENUE_ENDING): the menu item count in
+    // A3AE0.c func_xk1_80028250 and the preview-loader range in segment.c func_80077AD8.
+    CVarRegisterInteger("gEnhancements.Gameplay.CourseEditEndingVenue", 1);
+    // INPUT. CourseEditMouse gates the absolute mouse drive in course_edit/188850.c via
+    // port/gdx_course_edit_mouse.cpp; MouseSteering (issue #18) maps cursor X position to stick X
+    // in input_bridge.c gdx_controller_poll, race modes only — the two are mode-disjoint.
+    CVarRegisterInteger("gEnhancements.Input.CourseEditMouse", 0);
+    CVarRegisterInteger("gEnhancements.Input.MouseSteering", 0);
+    CVarRegisterInteger("gEnhancements.Input.MouseSteeringSensitivity", 100);
+    // MouseConfineToWindow clips the OS cursor to the game window while Course Edit mouse control
+    // or race mouse steering is active, so the cursor cannot drift off the game view mid-steer.
+    CVarRegisterInteger("gEnhancements.Input.MouseConfineToWindow", 1);
+    // HideCursorInGame hides the OS cursor while gameplay renders; the cursor returns whenever
+    // the ImGui menu/menubar is open (gdx_hide_os_cursor_tick in port/gdx_course_edit_mouse.cpp).
+    CVarRegisterInteger("gEnhancements.Input.HideCursorInGame", 0);
+    CVarRegisterInteger("gEnhancements.Input.AutoAssignGamepadPorts", 1);
+    // GUID->port seat memory written by gdxSyncGamepadPortRouting (port/main.cpp); not user-facing.
+    CVarRegisterString("gEnhancements.Input.GamepadSeats", "");
+    // Community request F1: func_80089800 (racer.c) randomizes AI machineSkinIndex 0-3 in
+    // GP/Practice/Death Race, matching the variety VS mode already has. Off = stock parity.
+    CVarRegisterInteger("gEnhancements.Gameplay.RandomOpponentColors", 0);
+    // Community request F3: compact custom-grid roster string ("char:skin" per grid slot 0-29,
+    // -1/"r" = random; slot 0 is the player and never applied). Parsed by gdx_custom_grid.c and
+    // applied in func_80089800 over the default fill, bypassing the stock grid shuffle.
+    // Empty = off (stock roster build).
+    CVarRegisterString("gEnhancements.CustomGrid.Roster", "");
+    // F10: port-side playtime/achievement tracker (port/gdx_achievements.cpp). On (default) it
+    // polls gSaveContext each frame and persists unlocks + playtime to saves/achievements.txt;
+    // off disables evaluation and playtime accumulation entirely.
+    CVarRegisterInteger("gEnhancements.Achievements.Enabled", 1);
+    // Community request F9: packed 0xRRGGBB overrides for the hardcoded effect colors in
+    // racer.c; -1 keeps stock. GhostBoost keeps its stock alpha (160) either way.
+    CVarRegisterInteger("gEnhancements.Gameplay.BoostColor", -1);
+    CVarRegisterInteger("gEnhancements.Gameplay.DashPadColor", -1);
+    CVarRegisterInteger("gEnhancements.Gameplay.BoostIdleColor", -1);
+    CVarRegisterInteger("gEnhancements.Gameplay.SideAttackColor", -1);
+    CVarRegisterInteger("gEnhancements.Gameplay.GhostBoostColor", -1);
+    // Community request F5: percent scaling of the CPU combat probabilities in
+    // Cpu_GenerateInputs (ovl_i3/cpu.c); past 100 the EXPERT-only gates drop too.
+    // 100 = stock behavior.
+    CVarRegisterInteger("gEnhancements.Gameplay.AiAggression", 100);
+
+    // CONTENT (E1 .gdxc export). Default 0 = track exports strip author ghosts + records
+    // (privacy-first; POST_1_0_SCOPING section 2). Read in port/gdx_content_io.c.
+    CVarRegisterInteger("gEnhancements.Content.ExportIncludeGhosts", 0);
+
     // PRACTICE. Both are drawn under #ifdef PORT in hud.c / camera.c; photo mode saves and restores
     // eye/at/fov each frame so unpausing is 1:1.
     CVarRegisterInteger("gEnhancements.Practice.ShowLapDeltas", 0);
@@ -555,12 +627,31 @@ GdxMenu::GdxMenu() : Ship::GuiWindow("gOpenMenuBar", false, "G-Diffuser Menu") {
     // WORKSHOP. TexturePacks on lets the Tier-B shim (n64_gfx_bridge.cpp) rewrite a common-asset
     // load to a mounted pack's "textures/pack/<key>" resource.
     CVarRegisterInteger("gEnhancements.Workshop.TexturePacks", 0);
+    // SequencePacks on lets the load hooks in decomp/src/audio/{disk,rom}/lib/load.c serve a
+    // mounted pack's "audio/seq/<name>" bytes instead of DMA-ing the stock sequence.
+    CVarRegisterInteger("gEnhancements.Workshop.SequencePacks", 0);
+    // SamplePacks on lets the font-conversion hook in decomp/src/audio/disk/lib/load.c rewrite
+    // individual converted samples from a mounted pack's "audio/sample/<key>" GSMP containers.
+    CVarRegisterInteger("gEnhancements.Workshop.SamplePacks", 0);
+    // SoundfontPacks on lets the same conversion site swap a font's whole instrument graph from a
+    // mounted pack's "audio/font/<FONTNAME>" GFT1 container; GdxSoundfontPackTick services reloads.
+    CVarRegisterInteger("gEnhancements.Workshop.SoundfontPacks", 0);
+    // Scripts on runs every enabled pack's scripts/*.lua in a sandboxed per-script lua_State
+    // (port/gdx_lua.cpp); loads and reloads key off the workshop pack epoch.
+    CVarRegisterInteger("gEnhancements.Workshop.Scripts", 0);
+    // ModelPacks on lets the racer.c LOD-registration hooks repoint stock machine display
+    // lists at a mounted pack's "models/pack/machine/<name>/lod<N>" resources.
+    CVarRegisterInteger("gEnhancements.Workshop.ModelPacks", 0);
     // TextureDump is retired in favour of Asset Dump, but the runtime hook in gdx_workshop.cpp
     // still reads it — hence forced to 0 rather than merely un-registered, so a user who had it ON
     // does not keep dumping forever with no surviving checkbox to turn it off.
     CVarSetInteger("gEnhancements.Workshop.TextureDump", 0);
-    // Comma-joined mods/*.o2r basenames to skip at mount time.
+    // Comma-joined ids/basenames of mods/*.o2r packs to skip at mount time (id match first,
+    // basename fallback).
     CVarRegisterString("gEnhancements.Workshop.DisabledPacks", "");
+    // Comma-joined ids/basenames in mount-priority order; unlisted packs mount after, alphabetical
+    // by basename. The Workshop tab's up/down buttons rewrite this list.
+    CVarRegisterString("gEnhancements.Workshop.PackOrder", "");
     // One-shot: set to 1, the D6 disk-format guard consumes it at the NEXT boot to authorize a
     // single MFS format into the sidecar (never the .ndd), then clears it.
     CVarRegisterInteger("gEnhancements.Workshop.AllowDDFormatOnce", 0);
@@ -798,9 +889,12 @@ void GdxMenu::DrawHeader() {
     // while FaceLeft is held, and on slider tweak-speed only while a slider is being dragged, so a
     // bare shoulder tap in this single fullscreen window hits neither path and an edge-triggered
     // read needs no SetKeyOwner juggling. Suppressed while an item is active so this never yanks
-    // focus out of a slider or text field mid-edit.
+    // focus out of a slider or text field mid-edit, and while a popup is open so shoulders serve
+    // the modal instead of cycling tabs behind it.
     const int tabCount = static_cast<int>(mMenuOrder.size());
-    if (navActive && !ImGui::IsAnyItemActive() && tabCount > 0) {
+    if (navActive && !ImGui::IsAnyItemActive() &&
+        !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel) &&
+        tabCount > 0) {
         int dir = 0;
         if (ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false)) dir += 1;
         if (ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false)) dir -= 1;
@@ -1108,9 +1202,12 @@ void GdxMenu::DrawQuitModal() {
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(90.0f, 0.0f))) {
+        if (ImGui::Button("Cancel", ImVec2(90.0f, 0.0f)) ||
+            ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)) {
             ImGui::CloseCurrentPopup();
         }
+        // Popup nav focus otherwise lands on Quit: default-park it on the non-destructive choice.
+        ImGui::SetItemDefaultFocus();
         ImGui::EndPopup();
     }
 }
@@ -1580,6 +1677,48 @@ void GdxMenu::DrawGhostIo() {
     }
 }
 
+// M3 X Cup seed codes (port/gdx_xcup_seed.c). A custom block rather than a CVar widget: the
+// pending seed is one-shot runtime state, not persisted config, and the input needs a parse
+// verdict plus the current code display.
+void GdxMenu::DrawXCupSeed() {
+    static char sCodeInput[64] = { 0 };
+    static char sSeedStatus[160] = { 0 };
+    char current[GDX_XCUP_CODE_BUF_SIZE];
+
+    if (gdx_xcup_current_seed_code(current, sizeof(current))) {
+        ImGui::Text("Last generated X Cup course: %s", current);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Share this code and the other player gets the exact same track.");
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Copy")) {
+            ImGui::SetClipboardText(current);
+            snprintf(sSeedStatus, sizeof(sSeedStatus), "Copied to clipboard.");
+        }
+    } else {
+        ImGui::TextDisabled("Race an X Cup course once to see its seed code here.");
+    }
+
+    ImGui::SetNextItemWidth(280.0f);
+    ImGui::InputTextWithHint("##xcupseed", "XXXXX-XXXXX-XXXXX-XXXXX-XXXXX-X", sCodeInput, sizeof(sCodeInput));
+    ImGui::SameLine();
+    if (ImGui::Button("Use for next X Cup course")) {
+        if (gdx_xcup_set_pending_code(sCodeInput)) {
+            snprintf(sSeedStatus, sizeof(sSeedStatus), "Seed queued — the next generated X Cup course will match the code.");
+            sCodeInput[0] = '\0';
+        } else {
+            snprintf(sSeedStatus, sizeof(sSeedStatus), "That is not a valid seed code.");
+        }
+    }
+    if (gdx_xcup_has_pending_seed()) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.55f, 1.0f, 0.55f, 1.0f), "(queued)");
+    }
+    if (sSeedStatus[0] != '\0') {
+        ImGui::TextWrapped("%s", sSeedStatus);
+    }
+}
+
 void GdxMenu::DrawToolWindowPage(const char* name, const char* description) {
     auto gui = GdxGui();
     auto window = gui != nullptr ? gui->GetGuiWindow(name) : nullptr;
@@ -1647,14 +1786,16 @@ void GdxMenu::DrawTexturePacks() {
 
     if (packs.empty()) {
         ImGui::TextDisabled("No packs found. Drop .o2r packs into the mods/ folder.");
-    } else if (ImGui::BeginTable("##WorkshopPacks", 3,
+    } else if (ImGui::BeginTable("##WorkshopPacks", 4,
                                  ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
                                      ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableSetupColumn("On", ImGuiTableColumnFlags_WidthFixed, 32.0f);
+        ImGui::TableSetupColumn("Order", ImGuiTableColumnFlags_WidthFixed, 76.0f);
         ImGui::TableSetupColumn("Pack", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableSetupColumn("Info", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableHeadersRow();
-        for (const auto& p : packs) {
+        for (size_t row = 0; row < packs.size(); row++) {
+            const auto& p = packs[row];
             ImGui::TableNextRow();
             ImGui::PushID(p.basename.c_str());
 
@@ -1667,22 +1808,81 @@ void GdxMenu::DrawTexturePacks() {
             // list that GdxWorkshopSetPackDisabled maintains.
             if (ImGui::Checkbox("##en", &enabled)) {
                 // The archive set is mounted once, so this takes effect on the next Reload or boot.
-                GdxWorkshopSetPackDisabled(p.basename.c_str(), enabled ? 0 : 1);
+                GdxWorkshopSetPackDisabled(p.id.c_str(), p.basename.c_str(), enabled ? 0 : 1);
             }
             UIWidgets::Tooltip("Enable or disable this pack. Takes effect on the next Reload or boot.");
 
             ImGui::TableSetColumnIndex(1);
-            ImGui::TextUnformatted(p.basename.c_str());
+            // Rows are listed in mount-priority order (see GdxWorkshopListPacks), so a move rewrites
+            // PackOrder as the full identity list with this row swapped.
+            auto movePack = [&](int delta) {
+                // size_t wrap makes an off-the-end target huge, so one check covers both edges.
+                if (row + delta >= packs.size()) {
+                    return;
+                }
+                std::string joined;
+                for (size_t i = 0; i < packs.size(); i++) {
+                    size_t src = i;
+                    if (i == row) {
+                        src = row + delta;
+                    } else if (i == row + delta) {
+                        src = row;
+                    }
+                    if (i != 0) {
+                        joined += ",";
+                    }
+                    joined += packs[src].Identity();
+                }
+                GdxWorkshopSetPackOrder(joined.c_str());
+            };
+            ImGui::BeginDisabled(row == 0);
+            if (ImGui::SmallButton("Up")) {
+                movePack(-1);
+            }
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            ImGui::BeginDisabled(row + 1 >= packs.size());
+            if (ImGui::SmallButton("Dn")) {
+                movePack(1);
+            }
+            ImGui::EndDisabled();
+            UIWidgets::Tooltip("Move this pack up/down in mount priority (rewrites the PackOrder\n"
+                               "list). Takes effect on the next Reload or boot.");
 
             ImGui::TableSetColumnIndex(2);
+            ImGui::TextUnformatted(p.basename.c_str());
+            if (!p.name.empty()) {
+                ImGui::TextDisabled("%s", p.name.c_str());
+            }
+
+            ImGui::TableSetColumnIndex(3);
             if (p.manifestPresent) {
                 ImGui::Text("v%s by %s", p.version.empty() ? "?" : p.version.c_str(),
                             p.author.empty() ? "?" : p.author.c_str());
+                if (!p.id.empty() && p.id != p.basename) {
+                    ImGui::TextDisabled("id: %s", p.id.c_str());
+                }
                 if (p.gameVersionMismatch) {
                     ImGui::TextColored(kRed, "game_version mismatch (%s)", p.gameVersion.c_str());
                 }
                 if (p.keySchemeMismatch) {
                     ImGui::TextColored(kRed, "key_scheme_version mismatch (%s)", p.keySchemeVersion.c_str());
+                }
+                auto joinTokens = [](const std::vector<std::string>& tokens) {
+                    std::string joined;
+                    for (size_t i = 0; i < tokens.size(); i++) {
+                        if (i != 0) {
+                            joined += ", ";
+                        }
+                        joined += tokens[i];
+                    }
+                    return joined;
+                };
+                if (!p.missingDepends.empty()) {
+                    ImGui::TextColored(kRed, "missing dependency: %s", joinTokens(p.missingDepends).c_str());
+                }
+                if (!p.activeConflicts.empty()) {
+                    ImGui::TextColored(kRed, "conflicts with: %s", joinTokens(p.activeConflicts).c_str());
                 }
             } else {
                 ImGui::TextDisabled("(no manifest.json)");
@@ -1690,8 +1890,7 @@ void GdxMenu::DrawTexturePacks() {
             ImGui::PopID();
         }
         ImGui::EndTable();
-        ImGui::TextDisabled("Rename with a numeric prefix (e.g. 10-, 20-) to order pack priority; "
-                            "later packs win per-file.");
+        ImGui::TextDisabled("Packs mount in the order listed above; later packs win per-file.");
     }
 
     if (ImGui::Button("Reload packs")) {
@@ -1708,6 +1907,55 @@ void GdxMenu::DrawTexturePacks() {
         ImGui::TextDisabled("%s", sReloadStatus);
     }
 }
+
+// Lua script packs (port/gdx_lua.cpp): one row per discovered scripts/*.lua entry, with load/
+// runtime errors surfaced in place. The runtime scans on enable and on every workshop epoch bump,
+// so "Reload packs" above is also the "retry errored scripts" button — no second reload here.
+void GdxMenu::DrawScripts() {
+    const ImVec4 kRed = ImVec4(0.90f, 0.25f, 0.25f, 1.0f);
+
+    if (!gdx_lua_enabled()) {
+        ImGui::TextDisabled("Script packs are off. Tick \"Enable Lua script packs\" to scan mods/*.o2r.");
+        return;
+    }
+
+    const int count = GdxLuaScriptCount();
+    if (count == 0) {
+        ImGui::TextDisabled("No scripts found. Packs provide them as scripts/*.lua inside the .o2r.");
+        return;
+    }
+
+    if (ImGui::BeginTable("##WorkshopScripts", 3,
+                          ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                              ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("Pack", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Script", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableHeadersRow();
+        for (int row = 0; row < count; row++) {
+            GdxLuaScriptInfo info;
+            if (!GdxLuaGetScriptInfo(row, &info)) {
+                continue; // a reload landed mid-frame; next frame re-reads from zero
+            }
+            ImGui::TableNextRow();
+            ImGui::PushID(row);
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextUnformatted(info.pack);
+            ImGui::TableSetColumnIndex(1);
+            ImGui::TextUnformatted(info.name);
+            ImGui::TableSetColumnIndex(2);
+            if (info.errored) {
+                ImGui::TextColored(kRed, "error: %s", info.error);
+            } else {
+                ImGui::TextDisabled("ok");
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+        ImGui::TextDisabled("Errored scripts are disabled until the next Reload packs.");
+    }
+}
+
 
 // Offline per-class asset dump, native-first via the bundled gdx-extract (falling back to
 // tools/gen_dump_all.py in dev checkouts without the native binary). The work lives in
@@ -1844,9 +2092,11 @@ void GdxMenu::DrawDdSave() {
                 ImGui::CloseCurrentPopup();
             }
             ImGui::SameLine();
-            if (ImGui::Button("Cancel")) {
+            if (ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)) {
                 ImGui::CloseCurrentPopup();
             }
+            // Default-park focus on Cancel, not the format authorization.
+            ImGui::SetItemDefaultFocus();
             ImGui::EndPopup();
         }
     }
@@ -1936,9 +2186,12 @@ void GdxMenu::DrawDevGates() {
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
-        if (ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        if (ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape) ||
+            ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)) {
             ImGui::CloseCurrentPopup();
         }
+        // Default-park focus on Cancel, not the mass reset.
+        ImGui::SetItemDefaultFocus();
         ImGui::EndPopup();
     }
 

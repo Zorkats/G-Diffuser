@@ -316,7 +316,10 @@ struct GenericStringRef {
 
     GenericStringRef(const GenericStringRef& rhs) : s(rhs.s), length(rhs.length) {}
 
-    GenericStringRef& operator=(const GenericStringRef& rhs) { s = rhs.s; length = rhs.length; }
+    // Local patch vs RapidJSON 1.1.0: the original operator= wrote the const
+    // members and is ill-formed. GCC 14+ and Clang 22 diagnose it even though
+    // discord-rpc never instantiates it. Upstream deleted the operator after
+    // 1.1.0; implicit assignment stays deleted because of the const members.
 
     //! implicit conversion to plain CharType pointer
     operator const Ch *() const { return s; }

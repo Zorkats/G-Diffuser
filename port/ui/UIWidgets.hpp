@@ -818,9 +818,13 @@ bool Combobox(const char* label, T* value, const std::unordered_map<T, const cha
         for (const auto& pair : comboMap) {
             // Entries whose label is a single character are treated as hidden/placeholder rows.
             if (strlen(pair.second) > 1) {
-                if (ImGui::Selectable(pair.second, pair.first == *value)) {
+                const bool isSelected = pair.first == *value;
+                if (ImGui::Selectable(pair.second, isSelected)) {
                     *value = pair.first;
                     dirty = true;
+                }
+                if (isSelected) {
+                    ImGui::SetItemDefaultFocus();
                 }
             }
         }
@@ -908,9 +912,13 @@ bool Combobox(const char* label, T* value, const std::vector<const char*>& combo
         for (size_t i = 0; i < comboVector.size(); ++i) {
             auto newValue = static_cast<T>(i);
             if (strlen(comboVector.at(i)) > 1) {
-                if (ImGui::Selectable(comboVector.at(i), newValue == *value)) {
+                const bool isSelected = newValue == *value;
+                if (ImGui::Selectable(comboVector.at(i), isSelected)) {
                     *value = newValue;
                     dirty = true;
+                }
+                if (isSelected) {
+                    ImGui::SetItemDefaultFocus();
                 }
             }
         }
@@ -997,9 +1005,13 @@ bool Combobox(const char* label, T* value, const std::vector<std::string>& combo
         for (size_t i = 0; i < comboVector.size(); ++i) {
             auto newValue = static_cast<T>(i);
             if (comboVector.at(i).length() > 1) {
-                if (ImGui::Selectable(comboVector.at(i).c_str(), newValue == *value)) {
+                const bool isSelected = newValue == *value;
+                if (ImGui::Selectable(comboVector.at(i).c_str(), isSelected)) {
                     *value = newValue;
                     dirty = true;
+                }
+                if (isSelected) {
+                    ImGui::SetItemDefaultFocus();
                 }
             }
         }
@@ -1085,9 +1097,13 @@ bool Combobox(const char* label, T* value, const char* (&comboArray)[N], const C
         for (size_t i = 0; i < N; ++i) {
             auto newValue = static_cast<T>(i);
             if (strlen(comboArray[i]) > 1) {
-                if (ImGui::Selectable(comboArray[i], newValue == *value)) {
+                const bool isSelected = newValue == *value;
+                if (ImGui::Selectable(comboArray[i], isSelected)) {
                     *value = newValue;
                     dirty = true;
+                }
+                if (isSelected) {
+                    ImGui::SetItemDefaultFocus();
                 }
             }
         }

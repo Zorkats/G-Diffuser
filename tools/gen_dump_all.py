@@ -422,14 +422,27 @@ def decode_ek_swatch(key, source):
     entries, taken from the ACTUAL archive bytes, not the yaml `colors:` hint -- verified one EK TLUT's
     `colors:` field understates its true archive length, e.g. aRecordsInsertDiskToCopyToPalette declares
     `colors: 17` but its archive entry is 424 bytes == 212 entries; the byte length is ground truth).
-    There is no existing "cart-side TLUT swatch" convention to mirror: cart TLUT rows are never dumped as
-    images at all (walk_textures() skips format=="TLUT" outright; a TLUT is consumed only as the CI
-    palette side-channel). This defines the swatch convention: each entry is decoded with the exact
-    RGBA5551-unpack math _dec_rgba16 already uses (a TLUT entry occupies the same big-endian 16-bit word
-    as an RGBA16 texel), laid out as a single Nx1 row so the swatch is trivially inspectable."""
+    This defines the swatch convention (also used for cart TLUTs, see decode_cart_swatch): each entry
+    is decoded with the exact RGBA5551-unpack math _dec_rgba16 already uses (a TLUT entry occupies the
+    same big-endian 16-bit word as an RGBA16 texel), laid out as a single Nx1 row so the swatch is
+    trivially inspectable."""
     raw = source.raw(key)
     if raw is None:
         raise ValueError("no EK archive entry for %s" % key)
+    n = len(raw) // 2
+    if n == 0:
+        raise ValueError("%s: empty TLUT payload" % key)
+    return _dec_rgba16(raw, n, 1), n
+
+
+def decode_cart_swatch(key, source):
+    """Cart-side analogue of decode_ek_swatch(): same Nx1 RGBA5551 swatch decode, but sourced through
+    ArchiveSource.payload() (which strips the 0x50 OTR+Torch-texture header) instead of the EK raw
+    reader. Dumped so the packer can quantize CI replacements back into the original palette
+    (gen_texture_pack.py reads the swatch named by the manifest's palette_key column)."""
+    raw = source.payload(key)
+    if raw is None:
+        raise ValueError("no archive entry for %s" % key)
     n = len(raw) // 2
     if n == 0:
         raise ValueError("%s: empty TLUT payload" % key)
@@ -557,7 +570,8 @@ def decode_texture(item, source):
     return DECODERS[item.fmt](payload, item.width, item.height, pal)
 
 
-# ── manifest.tsv (shape-identical to the in-game dump: key<TAB>w<TAB>h<TAB>fmt) ────────────────────────
+# ── manifest.tsv (shape-identical to the in-game dump: key<TAB>w<TAB>h<TAB>fmt, plus a 5th
+# palette_key column on CI4/CI8 rows naming the dumped TLUT swatch; "-" when absent) ────────────────
 def read_manifest_keys(manifest_path):
     keys = set()
     if not os.path.isfile(manifest_path):
@@ -574,15 +588,74 @@ def read_manifest_keys(manifest_path):
 
 
 def append_manifest_rows(manifest_path, rows):
-    """Append (key, w, h, fmt) rows, writing the header comment when the file is new (in-game format)."""
+    """Append (key, w, h, fmt, palette_key) rows, writing the header comment when the file is new
+    (in-game format, extended with the palette_key column)."""
     if not rows:
         return
     is_new = not os.path.isfile(manifest_path)
     with open(manifest_path, "a", encoding="utf-8", newline="\n") as fh:
         if is_new:
-            fh.write("# key\tnative_w\tnative_h\tn64_fmt   (one row per dumped texture)\n")
-        for key, w, h, fmt in rows:
-            fh.write("%s\t%d\t%d\t%s\n" % (key, w, h, fmt))
+            fh.write("# key\tnative_w\tnative_h\tn64_fmt\tpalette_key   (one row per dumped texture;"
+                     " palette_key = TLUT swatch key for CI4/CI8, - otherwise)\n")
+        for key, w, h, fmt, palette_key in rows:
+            fh.write("%s\t%d\t%d\t%s\t%s\n" % (key, w, h, fmt, palette_key))
+
+
+# ── per-tile atlas band slicing (key scheme 2) ───────────────────────────────────────────────────
+# Buffers the game loads as one tall strip and samples per-tile (devdocs/POST_1_0_SCOPING.md
+# "Per-tile atlas overrides"). key -> (tile_w, tile_h); tiles stack vertically, so band i starts at
+# byte offset i * texel_bytes(fmt, tile_w * tile_h) — the offset the runtime's containing-range
+# lookup keys on. Mirrors kAtlasTileGeometry in torch/src/gdx/dump_textures.cpp.
+ATLAS_TILE_GEOMETRY = {
+    "machine_custom_gfx/aTimerSymbolsTex": (8, 16),
+    "machine_custom_gfx/aSpeedDigitsTex": (12, 16),
+}
+
+
+def dump_atlas_bands(it, rgba, out_dir, existing):
+    """Emit the scheme-2 "atlas/<baseKey>/o<byteOffset>/<FMT>/<W>x<H>" rows for a dumped atlas
+    strip: the whole-atlas key (o0 at full W x H — the band geometry whole-atlas LoadTextureBlock
+    loads produce at runtime) plus one sliced PNG + row per tile. `rgba` is the freshly decoded
+    whole-atlas RGBA bytes, or None on the already-dumped path (the base PNG is read back, so
+    re-running this tooling over a pre-scheme-2 dump still produces the band slices). Returns
+    (rows, written) with rows ready for append_manifest_rows."""
+    tile_w, tile_h = ATLAS_TILE_GEOMETRY[it.key]
+    if it.width != tile_w or tile_h <= 0 or it.height % tile_h != 0:
+        sys.stderr.write("  warn: %s: atlas geometry %dx%d tiles do not tile %dx%d - no band rows\n"
+                         % (it.key, tile_w, tile_h, it.width, it.height))
+        return [], 0
+    if rgba is None:
+        try:
+            img = Image.open(os.path.join(out_dir, it.key + ".png"))
+            img.load()
+            if img.size != (it.width, it.height):
+                return [], 0
+            rgba = img.convert("RGBA").tobytes()
+        except Exception:  # noqa: BLE001 - unreadable base PNG: no bands, base row already reported
+            return [], 0
+    base = "atlas/%s" % it.key
+    band_bytes = texel_bytes(it.fmt, tile_w * tile_h)
+    row_stride = it.width * 4
+    # (byte offset, w, h, first source row); the whole-atlas key comes first.
+    candidates = [(0, it.width, it.height, 0)]
+    for i in range(it.height // tile_h):
+        candidates.append((i * band_bytes, tile_w, tile_h, i * tile_h))
+    rows = []
+    written = 0
+    for byte_off, w, h, row0 in candidates:
+        key = "%s/o%d/%s/%dx%d" % (base, byte_off, it.fmt, w, h)
+        if key in existing:
+            continue
+        png_path = os.path.join(out_dir, key + ".png")
+        if not os.path.exists(png_path):
+            band = bytearray()
+            for y in range(row0, row0 + h):
+                band += rgba[y * row_stride:(y + 1) * row_stride]
+            os.makedirs(os.path.dirname(png_path), exist_ok=True)
+            Image.frombytes("RGBA", (w, h), bytes(band)).save(png_path)
+            written += 1
+        rows.append((key, w, h, it.fmt, it.palette_key or "-"))
+    return rows, written
 
 
 # ── dump class registry ───────────────────────────────────────────────────────────────────────────────
@@ -658,12 +731,16 @@ class TextureDumpClass(DumpClass):
 
     def run(self, ctx):
         items = self.collect(ctx)
+        # Palette keys are bound symbols too (TLUT rows carry a binding row, same as textures), so
+        # they join the self-check alongside the texture keys that reference them.
+        palette_keys = sorted({it.palette_key for it in items if it.palette_key})
         bad = self.self_check_keys(ctx, items)
+        bad += [key for key in palette_keys if key not in ctx.binding_keys]
         if bad:
             raise SystemExit("KEY SELF-CHECK FAILED: %d emitted key(s) absent from %s (e.g. %s)"
                              % (len(bad), os.path.relpath(ctx.binding_c, REPO), ", ".join(bad[:5])))
         print("  key self-check PASS: all %d emitted keys present in %s"
-              % (len(items), os.path.relpath(ctx.binding_c, REPO)))
+              % (len(items) + len(palette_keys), os.path.relpath(ctx.binding_c, REPO)))
 
         out_dir = self.out_dir(ctx)
         os.makedirs(out_dir, exist_ok=True)
@@ -671,30 +748,60 @@ class TextureDumpClass(DumpClass):
         existing = read_manifest_keys(manifest_path)
 
         dumped = skipped = failed = 0
+        atlas_dumped = 0
         new_rows = []
         for it in sorted(items, key=lambda x: x.key):
             png_path = os.path.join(out_dir, it.key + ".png")
+            rgba = None
             if os.path.exists(png_path):  # idempotent + first-seen-wins across runs and play sessions
                 skipped += 1
                 if it.key not in existing:
-                    new_rows.append((it.key, it.width, it.height, it.fmt))
+                    new_rows.append((it.key, it.width, it.height, it.fmt, it.palette_key or "-"))
+            else:
+                try:
+                    rgba = decode_texture(it, ctx.source)
+                except ValueError as exc:
+                    sys.stderr.write("  warn: %s\n" % exc)
+                    failed += 1
+                    continue
+                os.makedirs(os.path.dirname(png_path), exist_ok=True)
+                Image.frombytes("RGBA", (it.width, it.height), rgba).save(png_path)
+                dumped += 1
+                if it.key not in existing:
+                    new_rows.append((it.key, it.width, it.height, it.fmt, it.palette_key or "-"))
+            if it.key in ATLAS_TILE_GEOMETRY:
+                a_rows, a_written = dump_atlas_bands(it, rgba, out_dir, existing)
+                new_rows.extend(a_rows)
+                atlas_dumped += a_written
+        # Cart TLUT swatches (mirror of the EK palette dump below): every palette a dumped cart CI
+        # texture references lands as an Nx1 RGBA swatch PNG + a TLUT manifest row, so the packer can
+        # quantize CI replacements back into the original palette offline.
+        for key in palette_keys:
+            png_path = os.path.join(out_dir, key + ".png")
+            if os.path.exists(png_path):
+                skipped += 1
+                if key not in existing:
+                    sw, sh = Image.open(png_path).size
+                    new_rows.append((key, sw, sh, "TLUT", "-"))
                 continue
             try:
-                rgba = decode_texture(it, ctx.source)
+                rgba, n = decode_cart_swatch(key, ctx.source)
             except ValueError as exc:
                 sys.stderr.write("  warn: %s\n" % exc)
                 failed += 1
                 continue
             os.makedirs(os.path.dirname(png_path), exist_ok=True)
-            Image.frombytes("RGBA", (it.width, it.height), rgba).save(png_path)
+            Image.frombytes("RGBA", (n, 1), rgba).save(png_path)
             dumped += 1
-            if it.key not in existing:
-                new_rows.append((it.key, it.width, it.height, it.fmt))
+            if key not in existing:
+                new_rows.append((key, n, 1, "TLUT", "-"))
         append_manifest_rows(manifest_path, new_rows)
         print("  textures: %d dumped, %d skipped (already present), %d failed -> %s"
               % (dumped, skipped, failed, os.path.relpath(out_dir, os.getcwd()) if out_dir.startswith(os.getcwd()) else out_dir))
+        if atlas_dumped:
+            print("  atlas bands: %d per-tile slice(s) written (key scheme 2)" % atlas_dumped)
         result = {"class": self.name, "dumped": dumped, "skipped": skipped, "failed": failed,
-                  "total": len(items)}
+                  "total": len(items) + len(palette_keys)}
 
         ek = self._ek_ready(ctx)
         if ek is None:
@@ -717,7 +824,7 @@ class TextureDumpClass(DumpClass):
             if os.path.exists(png_path):
                 ek_skipped += 1
                 if it.key not in existing:
-                    ek_new_rows.append((it.key, it.width, it.height, it.fmt))
+                    ek_new_rows.append((it.key, it.width, it.height, it.fmt, it.palette_key or "-"))
                 continue
             try:
                 rgba = decode_ek_texture(it, source, mio0_decompress)
@@ -729,7 +836,7 @@ class TextureDumpClass(DumpClass):
             Image.frombytes("RGBA", (it.width, it.height), rgba).save(png_path)
             ek_dumped += 1
             if it.key not in existing:
-                ek_new_rows.append((it.key, it.width, it.height, it.fmt))
+                ek_new_rows.append((it.key, it.width, it.height, it.fmt, it.palette_key or "-"))
         for key, sym in sorted(palette_items):
             png_path = os.path.join(out_dir, key + ".png")
             if os.path.exists(png_path):
@@ -738,7 +845,7 @@ class TextureDumpClass(DumpClass):
                     # width (palette entry count) isn't a static field anywhere -- read it back from the
                     # already-dumped swatch (cheap: 1-row PNG) instead of re-touching the archive.
                     sw, sh = Image.open(png_path).size
-                    ek_new_rows.append((key, sw, sh, "TLUT"))
+                    ek_new_rows.append((key, sw, sh, "TLUT", "-"))
                 continue
             try:
                 rgba, n = decode_ek_swatch(key, source)
@@ -750,7 +857,7 @@ class TextureDumpClass(DumpClass):
             Image.frombytes("RGBA", (n, 1), rgba).save(png_path)
             ek_dumped += 1
             if key not in existing:
-                ek_new_rows.append((key, n, 1, "TLUT"))
+                ek_new_rows.append((key, n, 1, "TLUT", "-"))
         append_manifest_rows(manifest_path, ek_new_rows)
         print("  ek textures: %d dumped, %d skipped (already present), %d failed -> %s"
               % (ek_dumped, ek_skipped, ek_failed,
@@ -844,7 +951,10 @@ class TextureDumpClass(DumpClass):
     # -- decoder proof (round-trip): decode -> re-encode via gen_texture_pack -> byte-compare source --
     def round_trip(self, ctx, count):
         import gen_texture_pack as gtp
-        items = [it for it in self.collect(ctx) if it.fmt in gtp.ENCODERS]  # non-CI only (CI not encodable)
+        # Non-CI only: CI encoders take the palette as a 4th argument (quantize-into-original-palette)
+        # and duplicated palette colors make their byte-compare non-deterministic under lowest-index
+        # tie-breaking.
+        items = [it for it in self.collect(ctx) if it.fmt in gtp.ENCODERS and it.fmt not in gtp.CI_FORMATS]
         results = []
         for it in sorted(items, key=lambda x: x.key):
             if len(results) >= count:

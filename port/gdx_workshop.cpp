@@ -14,11 +14,14 @@
 #endif
 
 #include "gdx_workshop.h"
+#include "gdx_model_packs.h"
 
 #include "ship/Context.h"
 #include "ship/resource/ResourceManager.h"
 #include "ship/resource/File.h"
 #include "ship/resource/archive/ArchiveManager.h"
+#include "ship/resource/archive/O2rArchive.h"
+#include "fast/resource/type/Texture.h"
 #include "libultraship/bridge/consolevariablebridge.h"
 #include "port_log.h"
 
@@ -32,6 +35,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 // stb single-header PNG writer, vendored beside this file (port/gdx_stb_image_write.h). This is the
@@ -45,7 +49,7 @@ extern "C" const char* GDiffuser_LookupLoadedAssetKey(const void* buffer, size_t
 // Interpreter texture-cache full clear (libultraship/src/fast/interpreter.cpp).
 extern "C" void gfx_texture_cache_clear(void);
 
-const char* kGdxWorkshopKeySchemeVersion = "1";
+const char* kGdxWorkshopKeySchemeVersion = "2";
 
 namespace {
 
@@ -55,6 +59,10 @@ uint32_t gPackEpoch = 0;
 // key -> full override path ("textures/pack/<key>") when a mounted pack provides it; empty string
 // means "checked, no override". Presence in the map means "already checked this epoch".
 std::unordered_map<std::string, std::string> gOverrideCache;
+
+// override path -> payload size in bytes (File::TrueSize), filled lazily by
+// GdxWorkshopLookupOverridePathMinSize; cleared on the same epoch bump as gOverrideCache.
+std::unordered_map<std::string, size_t> gOverrideSizeCache;
 
 // ── dump de-dup (first-seen-wins per session) ─────────────────────────────────────────────────────
 std::mutex gDumpMutex;
@@ -135,14 +143,11 @@ std::shared_ptr<Ship::ArchiveManager> archiveManager() {
     return rm->GetArchiveManager();
 }
 
-// Comma-joined basename disable list (gEnhancements.Workshop.DisabledPacks). Case-insensitive.
-bool packDisabled(const std::string& basename) {
-    const char* raw = CVarGetString("gEnhancements.Workshop.DisabledPacks", "");
-    if (raw == nullptr || raw[0] == '\0') {
-        return false;
-    }
-    const std::string target = toLower(basename);
-    std::string list = raw;
+// Splits a comma-joined CVar list ("a, b ,c") into trimmed tokens, dropping empties. Shared by
+// DisabledPacks and PackOrder, which use the same token format.
+std::vector<std::string> splitCommaList(const char* raw) {
+    std::vector<std::string> tokens;
+    std::string list = (raw != nullptr) ? raw : "";
     size_t start = 0;
     while (start <= list.size()) {
         size_t comma = list.find(',', start);
@@ -151,15 +156,31 @@ bool packDisabled(const std::string& basename) {
         size_t b = token.find_first_not_of(" \t");
         size_t e = token.find_last_not_of(" \t");
         if (b != std::string::npos) {
-            token = token.substr(b, e - b + 1);
-            if (toLower(token) == target) {
-                return true;
-            }
+            tokens.push_back(token.substr(b, e - b + 1));
         }
         if (comma == std::string::npos) {
             break;
         }
         start = comma + 1;
+    }
+    return tokens;
+}
+
+// Comma-joined disable list (gEnhancements.Workshop.DisabledPacks). Case-insensitive, dual-key: a
+// token matches a pack by its manifest "id" when the pack declares one, or by its basename — so
+// entries written before a pack grew an id keep working.
+bool packDisabled(const std::string& id, const std::string& basename) {
+    const char* raw = CVarGetString("gEnhancements.Workshop.DisabledPacks", "");
+    if (raw == nullptr || raw[0] == '\0') {
+        return false;
+    }
+    const std::string idLower = toLower(id);
+    const std::string baseLower = toLower(basename);
+    for (const std::string& token : splitCommaList(raw)) {
+        const std::string t = toLower(token);
+        if ((!idLower.empty() && t == idLower) || t == baseLower) {
+            return true;
+        }
     }
     return false;
 }
@@ -319,7 +340,7 @@ void markContactSheetDirty() {
 }
 
 // Minimal flat-JSON string-field extractor: finds "key" : "value". Good enough for pack manifests
-// (name/version/author/game_version/key_scheme_version). Returns empty when absent.
+// (id/name/version/author/game_version/key_scheme_version). Returns empty when absent.
 std::string jsonField(const std::string& json, const char* key) {
     std::string needle = std::string("\"") + key + "\"";
     size_t k = json.find(needle);
@@ -341,6 +362,152 @@ std::string jsonField(const std::string& json, const char* key) {
     return json.substr(q1 + 1, q2 - q1 - 1);
 }
 
+// Minimal flat-JSON string-array extractor: "key" : ["a", "b"]. Manifests are author-written and
+// flat, so a quote scan up to the next ']' is good enough (depends/conflicts).
+std::vector<std::string> jsonStringArray(const std::string& json, const char* key) {
+    std::vector<std::string> out;
+    std::string needle = std::string("\"") + key + "\"";
+    size_t k = json.find(needle);
+    if (k == std::string::npos) {
+        return out;
+    }
+    size_t open = json.find('[', k + needle.size());
+    if (open == std::string::npos) {
+        return out;
+    }
+    size_t close = json.find(']', open + 1);
+    if (close == std::string::npos) {
+        return out;
+    }
+    size_t pos = open + 1;
+    while (pos < close) {
+        size_t q1 = json.find('"', pos);
+        if (q1 == std::string::npos || q1 >= close) {
+            break;
+        }
+        size_t q2 = json.find('"', q1 + 1);
+        if (q2 == std::string::npos || q2 > close) {
+            break;
+        }
+        out.push_back(json.substr(q1 + 1, q2 - q1 - 1));
+        pos = q2 + 1;
+    }
+    return out;
+}
+
+// One pack's own workshop.json, read straight from its archive (NOT the merged VFS, which can only
+// answer with the highest-priority mounted pack's copy). Packs use "workshop.json" because
+// "manifest.json" is libultraship's reserved archive manifest, whose numeric game_version schema
+// makes LUS's parser throw on our string game_version at every mount; the reserved name stays in
+// the probe list only to keep pre-rename packs readable. A pack that fails to open or has no
+// manifest is still listed — present=false, fields empty.
+struct PackManifest {
+    bool present = false;
+    std::string id, name, version, author, gameVersion, keyScheme;
+    std::vector<std::string> depends, conflicts;
+};
+
+PackManifest readPackManifest(const std::string& path) {
+    PackManifest m;
+    Ship::O2rArchive archive(path);
+    if (!archive.Open()) {
+        return m;
+    }
+    for (const char* manifestName : { "workshop.json", "manifest.json" }) {
+        auto file = archive.LoadFile(manifestName);
+        if (file == nullptr || file->Buffer == nullptr) {
+            continue;
+        }
+        // Archive backends over-allocate Buffer (+4096 guard); TrueSize is the real entry size.
+        size_t size = (file->TrueSize > 0) ? file->TrueSize : file->Buffer->size();
+        if (size == 0 || size > file->Buffer->size()) {
+            continue;
+        }
+        std::string json(file->Buffer->data(), size);
+        m.present = true;
+        m.id = jsonField(json, "id");
+        m.name = jsonField(json, "name");
+        m.version = jsonField(json, "version");
+        m.author = jsonField(json, "author");
+        m.gameVersion = jsonField(json, "game_version");
+        m.keyScheme = jsonField(json, "key_scheme_version");
+        m.depends = jsonStringArray(json, "depends");
+        m.conflicts = jsonStringArray(json, "conflicts");
+        break;
+    }
+    return m;
+}
+
+// The workshop menu re-lists packs every frame; opening every zip in mods/ per frame is not
+// viable, so manifests are cached by path and re-read only when the file's mtime changes.
+// GdxWorkshopReload clears the cache outright (a reload means the user just touched mods/).
+std::mutex gManifestMutex;
+std::unordered_map<std::string, std::pair<std::filesystem::file_time_type, PackManifest>> gManifestCache;
+
+PackManifest packManifestCached(const std::string& path) {
+    std::error_code ec;
+    const auto mtime = std::filesystem::last_write_time(path, ec);
+    std::lock_guard<std::mutex> lock(gManifestMutex);
+    auto it = gManifestCache.find(path);
+    if (it != gManifestCache.end() && !ec && it->second.first == mtime) {
+        return it->second.second;
+    }
+    return gManifestCache.insert_or_assign(path, std::make_pair(mtime, readPackManifest(path))).first->second.second;
+}
+
+// Index permutation for the effective mount order: packs named by gEnhancements.Workshop.PackOrder
+// (comma-joined, same dual-key id/basename match as DisabledPacks) come first in listed order;
+// unlisted packs follow, alphabetical by basename. The reload path and the menu listing both use
+// this, so the UI row order IS the mount-priority order.
+std::vector<size_t> packOrderPermutation(const std::vector<std::pair<std::string, std::string>>& idAndBasename) {
+    std::vector<size_t> out;
+    out.reserve(idAndBasename.size());
+    std::vector<bool> taken(idAndBasename.size(), false);
+    for (const std::string& token : splitCommaList(CVarGetString("gEnhancements.Workshop.PackOrder", ""))) {
+        const std::string t = toLower(token);
+        for (size_t i = 0; i < idAndBasename.size(); i++) {
+            if (taken[i]) {
+                continue;
+            }
+            if ((!idAndBasename[i].first.empty() && toLower(idAndBasename[i].first) == t) ||
+                toLower(idAndBasename[i].second) == t) {
+                taken[i] = true;
+                out.push_back(i);
+                break;
+            }
+        }
+    }
+    std::vector<size_t> rest;
+    for (size_t i = 0; i < idAndBasename.size(); i++) {
+        if (!taken[i]) {
+            rest.push_back(i);
+        }
+    }
+    std::sort(rest.begin(), rest.end(), [&](size_t a, size_t b) {
+        return toLower(idAndBasename[a].second) < toLower(idAndBasename[b].second);
+    });
+    out.insert(out.end(), rest.begin(), rest.end());
+    return out;
+}
+
+// Cached "textures/pack/<key>" existence probe, shared by the single-image and per-tile atlas
+// lookups. Caller holds gCacheMutex. Returns the override path, or empty for "checked, no override".
+const std::string& lookupOverrideCached(const std::string& key) {
+    auto it = gOverrideCache.find(key);
+    if (it != gOverrideCache.end()) {
+        return it->second;
+    }
+    // First miss for this key this epoch: consult the ResourceManager exactly once.
+    std::string overridePath = std::string("textures/pack/") + key;
+    bool exists = false;
+    auto am = archiveManager();
+    if (am != nullptr) {
+        exists = am->HasFile(overridePath);
+    }
+    auto ins = gOverrideCache.emplace(key, exists ? overridePath : std::string());
+    return ins.first->second;
+}
+
 } // namespace
 
 // ── Tier-B override shim ──────────────────────────────────────────────────────────────────────────
@@ -353,19 +520,108 @@ extern "C" const char* GdxWorkshopLookupOverridePath(const char* key) {
         return nullptr;
     }
     std::lock_guard<std::mutex> lock(gCacheMutex);
-    auto it = gOverrideCache.find(key);
-    if (it != gOverrideCache.end()) {
-        return it->second.empty() ? nullptr : it->second.c_str();
+    const std::string& cached = lookupOverrideCached(key);
+    return cached.empty() ? nullptr : cached.c_str();
+}
+
+extern "C" const char* GdxWorkshopLookupOverridePathMinSize(const char* key, size_t minBytes) {
+    if (key == nullptr || key[0] == '\0') {
+        return nullptr;
     }
-    // First miss for this key this epoch: consult the ResourceManager exactly once.
-    std::string overridePath = std::string("textures/pack/") + key;
-    bool exists = false;
-    auto am = archiveManager();
-    if (am != nullptr) {
-        exists = am->HasFile(overridePath);
+    std::lock_guard<std::mutex> lock(gCacheMutex);
+    const std::string& cached = lookupOverrideCached(key);
+    if (cached.empty()) {
+        static int sRdramMissLogs = 0;
+        if (sRdramMissLogs < 8) {
+            sRdramMissLogs++;
+            gdx_port_logf("[workshop] RDRAM whole-image override '%s' miss: no textures/pack entry\n", key);
+        }
+        return nullptr;
     }
-    auto ins = gOverrideCache.emplace(std::string(key), exists ? overridePath : std::string());
-    return ins.first->second.empty() ? nullptr : ins.first->second.c_str();
+    // Whole-image guard: the pack payload must cover the full registered buffer. One
+    // LoadFileProcess per override path per epoch; TrueSize is the real entry size (archive
+    // buffers carry a +4096 guard region, so Buffer->size() is only the fallback).
+    // We also load the Texture resource here: if it cannot be deserialized, the bridge must
+    // fall back to the raw-copy path rather than emit an OTR-filepath opcode that draws blank.
+    size_t payloadSize = 0;
+    auto it = gOverrideSizeCache.find(cached);
+    if (it != gOverrideSizeCache.end()) {
+        payloadSize = it->second;
+    } else {
+        auto ctx = Ship::Context::GetInstance();
+        auto rm = (ctx != nullptr) ? ctx->GetResourceManager() : nullptr;
+        if (rm != nullptr) {
+            auto file = rm->LoadFileProcess(cached);
+            if (file != nullptr && file->Buffer != nullptr) {
+                payloadSize = (file->TrueSize != 0) ? file->TrueSize : file->Buffer->size();
+            }
+        }
+        gOverrideSizeCache.emplace(cached, payloadSize);
+    }
+    if (payloadSize < minBytes) {
+        static int sRdramUndersizeLogs = 0;
+        if (sRdramUndersizeLogs < 8) {
+            sRdramUndersizeLogs++;
+            gdx_port_logf("[workshop] RDRAM whole-image override '%s' rejected: payload undersized "
+                          "(payload=%zu, min=%zu)\n",
+                          cached.c_str(), payloadSize, minBytes);
+        }
+        return nullptr;
+    }
+
+    // Validate that the override is a loadable texture with non-zero pixel data. A malformed
+    // pack (wrong resource type, zero dimensions, missing image bytes) should fall back to
+    // stock art and log rather than draw blank.
+    auto ctx = Ship::Context::GetInstance();
+    auto rm = (ctx != nullptr) ? ctx->GetResourceManager() : nullptr;
+    if (rm != nullptr) {
+        auto resource = rm->LoadResourceProcess(cached);
+        auto tex = std::dynamic_pointer_cast<Fast::Texture>(resource);
+        if (tex == nullptr || tex->ImageData == nullptr || tex->Width == 0 || tex->Height == 0 ||
+            tex->ImageDataSize < minBytes) {
+            static int sRdramTexValidateLogs = 0;
+            if (sRdramTexValidateLogs < 8) {
+                sRdramTexValidateLogs++;
+                gdx_port_logf("[workshop] RDRAM whole-image override '%s' rejected: not a valid texture "
+                              "(loaded=%s, w=%u, h=%u, dataSize=%u, min=%zu)\n",
+                              cached.c_str(), tex ? "yes" : "no", tex ? tex->Width : 0,
+                              tex ? tex->Height : 0, tex ? tex->ImageDataSize : 0, minBytes);
+            }
+            return nullptr;
+        }
+        static int sRdramAcceptLogs = 0;
+        if (sRdramAcceptLogs < 8) {
+            sRdramAcceptLogs++;
+            gdx_port_logf("[workshop] RDRAM whole-image override '%s' accepted: w=%u h=%u dataSize=%u "
+                          "payload=%zu min=%zu\n",
+                          cached.c_str(), tex->Width, tex->Height, tex->ImageDataSize,
+                          payloadSize, minBytes);
+        }
+    }
+
+    return cached.c_str();
+}
+
+extern "C" const char* GdxWorkshopLookupAtlasTileOverride(const char* baseKey, size_t byteOffset, int n64Fmt,
+                                                          int n64Siz, int width, int height) {
+    if (baseKey == nullptr || baseKey[0] == '\0' || width <= 0 || height <= 0) {
+        return nullptr;
+    }
+    // Scheme-2 band key; identical layout to the offline dumper's per-tile manifest rows so a dumped
+    // band key is a valid lookup key verbatim.
+    char key[512];
+    std::snprintf(key, sizeof(key), "atlas/%s/o%zu/%s/%dx%d", baseKey, byteOffset, n64FormatName(n64Fmt, n64Siz),
+                  width, height);
+    std::lock_guard<std::mutex> lock(gCacheMutex);
+    const std::string& cached = lookupOverrideCached(key);
+    return cached.empty() ? nullptr : cached.c_str();
+}
+
+// Pack epoch for other subsystems that cache per-mount probe results (gdx_audio_seq_packs.cpp);
+// gPackEpoch itself stays file-local.
+extern "C" uint32_t GdxWorkshopPackEpoch(void) {
+    std::lock_guard<std::mutex> lock(gCacheMutex);
+    return gPackEpoch;
 }
 
 // ── Texture dump ──────────────────────────────────────────────────────────────────────────────────
@@ -381,37 +637,26 @@ extern "C" int gdx_workshop_dump_count(void) {
     return static_cast<int>(gDumpSeen.size());
 }
 
-extern "C" void GdxWorkshopSetPackDisabled(const char* basename, int disabled) {
-    if (basename == nullptr || basename[0] == '\0') {
+extern "C" void GdxWorkshopSetPackDisabled(const char* id, const char* basename, int disabled) {
+    // The stored token is the id when the pack declares one, else the basename; removal matches
+    // EITHER key so a basename token written before the pack grew an id is still cleaned up.
+    const std::string key =
+        (id != nullptr && id[0] != '\0') ? id : ((basename != nullptr) ? basename : "");
+    if (key.empty()) {
         return;
     }
-    const std::string target = basename;
-    const std::string targetLower = toLower(target);
+    const std::string keyLower = toLower(key);
+    const std::string baseLower = toLower((basename != nullptr) ? basename : "");
 
-    // Parse the current comma-joined list into trimmed tokens (case-insensitive de-dup on target).
-    const char* raw = CVarGetString("gEnhancements.Workshop.DisabledPacks", "");
     std::vector<std::string> tokens;
-    std::string list = (raw != nullptr) ? raw : "";
-    size_t start = 0;
-    while (start <= list.size()) {
-        size_t comma = list.find(',', start);
-        size_t end = (comma == std::string::npos) ? list.size() : comma;
-        std::string token = list.substr(start, end - start);
-        size_t b = token.find_first_not_of(" \t");
-        size_t e = token.find_last_not_of(" \t");
-        if (b != std::string::npos) {
-            token = token.substr(b, e - b + 1);
-            if (toLower(token) != targetLower) {
-                tokens.push_back(token);
-            }
+    for (const std::string& token : splitCommaList(CVarGetString("gEnhancements.Workshop.DisabledPacks", ""))) {
+        const std::string t = toLower(token);
+        if (t != keyLower && (baseLower.empty() || t != baseLower)) {
+            tokens.push_back(token);
         }
-        if (comma == std::string::npos) {
-            break;
-        }
-        start = comma + 1;
     }
     if (disabled != 0) {
-        tokens.push_back(target);
+        tokens.push_back(key);
     }
 
     std::string joined;
@@ -422,6 +667,11 @@ extern "C" void GdxWorkshopSetPackDisabled(const char* basename, int disabled) {
         joined += tokens[i];
     }
     CVarSetString("gEnhancements.Workshop.DisabledPacks", joined.c_str());
+    CVarSave();
+}
+
+extern "C" void GdxWorkshopSetPackOrder(const char* joinedOrder) {
+    CVarSetString("gEnhancements.Workshop.PackOrder", (joinedOrder != nullptr) ? joinedOrder : "");
     CVarSave();
 }
 
@@ -513,6 +763,10 @@ extern "C" void GdxWorkshopReload(char* outStatus, size_t outStatusLen) {
     }
 
     rm->DirtyResources("textures/pack/*");
+    rm->DirtyResources("audio/seq/*");
+    rm->DirtyResources("audio/sample/*");
+    rm->DirtyResources("audio/font/*");
+    rm->DirtyResources("models/pack/*");
 
     // Quiesce the resource thread pool before touching the ArchiveManager: DirtyResources queues an
     // async worker that iterates the archive manager's file table, and remounting archives under it
@@ -542,7 +796,14 @@ extern "C" void GdxWorkshopReload(char* outStatus, size_t outStatusLen) {
     int mounted = 0;
     std::error_code ec;
     if (std::filesystem::is_directory(modsDir, ec)) {
-        std::vector<std::string> packs;
+        // A reload means the user just touched mods/: drop cached manifests so re-packed or edited
+        // archives are re-read even when the mtime did not move.
+        {
+            std::lock_guard<std::mutex> lock(gManifestMutex);
+            gManifestCache.clear();
+        }
+        std::vector<std::string> paths;
+        std::vector<std::pair<std::string, std::string>> keys; // (id, basename), parallel to paths
         for (const auto& entry : std::filesystem::directory_iterator(modsDir, ec)) {
             if (!entry.is_regular_file(ec)) {
                 continue;
@@ -550,15 +811,18 @@ extern "C" void GdxWorkshopReload(char* outStatus, size_t outStatusLen) {
             if (toLower(entry.path().extension().string()) != ".o2r") {
                 continue;
             }
-            if (packDisabled(entry.path().filename().string())) {
+            const std::string path = std::filesystem::absolute(entry.path(), ec).string();
+            // The manifest read gives the disable list and PackOrder the pack's id (basename
+            // fallback), and warms the cache the next menu listing reuses.
+            const PackManifest manifest = packManifestCached(path);
+            if (packDisabled(manifest.id, entry.path().filename().string())) {
                 continue;
             }
-            packs.push_back(std::filesystem::absolute(entry.path(), ec).string());
+            paths.push_back(path);
+            keys.emplace_back(manifest.id, entry.path().filename().string());
         }
-        std::sort(packs.begin(), packs.end(),
-                  [](const std::string& a, const std::string& b) { return toLower(a) < toLower(b); });
-        for (const auto& p : packs) {
-            if (am->AddArchive(p) != nullptr) {
+        for (size_t i : packOrderPermutation(keys)) {
+            if (am->AddArchive(paths[i]) != nullptr) {
                 mounted++;
             }
         }
@@ -573,7 +837,12 @@ extern "C" void GdxWorkshopReload(char* outStatus, size_t outStatusLen) {
         std::lock_guard<std::mutex> lock(gCacheMutex);
         gPackEpoch++;
         gOverrideCache.clear();
+        gOverrideSizeCache.clear();
     }
+
+    // Model-pack trampolines repoint D_800CDDB0 entries; re-apply present keys and
+    // restore stock for removed ones (or all of them when the master switch is off).
+    GdxModelPacks_OnPacksReloaded();
 
     int overrides = GdxWorkshopOverrideCount();
     char buf[160];
@@ -608,30 +877,6 @@ std::vector<GdxWorkshopPackInfo> GdxWorkshopListPacks() {
         return out;
     }
 
-    // Best-effort manifest from the mounted VFS (highest-priority pack wins on path collision), read
-    // once and applied to every row for the mismatch banner. Packs use "workshop.json" because
-    // "manifest.json" is libultraship's reserved archive manifest, whose numeric game_version schema
-    // makes LUS's parser throw on our string game_version at every mount; the reserved name stays in
-    // the probe list only to keep pre-rename packs readable.
-    std::string manifestJson;
-    if (auto am = archiveManager()) {
-        for (const char* manifestName : { "workshop.json", "manifest.json" }) {
-            if (am->HasFile(manifestName)) {
-                if (auto file = am->LoadFile(manifestName)) {
-                    if (file->Buffer != nullptr && !file->Buffer->empty()) {
-                        manifestJson.assign(file->Buffer->begin(), file->Buffer->end());
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    const std::string mName = jsonField(manifestJson, "name");
-    const std::string mVersion = jsonField(manifestJson, "version");
-    const std::string mAuthor = jsonField(manifestJson, "author");
-    const std::string mGameVersion = jsonField(manifestJson, "game_version");
-    const std::string mKeyScheme = jsonField(manifestJson, "key_scheme_version");
-
     for (const auto& entry : std::filesystem::directory_iterator(modsDir, ec)) {
         if (!entry.is_regular_file(ec)) {
             continue;
@@ -642,22 +887,99 @@ std::vector<GdxWorkshopPackInfo> GdxWorkshopListPacks() {
         GdxWorkshopPackInfo info;
         info.basename = entry.path().filename().string();
         info.path = std::filesystem::absolute(entry.path(), ec).string();
-        info.disabled = packDisabled(info.basename);
-        info.manifestPresent = !manifestJson.empty();
-        info.name = mName;
-        info.version = mVersion;
-        info.author = mAuthor;
-        info.gameVersion = mGameVersion;
-        info.keySchemeVersion = mKeyScheme;
+        // Every row reads its OWN archive's manifest — never the merged VFS, which would stamp the
+        // highest-priority pack's metadata onto every row.
+        const PackManifest manifest = packManifestCached(info.path);
+        info.id = manifest.id;
+        info.manifestPresent = manifest.present;
+        info.name = manifest.name;
+        info.version = manifest.version;
+        info.author = manifest.author;
+        info.gameVersion = manifest.gameVersion;
+        info.keySchemeVersion = manifest.keyScheme;
+        info.depends = manifest.depends;
+        info.conflicts = manifest.conflicts;
+        info.disabled = packDisabled(info.id, info.basename);
         // Port build version is "us.rev0" (VERSION_US). A manifest declaring a different
         // game_version is flagged; empty is treated as "unspecified" (no warning).
-        info.gameVersionMismatch = !mGameVersion.empty() && mGameVersion != "us.rev0" &&
-                                    mGameVersion != "us" && mGameVersion != "US";
-        info.keySchemeMismatch = !mKeyScheme.empty() && mKeyScheme != kGdxWorkshopKeySchemeVersion;
+        info.gameVersionMismatch = !info.gameVersion.empty() && info.gameVersion != "us.rev0" &&
+                                    info.gameVersion != "us" && info.gameVersion != "US";
+        // Scheme "1" packs keep working for single-image keys (they are byte-identical to scheme 2);
+        // only flag schemes that are neither the current one nor the backwards-compatible "1".
+        info.keySchemeMismatch = !info.keySchemeVersion.empty() &&
+                                info.keySchemeVersion != kGdxWorkshopKeySchemeVersion &&
+                                info.keySchemeVersion != "1";
         out.push_back(std::move(info));
     }
-    std::sort(out.begin(), out.end(), [](const GdxWorkshopPackInfo& a, const GdxWorkshopPackInfo& b) {
-        return toLower(a.basename) < toLower(b.basename);
-    });
+
+    // Row order = effective mount order (PackOrder first, then alphabetical), so the menu's up/down
+    // buttons map directly onto mount priority.
+    std::vector<std::pair<std::string, std::string>> keys;
+    keys.reserve(out.size());
+    for (const auto& p : out) {
+        keys.emplace_back(p.id, p.basename);
+    }
+    std::vector<GdxWorkshopPackInfo> sorted;
+    sorted.reserve(out.size());
+    for (size_t i : packOrderPermutation(keys)) {
+        sorted.push_back(std::move(out[i]));
+    }
+    out = std::move(sorted);
+
+    // Dependency/conflict warnings — WARN ONLY, nothing here blocks mounting. A dependency is
+    // missing when no OTHER enabled pack declares that id (or basename); a conflict is active when
+    // one does.
+    for (size_t i = 0; i < out.size(); i++) {
+        auto matchesOtherEnabled = [&](const std::string& token) {
+            const std::string t = toLower(token);
+            for (size_t j = 0; j < out.size(); j++) {
+                if (j == i || out[j].disabled) {
+                    continue;
+                }
+                if ((!out[j].id.empty() && toLower(out[j].id) == t) || toLower(out[j].basename) == t) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        for (const std::string& dep : out[i].depends) {
+            if (!matchesOtherEnabled(dep)) {
+                out[i].missingDepends.push_back(dep);
+            }
+        }
+        for (const std::string& con : out[i].conflicts) {
+            if (matchesOtherEnabled(con)) {
+                out[i].activeConflicts.push_back(con);
+            }
+        }
+    }
     return out;
+}
+
+// Boot-time ordering for main.cpp::findArchivePaths: same dual-key disable match and PackOrder
+// permutation as the reload path, so a cold boot and a hot reload mount the identical set in the
+// identical order. Manifest reads go through the mtime cache; pre-ResourceManager the per-pack
+// O2rArchive is plain libzip and needs no Context.
+std::vector<std::string> GdxWorkshopOrderModPaths(const std::vector<std::string>& absPaths,
+                                                  std::vector<std::string>* outDisabledBasenames) {
+    std::vector<std::string> enabledPaths;
+    std::vector<std::pair<std::string, std::string>> keys;
+    for (const std::string& path : absPaths) {
+        const std::string basename = std::filesystem::path(path).filename().string();
+        const PackManifest manifest = packManifestCached(path);
+        if (packDisabled(manifest.id, basename)) {
+            if (outDisabledBasenames != nullptr) {
+                outDisabledBasenames->push_back(basename);
+            }
+            continue;
+        }
+        keys.emplace_back(manifest.id, basename);
+        enabledPaths.push_back(path);
+    }
+    std::vector<std::string> ordered;
+    ordered.reserve(enabledPaths.size());
+    for (size_t i : packOrderPermutation(keys)) {
+        ordered.push_back(enabledPaths[i]);
+    }
+    return ordered;
 }

@@ -427,8 +427,10 @@ with (io.StringIO() if ARGS.compile_assets_only else open(BINDING_C, "w")) as f:
     # pointer that carries the array's address directly, covering the full fill
     # table instead of a hand-maintained subset.
     f.write("extern void gdx_register_host_pointer_stub(void* dest, unsigned long long size);\n")
+    f.write("/* M-B: Tier-B asset-override registration (port/AssetLoader.cpp). */\n")
+    f.write("extern void GDiffuser_RegisterLoadedAssetBuffer(const void* buffer, unsigned long long size, const char* key);\n")
     f.write("\nenum { GDX_EK_ASSET_OTHER, GDX_EK_ASSET_GFX, GDX_EK_ASSET_VP, GDX_EK_ASSET_VTX };\n")
-    f.write("typedef struct { void* dest; unsigned int diskOffset; unsigned int size; unsigned int n64Address; unsigned char kind; } GdxEkAssetFill;\n")
+    f.write("typedef struct { void* dest; unsigned int diskOffset; unsigned int size; unsigned int n64Address; unsigned char kind; const char* key; } GdxEkAssetFill;\n")
     f.write("static const GdxEkAssetFill sEkAssetFills[] = {\n")
     for _ctype, asset_type, sym, disk_off, size, n64_address in fills:
         kind = {
@@ -436,10 +438,10 @@ with (io.StringIO() if ARGS.compile_assets_only else open(BINDING_C, "w")) as f:
             "VP": "GDX_EK_ASSET_VP",
             "VTX": "GDX_EK_ASSET_VTX",
         }.get(asset_type, "GDX_EK_ASSET_OTHER")
-        f.write("    {{ {}, 0x{:08X}U, 0x{:X}U, 0x{:08X}U, {} }},\n".format(
-            sym, disk_off, size, n64_address, kind
+        f.write("    {{ {}, 0x{:08X}U, 0x{:X}U, 0x{:08X}U, {}, \"ek/{}\" }},\n".format(
+            sym, disk_off, size, n64_address, kind, sym
         ))
-    f.write("    { 0, 0U, 0U, 0U, GDX_EK_ASSET_OTHER }\n};\n\n")
+    f.write("    { 0, 0U, 0U, 0U, GDX_EK_ASSET_OTHER, 0 }\n};\n\n")
     f.write("/* Copies EK payloads from the 64DD image and records their original N64\n")
     f.write(" * address ranges. Gfx commands remain big-endian/raw; Vp and Vtx fields\n")
     f.write(" * used directly by the host interpreter are converted to native order. */\n")
@@ -492,6 +494,10 @@ with (io.StringIO() if ARGS.compile_assets_only else open(BINDING_C, "w")) as f:
     f.write("                gdx_register_n64_address_range(sEkAssetFills[i].n64Address, dest, sEkAssetFills[i].size);\n")
     f.write("            }\n")
     f.write("            gdx_register_host_pointer_stub(dest, sEkAssetFills[i].size);\n")
+    f.write("            /* M-B: EK assets fill host arrays (not RDRAM), so they pass the\n")
+    f.write("               !IsRdramHostPointer guard and are overridable through the existing\n")
+    f.write("               Tier-B path once the buffer carries its ek/<symbol> key. */\n")
+    f.write("            GDiffuser_RegisterLoadedAssetBuffer(dest, sEkAssetFills[i].size, sEkAssetFills[i].key);\n")
     f.write("        }\n")
     f.write("    }\n")
     f.write("    {\n")

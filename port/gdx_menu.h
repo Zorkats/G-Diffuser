@@ -60,7 +60,9 @@ class GdxMenu final : public Ship::GuiWindow {
     // table-driven developer-gate surface. Each is registered as a single WIDGET_CUSTOM entry.
     void DrawAudioStatus();
     void DrawGhostIo();
+    void DrawXCupSeed();
     void DrawTexturePacks();
+    void DrawScripts();
     void DrawAssetDump();
     void DrawDdSave();
     void DrawDevToolButtons();

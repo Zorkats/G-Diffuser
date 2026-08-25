@@ -7,7 +7,7 @@ endif()
 
 set(DECOMP "${CMAKE_CURRENT_SOURCE_DIR}/../decomp")
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
-set(GDX_DISPLAY_VERSION "1.0.2-rc2" CACHE STRING "Version shown in the About menu")
+set(GDX_DISPLAY_VERSION "1.1.0" CACHE STRING "Version shown in the About menu")
 
 # Warning flags for the port's own targets under GCC/Clang; the decomp library and vendored cxd4
 # stay -w (not ours to fix). No -Werror: a Linux first-configure should surface warnings, not fail.
@@ -251,6 +251,10 @@ endif()
 # strip rationale). EXCLUDE_FROM_ALL keeps it out of the test targets' builds.
 add_subdirectory(third_party/discord-rpc EXCLUDE_FROM_ALL)
 
+# Lua 5.4.8: vendored static lib for the scripting layer. Dormant for now — linked by both
+# executables but no port code references it yet (the runtime core lands separately).
+add_subdirectory(third_party/lua EXCLUDE_FROM_ALL)
+
 add_executable(G-Diffuser
     main.cpp
     gdx_discord.cpp
@@ -265,6 +269,8 @@ add_executable(G-Diffuser
     enhancements/tuning/BoostDuration.cpp   # self-registers from a static initializer; nothing
                                 # references it, so it looks like dead code and is not.
     input_bridge.c
+    gdx_course_edit_mouse.cpp  # Course Edit absolute mouse drive + issue #18 steering; extern "C"
+                               # wrappers over Fast3dWindow for the decomp-side C callers
     gdx_input_script.c
     n64_gfx_bridge.cpp
     gdx_interp.cpp
@@ -287,6 +293,18 @@ add_executable(G-Diffuser
     disk_savefile.cpp
     gdx_ghost_io.c
     gdx_ghost_window.cpp
+    gdx_content_io.c               # E1 .gdxc export; mirrors MFS dir entries like gdx_ghost_io.c
+                                   # mirrors the ghost structs, walking gMfsRamArea directly
+    gdx_content_import.c           # E2 .gdxc import; validation chain + disk-thread install
+                                   # staging (op slot 30 in decomp/src/sys/disk/75000.c)
+    gdx_content_window.cpp         # Content Library window; the F12 unified Export/Import shell
+    gdx_xcup_seed.c                # M3 X Cup seed codes; hooked from Course_GenerateRandomCourse
+    gdx_palette.cpp              # F2 palette editor; mirrors Machine like gdx_ghost_io.c mirrors
+                                 # the ghost structs, so it links against racer.c without decomp headers
+    gdx_custom_grid.c            # F3 custom grid; roster-string CVar parse/format, called from
+                                 # func_80089800 (racer.c) under #ifdef PORT
+    gdx_achievements.cpp         # F10 playtime + local achievements; mirrors SaveContext layout
+                                 # with static_asserts, polls gSaveContext, persists to saves/
     gdx_input_viewer.cpp
     gdx_fps_overlay.cpp
     gdx_perf.cpp
@@ -294,6 +312,13 @@ add_executable(G-Diffuser
                                 # from main.cpp, so the standalone test targets compile it unchanged
     gdx_imgui_nav.cpp
     gdx_workshop.cpp
+    gdx_audio_seq_packs.cpp      # stage-2 audio modding; hooks live in decomp/src/audio/*/lib/load.c
+    gdx_audio_sample_packs.cpp   # stage-3 audio modding; hook lives in decomp/src/audio/disk/lib/load.c
+    gdx_audio_soundfont_packs.cpp # stage-4 audio modding; hooks live in decomp/src/audio/disk/lib/load.c
+    gdx_lua.cpp                  # workshop Lua script packs; the decomp C shim is gdx_lua_state.c
+    gdx_lua_state.c              # includes unk_structs.h directly (exe targets carry the decomp
+                                 # include dirs) so gdx_lua.cpp stays decomp-header-free
+    gdx_model_packs.cpp          # F4a stock-machine model packs; hooks live in decomp/src/game/racer.c
     mio0_wrap.c
     gdx_segment_source.c       # in the exe, not gdiffuser_game: needs symbols from AssetLoader.cpp,
                                 # rom_buffer.cpp and gen/AssetBindings.c
@@ -474,6 +499,7 @@ target_include_directories(G-Diffuser PRIVATE
 
 target_link_libraries(G-Diffuser PRIVATE cxd4_rsp)
 target_link_libraries(G-Diffuser PRIVATE discord-rpc)
+target_link_libraries(G-Diffuser PRIVATE gdx_lua)
 
 if(WIN32)
     # user32: MessageBox; Comdlg32: ROM picker; Comctl32: extraction progress marquee.
@@ -729,6 +755,12 @@ if(GDX_BUILD_JP)
         gdx_dev_gates.c
         gdx_imgui_nav.cpp
         gdx_workshop.cpp
+        gdx_audio_seq_packs.cpp
+        gdx_audio_sample_packs.cpp
+        gdx_audio_soundfont_packs.cpp
+        gdx_lua.cpp
+        gdx_lua_state.c
+        gdx_model_packs.cpp
         mio0_wrap.c
         gdx_segment_source.c
         "${CMAKE_CURRENT_SOURCE_DIR}/../torch/lib/libmio0/mio0.c"
@@ -769,6 +801,7 @@ if(GDX_BUILD_JP)
 
     target_link_libraries(G-Diffuser-JP PRIVATE cxd4_rsp)
     target_link_libraries(G-Diffuser-JP PRIVATE discord-rpc)
+    target_link_libraries(G-Diffuser-JP PRIVATE gdx_lua)
 
     if(WIN32)
         target_link_libraries(G-Diffuser-JP PRIVATE user32 Comdlg32 Comctl32)

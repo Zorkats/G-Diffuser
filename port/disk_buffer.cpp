@@ -499,6 +499,7 @@ int gdx_disk_load(void) {
 #ifdef GDX_ALLOW_JP_INPUTS
     static const char* const kUsPreferredNames[] = {
         "baserom.translated.ek.ndd",
+        "baserom.translated.ek.nnd", // common transposed extension in the wild
         "baserom.jp.ek.ndd",
         "baserom.jp.disk",
     };
@@ -506,9 +507,10 @@ int gdx_disk_load(void) {
         "baserom.jp.ek.ndd",
         "baserom.jp.disk",
         "baserom.translated.ek.ndd",
+        "baserom.translated.ek.nnd",
     };
     const char* const* diskNames = jpRom ? kJpPreferredNames : kUsPreferredNames;
-    const size_t diskNameCount = 3;
+    const size_t diskNameCount = 4;
 #else
     /* Japanese-region gate, cheap half: the Japanese disk FILENAMES are not searched at all, so a
        .ndd dropped beside the executable under its usual JP name is never opened (no read, no
@@ -516,9 +518,10 @@ int gdx_disk_load(void) {
        `jpRom` stays in use for the provenance log line further down. */
     static const char* const kTranslatedOnlyNames[] = {
         "baserom.translated.ek.ndd",
+        "baserom.translated.ek.nnd",
     };
     const char* const* diskNames = kTranslatedOnlyNames;
-    const size_t diskNameCount = 1;
+    const size_t diskNameCount = 2;
 #endif
 
     // Search order. The managed copy under <exeDir>/media wins: gdx_firstboot.cpp creates it

@@ -226,6 +226,36 @@ bool TranslationTeleport(const void* prev, const void* cur) {
 }
 
 // =============================================================================================
+// Rotation-consistency mispair guard. cos(60 deg): correctly paired slots rotate far under
+// 15 deg/tick (fastest spin attack), unrelated objects differ by an arbitrary angle, so the
+// populations separate as widely as the translation ones do around kTeleportThreshold.
+// Only rows 0/1 are compared -- row 2 is derived and adds no information for rigid bases, and
+// degenerate (zero-length) rows skip rather than snap: a degenerate basis is not evidence of
+// mispairing, and snapping every such slot would freeze legit effects geometry.
+const float kRotationTeleportCosine = 0.5f;
+
+bool RotationTeleport(const void* prev, const void* cur) {
+    float pf[4][4];
+    float cf[4][4];
+    MtxToF(prev, pf);
+    MtxToF(cur, cf);
+    for (int r = 0; r < 2; r++) {
+        const float px = pf[r][0], py = pf[r][1], pz = pf[r][2];
+        const float cx = cf[r][0], cy = cf[r][1], cz = cf[r][2];
+        const float plen = sqrtf((px * px) + (py * py) + (pz * pz));
+        const float clen = sqrtf((cx * cx) + (cy * cy) + (cz * cz));
+        if (plen <= 0.0f || clen <= 0.0f) {
+            continue;
+        }
+        const float dot = ((px * cx) + (py * cy) + (pz * cz)) / (plen * clen);
+        if (dot < kRotationTeleportCosine) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// =============================================================================================
 // Referenced-set tracking. Graphics-thread only; no locking.
 // =============================================================================================
 static std::unordered_set<uint32_t>& CurSet() {
@@ -385,6 +415,22 @@ bool BasisJumpFixActive() {
         return true;
     }
     return CVarGetInteger("gEnhancements.Graphics.InterpBasisJump", 0) != 0;
+}
+
+static bool RotationSnapEnvOverride() {
+    static const bool on = [] {
+        char envBuf[8] = {0};
+        const char* v = GdxGetEnvVarWinAware("GDX_INTERP_ROT_SNAP", envBuf, sizeof(envBuf));
+        return v != nullptr && v[0] != '\0' && !(v[0] == '0' && v[1] == '\0');
+    }();
+    return on;
+}
+
+bool RotationSnapActive() {
+    if (RotationSnapEnvOverride()) {
+        return true;
+    }
+    return CVarGetInteger("gEnhancements.Graphics.InterpRotSnap", 0) != 0;
 }
 
 } // namespace gdx_interp

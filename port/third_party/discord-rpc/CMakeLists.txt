@@ -30,10 +30,9 @@ if(MSVC)
     target_compile_options(discord-rpc PRIVATE /W0)
 else()
     target_compile_options(discord-rpc PRIVATE -w)
-    # rapidjson 1.1.0's GenericStringRef defines a copy-assignment that writes const
-    # members; GCC >= 14 checks template bodies eagerly and hard-errors even though the
-    # operator is never instantiated. Downgrade that check rather than patching the
-    # vendored header (upstream deleted the operator after 1.1.0).
+    # Defense in depth: GCC >= 14 still hard-errors a restored vanilla 1.1.0
+    # GenericStringRef::operator=. The vendored document.h deletes that operator
+    # so Clang 22 can compile; this flag covers a header revert on GCC.
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 14)
         target_compile_options(discord-rpc PRIVATE -Wno-template-body)
     endif()

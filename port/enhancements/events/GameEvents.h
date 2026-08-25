@@ -86,6 +86,57 @@ DEFINE_EVENT(OnBoostStart,
              int32_t racerId;
              int32_t* frames;)
 
+/**
+ * @brief Fired once per game-thread frame, right before gGameFrameCount increments
+ *        (decomp/src/sys/sys_gfx.c, Game_ThreadEntry's main loop).
+ *
+ * No payload. Runs on the game thread every frame regardless of game mode, so a listener must be
+ * cheap and must gate itself on game state (e.g. gGameMode) if it only cares about races. Read-only
+ * intent: there is nothing to mutate and it is not cancellable.
+ */
+DEFINE_EVENT(OnFrame, )
+
+/**
+ * @brief Fired exactly once when the race intro countdown reaches GO
+ *        (decomp/src/game/racer.c, after the loop that arms every racer's
+ *        RACER_STATE_FLAGS_400000).
+ *
+ * No payload. Under EXPANSION_KIT the surrounding decomp branch retries while the disk drive
+ * reports busy, so this fires only on the pass where the retry lets the countdown continue.
+ */
+DEFINE_EVENT(OnRaceStart, )
+
+/**
+ * @brief Fired when a racer crosses the line and the game records a completed lap
+ *        (decomp/src/game/racer.c, after `racer->completedLapsTime` is written).
+ *
+ * @param racerId `Racer::id`; see OnBoostStart for the CPU-vs-player caveat. Fires for every
+ *                racer, not just the local player.
+ * @param lap     The racer's lap counter after the increment (`racer->lap`); the lap just
+ *                finished is `lap - 1`. On the finishing crossing this equals
+ *                gTotalLapCount + 1 and OnRaceFinish also fires.
+ *
+ * NOT fired in GAMEMODE_RECORDS, and in practice/death-race-style modes the lap counter wraps
+ * instead of finishing, so repeated fires with lap == 1 are normal there.
+ */
+DEFINE_EVENT(OnLapCompleted,
+             int32_t racerId;
+             int32_t lap;)
+
+/**
+ * @brief Fired when a racer completes the final lap and the game marks them finished
+ *        (decomp/src/game/racer.c, after RACER_STATE_FINISHED is set).
+ *
+ * @param racerId  `Racer::id`; see OnBoostStart for the CPU-vs-player caveat.
+ * @param raceTime The racer's final time in milliseconds (`racer->raceTime` as just committed).
+ * @param position Finishing order, 1-based (`gRacersFinished + 1` at the fire site: the game
+ *                 increments its finished counter a few lines later).
+ */
+DEFINE_EVENT(OnRaceFinish,
+             int32_t racerId;
+             int32_t raceTime;
+             int32_t position;)
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -132,6 +183,22 @@ void GameEvents_AddInstaller(GameEventsInstaller installer);
  * matches exactly.
  */
 void GameEvents_FireOnBoostStart(int32_t racerId, int32_t* frames);
+
+/**
+ * @brief Fires OnFrame. Called from the PORT-gated one-liner in decomp/src/sys/sys_gfx.c.
+ * Same inline-declaration constraint as GameEvents_FireOnBoostStart: gdiffuser_game compiles
+ * decomp/ without port/ include paths, so the decomp call site declares this prototype locally.
+ */
+void GameEvents_FireOnFrame(void);
+
+/** @brief Fires OnRaceStart. Called from the PORT-gated one-liner in decomp/src/game/racer.c. */
+void GameEvents_FireOnRaceStart(void);
+
+/** @brief Fires OnLapCompleted. Called from the PORT-gated one-liner in decomp/src/game/racer.c. */
+void GameEvents_FireOnLapCompleted(int32_t racerId, int32_t lap);
+
+/** @brief Fires OnRaceFinish. Called from the PORT-gated one-liner in decomp/src/game/racer.c. */
+void GameEvents_FireOnRaceFinish(int32_t racerId, int32_t raceTime, int32_t position);
 
 #ifdef __cplusplus
 }
