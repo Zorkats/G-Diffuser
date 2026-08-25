@@ -42,6 +42,7 @@ payload=(
     gamecontrollerdb.txt
     fonts
     decomp-recipes
+    shaders
     LICENSE
     THIRD_PARTY_NOTICES.md
     LICENSES
@@ -62,8 +63,10 @@ for soname in "${bundle[@]}"; do
     # ldd resolves through the same search path the loader would use, so this picks up the
     # versions actually linked against rather than whatever else is installed. Requiring an
     # absolute path skips the "=> not found" lines, which would otherwise yield the word "not".
+    # awk must NOT exit on the first match: with pipefail, closing the pipe early makes ldd die
+    # of SIGPIPE and the whole script aborts with 141 on hosts where the match lands early.
     resolved=$(ldd "$stage/G-Diffuser" "$stage/gdx-extract" \
-        | awk -v want="$soname" '$1 == want && $3 ~ /^\// { print $3; exit }')
+        | awk -v want="$soname" '$1 == want && $3 ~ /^\// && !found { print $3; found=1 }')
     if [ -z "$resolved" ] || [ ! -e "$resolved" ]; then
         echo "error: cannot locate $soname to bundle it" >&2
         exit 1

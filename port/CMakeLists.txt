@@ -416,6 +416,17 @@ add_custom_command(TARGET G-Diffuser POST_BUILD
             "$<TARGET_FILE_DIR:G-Diffuser>/LICENSES"
     VERBATIM)
 
+# The post-pipeline resolves file-based presets from appDir/shaders at runtime
+# (GdxResolvePostShaderPath), so the curated tree ships loose beside the exe rather than
+# packed into the o2r. include/ is load-bearing: pack-root presets pull colorspace-tools.h
+# and friends through relative paths, and roughly a third of the curated presets fail
+# translation when include/ is missing.
+add_custom_command(TARGET G-Diffuser POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_directory
+            "${CMAKE_SOURCE_DIR}/shaders"
+            "$<TARGET_FILE_DIR:G-Diffuser>/shaders"
+    VERBATIM)
+
 # gdx-extract, the standalone deterministic O2R extractor first boot spawns as a child process.
 # Isolated ExternalProject, NOT add_subdirectory'd:
 # Torch pulls its own spdlog/fmt/yaml-cpp via FetchContent, and out-of-tree prevents ODR/version

@@ -42,6 +42,7 @@ $payload = @(
     "gamecontrollerdb.txt",
     "fonts",
     "decomp-recipes",
+    "shaders",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
     "LICENSES"
