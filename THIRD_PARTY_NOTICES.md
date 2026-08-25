@@ -33,6 +33,12 @@ itself (`LICENSES/zlib-SDL2.txt`). It ships beside the executable and is layered
 mappings built into SDL, so a controller newer than the bundled SDL can be made to work by replacing
 that one file.
 
+The `shaders/` folder contains post-processing presets from the libretro slang-shaders collection
+(https://github.com/libretro/slang-shaders). That collection carries no repository-wide license;
+each source file keeps its own license header (GPL v2+, MIT, and public-domain dedications are all
+present). The files ship unmodified as user-facing data — they are not compiled into the
+executable — and their headers are their notices, so the folder must stay intact in binary packages.
+
 ## Asset boundary
 
 - G-Diffuser distributions do not include Nintendo ROM, disk, IPL, texture, model, audio, or other
