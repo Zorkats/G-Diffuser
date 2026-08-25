@@ -75,12 +75,16 @@ void GameEvents_Init(void) {
     // helpers below call GameEvents_Init first: EventSystem::RegisterListener THROWS on id == -1
     // (EventSystem.cpp:17-19), so a listener that beat registration would take down the process.
     REGISTER_EVENT(OnBoostStart);
+    REGISTER_EVENT(OnFrame);
+    REGISTER_EVENT(OnRaceStart);
+    REGISTER_EVENT(OnLapCompleted);
+    REGISTER_EVENT(OnRaceFinish);
 
     for (int i = 0; i < sInstallerCount; i++) {
         sInstallers[i]();
     }
 
-    gdx_port_logf("[events] registered 1 event, %d enhancement installer(s)\n", sInstallerCount);
+    gdx_port_logf("[events] registered 5 events, %d enhancement installer(s)\n", sInstallerCount);
 }
 
 // =================================================================================================
@@ -105,4 +109,28 @@ void GameEvents_FireOnBoostStart(int32_t racerId, int32_t* frames) {
     // list. The macro expands to a stack payload; listeners mutate it through the pointer field, so
     // the write lands directly on the game's own `Racer::boostTimer`.
     CALL_EVENT(OnBoostStart, racerId, frames);
+}
+
+void GameEvents_FireOnFrame(void) {
+    GameEvents_Init();
+
+    CALL_EVENT(OnFrame);
+}
+
+void GameEvents_FireOnRaceStart(void) {
+    GameEvents_Init();
+
+    CALL_EVENT(OnRaceStart);
+}
+
+void GameEvents_FireOnLapCompleted(int32_t racerId, int32_t lap) {
+    GameEvents_Init();
+
+    CALL_EVENT(OnLapCompleted, racerId, lap);
+}
+
+void GameEvents_FireOnRaceFinish(int32_t racerId, int32_t raceTime, int32_t position) {
+    GameEvents_Init();
+
+    CALL_EVENT(OnRaceFinish, racerId, raceTime, position);
 }

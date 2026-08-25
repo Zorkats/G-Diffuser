@@ -25,6 +25,7 @@
 #include "libultraship/window/gui/GfxDebuggerWindow.h"
 #include "libultraship/window/gui/InputEditorWindow.h"
 #include "gdx_ghost_window.h"
+#include "gdx_content_window.h"
 #include "gdx_input_viewer.h"
 #include "gdx_console_log.h"
 #include "port_log.h"
@@ -37,6 +38,7 @@
 #include "gdx_extract_launch.h"
 #include "gdx_audio_thread.h"
 #include "gdx_frame_pacer.h"
+#include "gdx_workshop.h"
 #include "n64_gfx_bridge.h"
 #include <SDL2/SDL.h>
 
@@ -70,6 +72,7 @@ extern "C" void gdx_register_host_range(void* ptr, size_t size); // expose a ran
 extern "C" void gdx_register_main_module_range(void); // lets low32 EXE/BSS segment tokens resolve
 extern "C" void gdx_game_request_reset(void);
 extern "C" void gdx_disk_save_tick(void);
+void GdxAchievements_Tick(void); // port/gdx_achievements.h — F10 tracker; C++ linkage, lazy-init
 extern "C" void gdx_disk_save_flush(void);
 extern "C" void gdx_discord_tick(void);
 extern "C" void gdx_discord_shutdown(void);
@@ -80,6 +83,9 @@ extern "C" int  GdxSegmentSourcePreload(uint32_t romBase);
 extern "C" int  GdxSegmentSourcePayload(uint32_t romBase, void** outPayload, uint32_t* outSize);
 extern "C" void gdx_boot_warm_asset_segments(void);
 extern "C" int  gdx_vi_divider(void);               // 1 = 60Hz, 3 = Course Edit cursor mode (~20Hz)
+extern "C" void gdx_course_edit_mouse_cursor_tick(void); // port/gdx_course_edit_mouse.cpp
+extern "C" void gdx_course_edit_mouse_grab_tick(void);   // port/gdx_course_edit_mouse.cpp
+extern "C" void gdx_hide_os_cursor_tick(void);           // port/gdx_course_edit_mouse.cpp
 
 static void logStep(const char* s) {
     gdx_port_logf("[G-Diffuser] %s\n", s);
@@ -340,6 +346,44 @@ static uint8_t sGdxControllerBits = 0;
 static std::vector<int32_t> sGdxRoutedGamepadIds;              // last seen connected set, sorted
 static std::unordered_map<int32_t, uint8_t> sGdxGamepadPorts;  // SDL instance id -> owned port
 
+// Persisted seat memory, GUID-keyed so assignments survive restarts: SDL instance ids are
+// per-session, the hardware GUID is not. CVar string form: "guidhex=port;guidhex=port;..."
+// (ports stored 0-based).
+static std::unordered_map<std::string, uint8_t> gdxLoadGamepadSeats() {
+    std::unordered_map<std::string, uint8_t> seats;
+    const std::string raw = CVarGetString("gEnhancements.Input.GamepadSeats", "");
+    size_t pos = 0;
+    while (pos < raw.size()) {
+        const size_t end = raw.find(';', pos);
+        const std::string entry =
+            raw.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+        const size_t eq = entry.find('=');
+        if (eq > 0 && eq != std::string::npos) {
+            const int port = atoi(entry.c_str() + eq + 1);
+            if (port >= 0 && port < MAXCONTROLLERS) {
+                seats[entry.substr(0, eq)] = static_cast<uint8_t>(port);
+            }
+        }
+        if (end == std::string::npos) {
+            break;
+        }
+        pos = end + 1;
+    }
+    return seats;
+}
+
+// 32-char hex GUID for a connected instance id, or empty when SDL cannot resolve it.
+static std::string gdxGamepadGuidString(int32_t instanceId) {
+    SDL_GameController* controller = SDL_GameControllerFromInstanceID(instanceId);
+    SDL_Joystick* joystick = controller != nullptr ? SDL_GameControllerGetJoystick(controller) : nullptr;
+    if (joystick == nullptr) {
+        return {};
+    }
+    char guidString[33] = {};
+    SDL_JoystickGetGUIDString(SDL_JoystickGetGUID(joystick), guidString, sizeof(guidString));
+    return guidString;
+}
+
 static bool gdxPortOwnedByAGamepad(uint8_t port) {
     for (const auto& [instanceId, ownedPort] : sGdxGamepadPorts) {
         if (ownedPort == port) {
@@ -387,9 +431,17 @@ static void gdxSyncGamepadPortRouting(const std::shared_ptr<Ship::ControlDeck>& 
         }
     }
 
-    // Place pads we have not seen before into the lowest unowned port.
+    // Place pads we have not seen before: a GUID the seat memory knows goes back to its remembered
+    // port when that port is free; anything else takes the lowest unowned port.
+    const std::unordered_map<std::string, uint8_t> rememberedSeats = gdxLoadGamepadSeats();
     for (int32_t instanceId : ids) {
         if (sGdxGamepadPorts.count(instanceId) != 0) {
+            continue;
+        }
+        const std::string guid = gdxGamepadGuidString(instanceId);
+        const auto seat = guid.empty() ? rememberedSeats.end() : rememberedSeats.find(guid);
+        if (seat != rememberedSeats.end() && !gdxPortOwnedByAGamepad(seat->second)) {
+            sGdxGamepadPorts[instanceId] = seat->second;
             continue;
         }
         for (uint8_t port = 0; port < MAXCONTROLLERS; port++) {
@@ -421,6 +473,45 @@ static void gdxSyncGamepadPortRouting(const std::shared_ptr<Ship::ControlDeck>& 
             !controller->HasMappingsForPhysicalDeviceType(Ship::PhysicalDeviceType::SDLGamepad)) {
             controller->AddDefaultMappings(Ship::PhysicalDeviceType::SDLGamepad);
             gdx_port_logf("[input] port %d: seeded default gamepad mappings\n", port + 1);
+        }
+    }
+
+    // Persist the seat memory as the union of what was remembered and what is seated now, so an
+    // unplugged pad keeps its seat for the next boot. Written only when an assignment changed.
+    {
+        std::unordered_map<std::string, uint8_t> seats = rememberedSeats;
+        bool changed = false;
+        for (int32_t instanceId : ids) {
+            const auto owner = sGdxGamepadPorts.find(instanceId);
+            if (owner == sGdxGamepadPorts.end()) {
+                continue;
+            }
+            const std::string guid = gdxGamepadGuidString(instanceId);
+            if (guid.empty()) {
+                continue;
+            }
+            const auto it = seats.find(guid);
+            if (it == seats.end() || it->second != owner->second) {
+                seats[guid] = owner->second;
+                changed = true;
+            }
+        }
+        if (changed) {
+            std::vector<std::string> entries;
+            entries.reserve(seats.size());
+            for (const auto& [guid, port] : seats) {
+                entries.push_back(guid + "=" + std::to_string(static_cast<int>(port)));
+            }
+            std::sort(entries.begin(), entries.end()); // stable order -> no write churn
+            std::string raw;
+            for (const auto& entry : entries) {
+                if (!raw.empty()) {
+                    raw += ';';
+                }
+                raw += entry;
+            }
+            CVarSetString("gEnhancements.Input.GamepadSeats", raw.c_str());
+            CVarSave();
         }
     }
 
@@ -555,43 +646,6 @@ static void addArchiveCandidateRoots(std::vector<std::filesystem::path>& roots, 
     }
 }
 
-// gEnhancements.Workshop.DisabledPacks: comma-joined pack basenames, case-insensitive match.
-// Lets the user keep a pack on disk but out of the load set.
-static bool workshopPackDisabled(const std::string& basename) {
-    const char* raw = CVarGetString("gEnhancements.Workshop.DisabledPacks", "");
-    if (raw == nullptr || raw[0] == '\0') {
-        return false;
-    }
-    auto lower = [](std::string s) {
-        for (char& c : s) {
-            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        }
-        return s;
-    };
-    const std::string target = lower(basename);
-    std::string list = raw;
-    size_t start = 0;
-    while (start <= list.size()) {
-        size_t comma = list.find(',', start);
-        const size_t end = (comma == std::string::npos) ? list.size() : comma;
-        std::string token = list.substr(start, end - start);
-        // Trim surrounding whitespace.
-        size_t b = token.find_first_not_of(" \t");
-        size_t e = token.find_last_not_of(" \t");
-        if (b != std::string::npos) {
-            token = token.substr(b, e - b + 1);
-            if (lower(token) == target) {
-                return true;
-            }
-        }
-        if (comma == std::string::npos) {
-            break;
-        }
-        start = comma + 1;
-    }
-    return false;
-}
-
 static std::vector<std::string> findArchivePaths(const char* argv0) {
     std::vector<std::filesystem::path> roots;
     std::error_code ec;
@@ -633,47 +687,49 @@ static std::vector<std::string> findArchivePaths(const char* argv0) {
     }
 
     // Append mods/*.o2r after the base archives. ArchiveManager is last-wins, so load order is
-    // priority order; case-insensitive lexicographic scan gives deterministic control via numeric
-    // filename prefixes ("10-hifonts.o2r"). First root with a mods/ dir wins, like the base
-    // archives. Mounting is never CVar-gated (an unmatched pack is inert).
+    // priority order. Order and the disable filter come from GdxWorkshopOrderModPaths, which
+    // applies the same PackOrder list and dual-key (id/basename) disable match as the Workshop
+    // menu's hot reload — boot and reload mount the same set in the same order. First root with
+    // a mods/ dir wins, like the base archives.
+    //
+    // The Workshop "Texture packs" master switch gates the WHOLE scan (M-A, owner decision M1):
+    // with it off, no pack mounts at all, so the direct-key shadowing channel (a pack entry at a
+    // base resource's own key) is off too — previously only the textures/pack/ lookup consulted
+    // the switch and direct-key packs kept applying. InitConsoleVariables has already run by the
+    // time findArchivePaths is called, so the persisted value is live here.
+    if (CVarGetInteger("gEnhancements.Workshop.TexturePacks", 0) != 0) {
     for (const auto& root : roots) {
         const auto modsDir = root / "mods";
         if (!std::filesystem::is_directory(modsDir, ec)) {
             ec.clear();
             continue;
         }
-        std::vector<std::pair<std::string, std::string>> mods; // (sortKeyLower, absolutePath)
+        std::vector<std::string> modPaths;
         for (const auto& entry : std::filesystem::directory_iterator(modsDir, ec)) {
             if (!entry.is_regular_file(ec)) {
                 continue;
             }
-            std::string ext = entry.path().extension().string();
-            std::string extLower = ext;
+            std::string extLower = entry.path().extension().string();
             for (char& c : extLower) {
                 c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
             }
             if (extLower != ".o2r") {
                 continue;
             }
-            const std::string basename = entry.path().filename().string();
-            std::string keyLower = basename;
-            for (char& c : keyLower) {
-                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-            }
-            if (workshopPackDisabled(basename)) {
-                gdx_port_logf("[workshop] pack: %s (disabled)\n", basename.c_str());
-                continue;
-            }
-            mods.emplace_back(keyLower, std::filesystem::absolute(entry.path(), ec).string());
+            modPaths.push_back(std::filesystem::absolute(entry.path(), ec).string());
         }
-        std::sort(mods.begin(), mods.end());
-        for (const auto& [keyLower, path] : mods) {
+        std::vector<std::string> disabled;
+        for (const std::string& path : GdxWorkshopOrderModPaths(modPaths, &disabled)) {
             archives.push_back(path);
             gdx_port_logf("[workshop] pack: %s\n",
                           std::filesystem::path(path).filename().string().c_str());
         }
+        for (const std::string& basename : disabled) {
+            gdx_port_logf("[workshop] pack: %s (disabled)\n", basename.c_str());
+        }
         break; // first root with a mods/ dir wins, like the base archives
     }
+    } // master-switch gate
 
     return archives;
 }
@@ -877,6 +933,9 @@ int main(int argc, char** argv) {
             std::make_shared<LUS::InputEditorWindow>("gControllerConfigurationEnabled", "Input Editor"));
         pgui->AddGuiWindow(
             std::make_shared<GdxGhostWindow>("gEnhancements.Practice.GhostBrowserOpen", "Ghost Browser"));
+        // The F12 unified Export/Import shell; v1 hosts E1 .gdxc track/machine export.
+        pgui->AddGuiWindow(
+            std::make_shared<GdxContentWindow>("gEnhancements.Content.LibraryOpen", "Content Library"));
         pgui->AddGuiWindow(std::make_shared<GdxInputViewer>());
         pgui->AddGuiWindow(std::make_shared<GdxFpsOverlay>());
 
@@ -1294,6 +1353,18 @@ int main(int argc, char** argv) {
         // hint, not a correctness issue. See gdx_audio_thread.cpp.
         gdx_audio_thread_notify_frame();
         w->GetMouseStateManager()->StartFrame();
+        // Course Edit mouse S2: hides the OS cursor while the absolute mouse drive owns the
+        // in-game cursor. Must run AFTER MouseStateManager::StartFrame — the manager re-shows the
+        // cursor on any movement, so hiding before its tick would flicker. No-op unless the
+        // Course Edit mouse gate is fully active (CVar, mode, menu closed, cursor in the blit
+        // rect; yields to F2 capture) — see port/gdx_course_edit_mouse.cpp.
+        gdx_course_edit_mouse_cursor_tick();
+        // Course Edit / race mouse steering S3: confines the OS cursor to the window while mouse
+        // steering is active. Runs after the cursor tick so the same per-frame input state is used.
+        gdx_course_edit_mouse_grab_tick();
+        // Hide-cursor-in-game option: hides the OS cursor during gameplay, re-shows it for the
+        // ImGui menu. Same post-StartFrame ordering requirement as the Course Edit cursor tick.
+        gdx_hide_os_cursor_tick();
         gdx::PerfPhaseEnd(gdx::PerfInput);
         if (!interpOn) {
             // Default path: one tick, one Run, one present, paced by the frame pacer. Nothing on
@@ -1313,6 +1384,9 @@ int main(int argc, char** argv) {
             // Debounced: persists the 64DD save sidecar atomically once the game's write burst has
             // drained. No-op when nothing is pending.
             gdx_disk_save_tick();
+            // F10: diffs gSaveContext for achievement unlocks and accumulates playtime; debounced
+            // persistence, no-op when gEnhancements.Achievements.Enabled is 0.
+            GdxAchievements_Tick();
             // After gdx_dispatch deliberately: gGameMode flips MID-dispatch (see input_bridge.c's
             // staleness notes), so this is the only window where a sample reflects this frame's
             // post-update truth.
@@ -1343,6 +1417,7 @@ int main(int argc, char** argv) {
             gdx::PerfPhaseEnd(gdx::PerfDispatch);
             gdx::PerfPhaseBegin(gdx::PerfTicks);
             gdx_disk_save_tick();
+            GdxAchievements_Tick(); // F10; see the non-interp branch's note
             gdx_discord_tick(); // post-dispatch sample; see the non-interp branch's note
             gdx::PerfPhaseEnd(gdx::PerfTicks);
             gdx::PerfPhaseBegin(gdx::PerfPresent);

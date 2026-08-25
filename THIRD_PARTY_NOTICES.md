@@ -17,6 +17,7 @@ must remain with binary packages.
 | SSE2NEON | ARM SIMD compatibility header used by cxd4 | `LICENSES/MIT-SSE2NEON.txt` |
 | discord-rpc | Discord Rich Presence (optional, off by default) | `LICENSES/MIT-discord-rpc.txt` |
 | RapidJSON | JSON serialization inside discord-rpc | `LICENSES/MIT-rapidjson.txt` |
+| Lua | Embedded scripting language runtime | `LICENSES/MIT-Lua.txt` |
 
 ## Runtime and extraction dependencies
 

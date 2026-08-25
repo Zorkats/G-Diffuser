@@ -149,6 +149,58 @@ extern "C" void GDiffuser_RegisterLoadedAssetBuffer(const void* buffer, size_t s
     gLoadedAssetBuffers.push_back({ ptr, size, key });
 }
 
+/* Containing-range variant of the lookup below, for per-tile atlas overrides
+ * (devdocs/MODDING_ATLAS_DESIGN.md; mechanism corrected in devdocs/POST_1_0_SCOPING.md): a band
+ * load's source pointer has the band byte offset baked in (LoadBlock/LoadTile row/column math in
+ * the interpreter), so an exact-pointer match misses every non-first band. Finds the registered
+ * buffer whose [ptr, ptr+size) contains `addr` and reports the offset within it. When nested
+ * registrations overlap, the tightest base (highest ptr <= addr) wins so a sub-asset is not
+ * swallowed by a larger container registered over the same range. NULL when nothing contains it. */
+extern "C" const char* GDiffuser_LookupLoadedAssetKeyContaining(const void* addr, size_t* outByteOffset) {
+    if (addr == nullptr) {
+        return nullptr;
+    }
+
+    const auto* ptr = static_cast<const unsigned char*>(addr);
+    const LoadedAssetBuffer* best = nullptr;
+    for (const LoadedAssetBuffer& entry : gLoadedAssetBuffers) {
+        if ((entry.ptr == nullptr) || (ptr < entry.ptr) || (ptr >= entry.ptr + entry.size)) {
+            continue;
+        }
+        if ((best == nullptr) || (entry.ptr > best->ptr)) {
+            best = &entry;
+        }
+    }
+    if (best == nullptr) {
+        return nullptr;
+    }
+    if (outByteOffset != nullptr) {
+        *outByteOffset = static_cast<size_t>(ptr - best->ptr);
+    }
+    return best->key.c_str();
+}
+
+/* Exact-base variant for the bridge's RDRAM whole-image override path (issue #27): that caller
+ * needs the REGISTERED buffer size to gate pack replacements (a pack payload smaller than the
+ * buffer is a single atlas band, not a whole image), which the containing-range lookup does not
+ * report. Matches only entry bases, never interior addresses. */
+extern "C" const char* GDiffuser_LookupLoadedAssetKeyAndSize(const void* buffer, size_t* outSize) {
+    if (buffer == nullptr) {
+        return nullptr;
+    }
+
+    const auto* ptr = static_cast<const unsigned char*>(buffer);
+    for (LoadedAssetBuffer& entry : gLoadedAssetBuffers) {
+        if (entry.ptr == ptr) {
+            if (outSize != nullptr) {
+                *outSize = entry.size;
+            }
+            return entry.key.c_str();
+        }
+    }
+    return nullptr;
+}
+
 extern "C" const char* GDiffuser_LookupLoadedAssetKey(const void* buffer, size_t minSize, int requireUnmodified) {
     if (buffer == nullptr) {
         return nullptr;

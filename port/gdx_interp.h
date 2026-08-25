@@ -71,6 +71,20 @@ void LerpMtx(const void* prev, const void* cur, float t, void* out);
 extern const float kTeleportThreshold;
 bool TranslationTeleport(const void* prev, const void* cur);
 
+// --- Snap rule: rotation-consistency mispair guard ------------------------------------------
+// True when the basis ROTATION between prev and cur differs by more than ~60 degrees. The
+// translation teleport above cannot catch a mispairing between two objects that sit close
+// together -- adjacent track chunks pass the 300-unit guard silently while their orientations
+// are unrelated. Comparing normalized basis rows closes that hole: legit per-tick rotation is
+// well under 15 deg/tick even at the fastest spin attack, while a mispaired pair differs by an
+// arbitrary angle. Like the translation guard this is a mitigation, not the stable-key fix.
+bool RotationTeleport(const void* prev, const void* cur);
+
+// Gate for RotationTeleport at the reroute site. Env pin GDX_INTERP_ROT_SNAP forces it on for
+// an A/B; the CVar carries the shipping default. Default OFF until owner-validated per the
+// perfection plan's Slice-3 data gate; flip the CVar default once confirmed in a race.
+bool RotationSnapActive();
+
 // --- Pairing-quality measurement ------------------------------------------------------------
 // Magnitude of the prev->cur translation delta for a slot that PAIRED (offset referenced in both
 // ticks, under the teleport threshold) — the number that separates a correct pairing from a silent

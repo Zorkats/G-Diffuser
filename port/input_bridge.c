@@ -52,6 +52,7 @@
 #include "port_log.h"
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -69,6 +70,20 @@
 
 extern s32 gControllersConnected;
 
+/* Rumble (issue #15): the motor state machine lives in Controller_UpdateInputs
+   (decomp/src/sys/controller.c:155-197), whose call sites are all #ifndef PORT, so the per-port
+   driving of unk_72/unk_74/unk_76/unk_78/unk_88/unk_8C/unk_90 is replicated below. The motor
+   entry points resolve to libultraship's extern "C" shims (libultra/os.cpp:319-332):
+   __osMotorAccess -> ControlDeck rumble (StartRumble/StopRumble), osMotorInit records the
+   channel. Both sides compile OSPfs with the same x64 layout (channel at 0x10; the 0x08 comment
+   in libultraship pfs.h describes the 32-bit layout), so &gControllers[i].pfs crosses safely.
+   Declared locally per this file's no-umbrella-header pattern. */
+extern s32 osMotorInit(OSMesgQueue* mq, OSPfs* pfs, s32 channel);
+extern s32 __osMotorAccess(OSPfs* pfs, s32 vibrate);
+extern OSMesgQueue gSerialEventQueue;
+extern bool gResetStarted;
+extern s32 D_800CCFB0;
+
 // Implemented in main.cpp (C++). Fills per-port N64 button bitmasks + analog sticks (-80..80) and
 // a per-port "this port can produce input right now" flag. Returns 0 if the ControlDeck is
 // unavailable, leaving every slot zeroed — degrade to zero input, never crash. The scalar widths
@@ -79,6 +94,16 @@ extern s32 gControllersConnected;
 // behave correctly when it runs once per frame. See gdx_lus_read_pads() in main.cpp.
 extern int gdx_lus_read_pads(int capacity, u16* out_buttons, s8* out_stick_x, s8* out_stick_y,
                              u8* out_connected);
+
+// Implemented in gdx_course_edit_mouse.cpp (C++). Absolute position steering for issue #18:
+// cursor X inside the blit rect maps to stick deflection; returns INT32_MIN while the mouse is
+// idle, a menu/menubar is open, or the mode gate is off — the caller leaves the stick untouched
+// then, so the controller takes over seamlessly. NOT the Course Edit absolute-drive shim.
+extern int gdx_mouse_steer_stick_x(void);
+
+// Implemented in gdx_course_edit_mouse.cpp (C++). Returns N64 button bitmask with BTN_A/B set
+// from OS left/right clicks while the Course Edit / Create Machine absolute mouse drive is active.
+extern int gdx_course_edit_mouse_buttons(void);
 
 // Zero exactly the input fields Controller_ClearInputs() clears (decomp/src/sys/controller.c:47-51)
 // without touching pfs / rumble bookkeeping. Used when a port goes away mid-session so a pad that
@@ -184,6 +209,18 @@ static void gdx_sync_controller_ports(const u8* connected) {
                 }
             }
             gControllersConnected++;
+            /* Rumble-pak bring-up, mirroring the hardware unk_78 init branch
+               (controller.c:155-163): probe once, stop the motor, then mark the pak present. The
+               LUS shim always "finds" a pak; whether anything physically rumbles is up to the
+               ControlDeck mapping (keyboard/mouse simply no-op in StartRumble). */
+            if (osMotorInit(&gSerialEventQueue, &gControllers[i].pfs, i) == 0) {
+                __osMotorAccess(&gControllers[i].pfs, 0 /* MOTOR_STOP */);
+                gControllers[i].unk_74 = 1;
+            } else {
+                gControllers[i].unk_74 = 0;
+            }
+            gControllers[i].unk_88 = gControllers[i].unk_8C = gControllers[i].unk_90 = 0;
+            gControllers[i].unk_78 = gControllers[i].unk_76 = 0;
             gdx_port_logf("[input] port %d connected (players now %d)\n", i + 1, gControllersConnected);
         } else {
             for (j = 0; j < MAXCONTROLLERS; j++) {
@@ -193,6 +230,13 @@ static void gdx_sync_controller_ports(const u8* connected) {
                 }
             }
             gControllersConnected--;
+            /* A departing pad must not leave its motor running, and the pak bookkeeping resets so
+               a replug re-runs the probe above instead of trusting a stale "motor on" flag. */
+            if (gControllers[i].unk_74 == 1) {
+                __osMotorAccess(&gControllers[i].pfs, 0 /* MOTOR_STOP */);
+            }
+            gControllers[i].unk_74 = gControllers[i].unk_76 = 0;
+            gControllers[i].unk_88 = gControllers[i].unk_8C = gControllers[i].unk_90 = 0;
             // A pad that vanishes mid-race must not leave its last frame latched. The racer it was
             // driving now reads the neutral gControllers[4] sentinel, but the port's own struct is
             // still live for anything holding a direct pointer (e.g. course_edit/188850.c:859).
@@ -444,9 +488,10 @@ int gdx_remove_borders(void) {
 // pillarboxing pre-tick boot frames on the next launch. Runtime state never belongs in the config
 // file.
 //
-// gdx_fixed_aspect_publish() is called from the decomp's mode-flip site under PORT as well as from
-// the per-frame tick, so consumers that read the flag live (Transition_Draw, Fast3dGui::DrawGame)
-// and the interpreter's per-task re-latch see the post-flip truth within the same frame.
+// gdx_fixed_aspect_publish() is called from the decomp's mode-flip site and from the Course Edit
+// test-drive entry/exit under PORT as well as from the per-frame tick, so consumers that read the
+// flag live (Transition_Draw, Fast3dGui::DrawGame) and the interpreter's per-task re-latch see the
+// post-flip truth within the same frame.
 //
 // GET_MODE masks off the F3D-variant bits (0xC000), so GAMEMODE_CREATE_MACHINE (0x10) matches
 // every sub-state of that editor — the ENTRY "SELECT MACHINE" screen and its file/clear sub-menus
@@ -455,6 +500,21 @@ int gdx_remove_borders(void) {
 static int gdx_mode_forces_fixed_aspect(s32 gamemode) {
     s32 mode = GET_MODE(gamemode);
     return (mode == GAMEMODE_COURSE_EDIT) || (mode == GAMEMODE_CREATE_MACHINE);
+}
+
+// Course Edit TEST DRIVE exception. The test drive never flips gGameMode off
+// GAMEMODE_COURSE_EDIT, but it drives the real race pipeline on the custom track: the draw path
+// (func_xk2_800DF6FC's test-run branch, course_edit/191080.c) emits only Background/Course/Racer
+// plus the speed/minimap HUD -- none of the editor 2D UI the 4:3 pin exists for. While
+// gInCourseEditTestRun is live the pin lifts and the run follows the normal widescreen CVars like
+// any race. The flag brackets the run: set on entry in func_xk2_800DEE20 (course_edit/188850.c),
+// cleared on exit in func_xk2_800EC91C (course_edit/19DD60.c), the pause menu's only way out.
+//
+// The CVar has no menu widget yet, so it is never registered; CVarGetInteger's default (1) makes
+// the feature work regardless (same precedent as gdx_widescreen_split_ui_active above).
+static int gdx_test_drive_active(void) {
+    extern bool gInCourseEditTestRun; // decomp/src/game/course_gadgets.c
+    return gInCourseEditTestRun && CVarGetInteger("gEnhancements.Graphics.WidescreenTestDrive", 1);
 }
 
 void gdx_fixed_aspect_publish(void) {
@@ -478,7 +538,7 @@ void gdx_fixed_aspect_publish(void) {
     // which never change gGameMode -- is still forced to 4:3. The accepted cost is rendering the
     // outgoing screen in the destination aspect during its wipe, which the wipe covers.
     s32 effectiveMode = (gGameMode != gQueuedGameMode) ? gQueuedGameMode : gGameMode;
-    gdx_set_force_fixed_aspect(gdx_mode_forces_fixed_aspect(effectiveMode));
+    gdx_set_force_fixed_aspect(gdx_mode_forces_fixed_aspect(effectiveMode) && !gdx_test_drive_active());
 }
 
 void gdx_fixed_aspect_tick(void) {
@@ -577,6 +637,56 @@ static void gdx_update_port_inputs(int port, u16 buttons, s8 stick_x, s8 stick_y
             state->accumReleased = 0;
             state->accumStickPressed = 0;
             state->accumStickReleased = 0;
+
+            /* Rumble state machine, replicated verbatim from Controller_UpdateInputs
+               (controller.c:155-197) and run on the game tick like hardware. unk_8C/unk_90 are the
+               game's per-frame intensity/decay requests (racer.c), unk_72 gates driving entirely
+               (menus/race transitions), unk_78 requests a re-probe, and the (port << 5) +
+               D_800CCFB0 term staggers a periodic stop-retry across ports every 128 ticks. */
+            if (controller->unk_78 != 0) {
+                if (osMotorInit(&gSerialEventQueue, &controller->pfs, port) == 0) {
+                    __osMotorAccess(&controller->pfs, 0 /* MOTOR_STOP */);
+                    controller->unk_74 = 1;
+                } else {
+                    controller->unk_74 = 0;
+                }
+                controller->unk_88 = controller->unk_8C = controller->unk_90 = 0;
+                controller->unk_78 = controller->unk_76 = 0;
+            } else if ((controller->unk_72 == 0) || gResetStarted) {
+                if ((controller->unk_74 == 1) &&
+                    ((controller->unk_76 == 1) || !(((port << 5) + D_800CCFB0) & 0x7F))) {
+                    if (__osMotorAccess(&controller->pfs, 0 /* MOTOR_STOP */) == 0) {
+                        controller->unk_76 = 0;
+                    } else {
+                        controller->unk_74 = 0;
+                    }
+                }
+            } else if (controller->unk_74 == 1) {
+                controller->unk_88 += controller->unk_8C;
+                controller->unk_8C -= controller->unk_90;
+                if (controller->unk_8C < 0) {
+                    controller->unk_8C = 0;
+                }
+
+                if (controller->unk_88 >= 1000) {
+                    controller->unk_88 -= 1000;
+                    if (controller->unk_76 == 0) {
+                        if (__osMotorAccess(&controller->pfs, 1 /* MOTOR_START */) == 0) {
+                            controller->unk_76 = 1;
+                        } else {
+                            controller->unk_74 = 0;
+                        }
+                    }
+                } else {
+                    if (controller->unk_76 == 1) {
+                        if (__osMotorAccess(&controller->pfs, 0 /* MOTOR_STOP */) == 0) {
+                            controller->unk_76 = 0;
+                        } else {
+                            controller->unk_74 = 0;
+                        }
+                    }
+                }
+            }
         }
         // Non-boundary host frames leave buttonPressed/Released/prev/retrigger untouched: the game
         // only reads them on its tick, which is always a boundary frame.
@@ -668,6 +778,20 @@ void gdx_controller_poll(void) {
     // controller the game will accept.
     connected[0] = 1;
 
+    // Issue #18 mouse steering: absolute position drive — gdx_mouse_steer_stick_x() maps the
+    // cursor X inside the blit rect to stick deflection and OVERRIDES player 0's stick X while
+    // the mouse is live. Race modes only — gdx_gamemode_is_race() excludes the editors, so this
+    // can never be live at the same time as the Course Edit absolute mouse drive (they are
+    // mode-disjoint, not mutexed). INT32_MIN = mouse idle / menu open -> controller stick keeps
+    // control. Placed BEFORE the autoinput/script overrides below so the deterministic dev
+    // harnesses still win over a live mouse.
+    if (CVarGetInteger("gEnhancements.Input.MouseSteering", 0) && gdx_gamemode_is_race(gGameMode)) {
+        int steer = gdx_mouse_steer_stick_x();
+        if (steer != INT32_MIN) {
+            stick_x[0] = (s8) steer;
+        }
+    }
+
     // Applied after the real controller read so analog events are not overwritten by it. Both dev
     // harnesses drive PORT 1 only; giving them a port argument would change their file formats.
     gdx_autoinput_apply(&buttons[0], &stick_x[0], &stick_y[0]);
@@ -687,6 +811,11 @@ void gdx_controller_poll(void) {
         stick_x[0] = scriptPad.stickX;
         stick_y[0] = scriptPad.stickY;
     }
+
+    // Course Edit / Create Machine mouse buttons: when the absolute mouse drive is active, map OS
+    // left/right clicks to N64 A/B. This is OR'd onto the LUS ControlDeck state so players do not
+    // need to manually bind LMB/RMB in the Input Editor to use the editor mouse cursor.
+    buttons[0] |= gdx_course_edit_mouse_buttons();
 
     // Publish presence BEFORE the per-port update: a port that just went away has its Controller
     // cleared in here, and clearing it after the update would throw away the frame we just read.

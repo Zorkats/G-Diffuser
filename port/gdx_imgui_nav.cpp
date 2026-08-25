@@ -111,9 +111,19 @@ extern "C" void gdx_imgui_nav_tick(void) {
     io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
     sOwnsFeed = true;
 
-    // Read by libultraship's Gui toggle even while the menu is closed.
+    // Read by libultraship's Gui toggle even while the menu is closed, so these stay fed
+    // unconditionally: Back is the pad's only path to OPEN the menu (CanUseGamepadNavigation is
+    // false while it is hidden).
     FeedButton(io, c, SDL_CONTROLLER_BUTTON_BACK, ImGuiKey_GamepadBack);
     FeedButton(io, c, SDL_CONTROLLER_BUTTON_START, ImGuiKey_GamepadStart);
+
+    // Honor the nav block (input-editor capture popup sets it): while navigation is disallowed a
+    // face-button press must reach only the raw capture, never ImGui activation — otherwise the
+    // press being captured also fires whatever widget holds default focus (Cancel) and closes the
+    // popup early.
+    if (!canUseNavigation) {
+        return;
+    }
 
     FeedButton(io, c, SDL_CONTROLLER_BUTTON_DPAD_UP, ImGuiKey_GamepadDpadUp);
     FeedButton(io, c, SDL_CONTROLLER_BUTTON_DPAD_DOWN, ImGuiKey_GamepadDpadDown);

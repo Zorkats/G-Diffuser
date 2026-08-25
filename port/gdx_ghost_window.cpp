@@ -4,6 +4,14 @@
 
 #include <cstdio>
 
+// Name tables from the decomp (common.c): gTrackNames is the same index space the game's
+// own ghost UI uses (menus.c:2616), including user-named edit-cup tracks once
+// func_8070D220 resolves them; gMachineNames covers the 36 roster/super machines.
+extern "C" {
+extern char* gTrackNames[];
+extern const char* gMachineNames[];
+}
+
 namespace {
 
 const char* GdxFormatTime(int32_t timeMs, char* buffer, size_t bufferSize) {
@@ -11,6 +19,22 @@ const char* GdxFormatTime(int32_t timeMs, char* buffer, size_t bufferSize) {
         timeMs = 0;
     }
     snprintf(buffer, bufferSize, "%d'%02d.%03d", timeMs / 60000, (timeMs / 1000) % 60, timeMs % 1000);
+    return buffer;
+}
+
+// The tables are lowercase because the in-game font only has capitals; ImGui has both.
+const char* GdxTitleCase(const char* src, char* buffer, size_t bufferSize) {
+    bool wordStart = true;
+    size_t i = 0;
+    for (; src[i] != '\0' && i + 1 < bufferSize; i++) {
+        char c = src[i];
+        if (wordStart && c >= 'a' && c <= 'z') {
+            c -= 'a' - 'A';
+        }
+        buffer[i] = c;
+        wordStart = (c == ' ' || c == '-');
+    }
+    buffer[i] = '\0';
     return buffer;
 }
 
@@ -114,8 +138,13 @@ void GdxGhostWindow::DrawElement() {
                 ImGui::SetTooltip("Race this ghost in Time Attack (maximum three per exact course).");
             }
             ImGui::TableSetColumnIndex(1);
-            char courseLabel[32];
-            snprintf(courseLabel, sizeof(courseLabel), "Course %d", entry.courseIndex + 1);
+            char courseLabel[48];
+            if (entry.courseIndex >= 0 && entry.courseIndex < 55 && gTrackNames[entry.courseIndex] != nullptr &&
+                gTrackNames[entry.courseIndex][0] != '\0') {
+                GdxTitleCase(gTrackNames[entry.courseIndex], courseLabel, sizeof(courseLabel));
+            } else {
+                snprintf(courseLabel, sizeof(courseLabel), "Course %d", entry.courseIndex + 1);
+            }
             if (ImGui::Selectable(courseLabel, selected)) {
                 mSelectedEncodedCourse = entry.encodedCourseIndex;
                 mSelectedGhostId = entry.ghostId;
@@ -129,7 +158,13 @@ void GdxGhostWindow::DrawElement() {
                 ImGui::TextDisabled("unavailable");
             }
             ImGui::TableSetColumnIndex(4);
-            ImGui::Text("Character #%u", static_cast<unsigned int>(entry.character));
+            if (entry.character < 36 && gMachineNames[entry.character] != nullptr) {
+                char machineLabel[48];
+                ImGui::TextUnformatted(GdxTitleCase(gMachineNames[entry.character], machineLabel,
+                                                    sizeof(machineLabel)));
+            } else {
+                ImGui::Text("Character #%u", static_cast<unsigned int>(entry.character));
+            }
             ImGui::TableSetColumnIndex(5);
             ImVec4 body(entry.bodyR / 255.0f, entry.bodyG / 255.0f, entry.bodyB / 255.0f, 1.0f);
             ImGui::ColorButton("##Body", body, ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoAlpha,
