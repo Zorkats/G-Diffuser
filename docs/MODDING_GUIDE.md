@@ -833,3 +833,26 @@ in the dropdown as `slang-shaders/<category>/<name>`.
 `frame_count_modN`, LUT textures, and runtime parameter editing all work.
 Not yet supported: compute/geometry/tessellation stages and alias resolution by
 name.
+
+## 19. Sharing tracks and machines (Content Library)
+
+The **Workshop → Content Library** page lists the tracks (Course Edit) and
+machines (Create Machine) stored on the emulated 64DD disk.
+
+**Export / import via `.gdxc` files.** **Export** writes
+`exports/<name>.gdxc` next to the executable — a self-validating container that
+another G-Diffuser player installs from the **Import from exports/** table on
+the same page. Track exports strip author ghosts and time records unless you
+tick **Include author ghosts and time records in track exports**. **Export Edit
+Cup as bundle** packs the cup definition plus its tracks into one
+`edit-cup.gdxc`.
+
+**EXPERIMENTAL: import straight from a disk dump.** **Import from a disk image** reads a 64DD
+disk image file — an emulator `.ndd` or a raw `.ram` dump of the disk's RAM
+area — and lists every Course Edit track and Create Machine machine inside it.
+Courses saved through the in-game editor all live in the same disk filesystem,
+whether they were made in G-Diffuser, in an emulator, or on original hardware,
+so they all appear here. Pick one and **Import** installs it onto your disk.
+The same checks run as for `.gdxc` files (course/machine checksums, name rules,
+the 100-file disk quota, overwrite confirmation), and copy-protected (encoded)
+entries are refused. The image itself is only ever read, never modified.
