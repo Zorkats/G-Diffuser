@@ -35,6 +35,11 @@
  * GdxContentBundle_RunOnDiskThread) saves every CRSD then merges only the 6 Edit-Cup rows of
  * the bundled CENT into gEditCupTrackNames (rows 6..23 keep the importer's other cups) and
  * persists CRS_ENTRY.CENT.
+ *
+ * A2 adds a disk-image import source (gdx_mfs_image.h): tracks and machines are read out of a
+ * foreign emulator/console 64DD dump as raw payloads and fed through the same validation chain
+ * minus the container-only checks (magic/version/CRC), then installed through the identical
+ * op-30 disk-thread path. The image side is strictly read-only.
  */
 
 #ifndef GDX_CONTENT_IMPORT_H
@@ -109,7 +114,6 @@ int gdx_content_import_list(GdxContentImportEntry* outEntries, int capacity);
  * the CENT merge via op 32, all-or-nothing at the validation gate. Returns GDX_CONTENT_OK once
  * the install has been queued. */
 int gdx_content_import_begin(const char* fileName);
-
 /* Nonzero while an install is queued/running on the disk thread. */
 int gdx_content_import_pending(void);
 
@@ -123,6 +127,21 @@ int gdx_content_import_result(int32_t* outMfsError);
  * entries were already written -- MFS has no multi-file transaction, so a mid-install failure
  * leaves a partial install; the admission gate is the pre-write validation. */
 int32_t gdx_content_import_bundle_failed_index(void);
+
+/* A2 disk-image source (direct payloads, no .gdxc container). */
+
+/* Validates a payload read out of a foreign disk image (gdx_mfs_image.h) with the same checks
+ * and order as the .gdxc container chain, minus the container-only ones (magic/version/CRC).
+ * Fills outEntry for UI display; fileName is left empty (there is no host file). Menu thread. */
+void gdx_content_import_validate_payload(const char* name, const char* extension, int32_t contentType,
+                                         const uint8_t* payload, int32_t payloadSize, GdxContentImportEntry* outEntry);
+
+/* Re-validates and installs a payload read out of a foreign disk image. Same guards, staging and
+ * disk-thread install (op 30, twin delete + cup clear) as gdx_content_import_begin; completion is
+ * polled through the same gdx_content_import_pending/result pair. Returns GDX_CONTENT_OK once the
+ * install has been queued. */
+int gdx_content_import_begin_payload(const char* name, const char* extension, int32_t contentType,
+                                     const uint8_t* payload, int32_t payloadSize);
 
 /* Formats error/warning bitmasks as a "; "-joined, human-readable list for the UI. */
 void gdx_content_import_format_errors(uint32_t errors, char* out, size_t outCap);

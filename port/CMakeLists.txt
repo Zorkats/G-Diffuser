@@ -297,6 +297,8 @@ add_executable(G-Diffuser
                                    # mirrors the ghost structs, walking gMfsRamArea directly
     gdx_content_import.c           # E2 .gdxc import; validation chain + disk-thread install
                                    # staging (op slot 30 in decomp/src/sys/disk/75000.c)
+    gdx_mfs_image.c                # A2 read-only MFS over foreign .ndd/.ram images; feeds the
+                                   # direct-payload import (gdx_content_import_begin_payload)
     gdx_content_window.cpp         # Content Library window; the F12 unified Export/Import shell
     gdx_xcup_seed.c                # M3 X Cup seed codes; hooked from Course_GenerateRandomCourse
     gdx_palette.cpp              # F2 palette editor; mirrors Machine like gdx_ghost_io.c mirrors
@@ -587,6 +589,18 @@ if(MSVC)
     target_compile_options(gdx_vi_fallback_tests PRIVATE /W3)
 elseif(GDX_PORT_WARN_FLAGS)
     target_compile_options(gdx_vi_fallback_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+
+# MFS-image reader unit test: compiles gdx_mfs_image.c UNMODIFIED and drives its public API
+# against synthesized .ndd/.ram fixtures (BE+LE, valid + corrupt). No game objects, no
+# libultraship, no decomp headers.
+add_executable(gdx_mfs_image_tests
+    tests/gdx_mfs_image_tests.c
+    gdx_mfs_image.c)
+if(MSVC)
+    target_compile_options(gdx_mfs_image_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_mfs_image_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
 endif()
 
 # Wide-Gfx packing test: compiles only the real decomp gbi.h with the game's defines, so the

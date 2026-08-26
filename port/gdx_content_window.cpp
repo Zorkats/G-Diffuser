@@ -3,7 +3,19 @@
 #include <imgui.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <commdlg.h>
+#endif
 
 #include "libultraship/bridge/consolevariablebridge.h"
 
@@ -33,7 +45,46 @@ const char* GdxImportTypeLabel(const GdxContentImportEntry& entry) {
     return "Unknown";
 }
 
+const char* GdxImageTypeLabel(const GdxMfsImageEntry& entry) {
+    if (entry.contentType == GDX_MFSIMG_TYPE_MACHINE) {
+        return "Machine";
+    }
+    if (entry.contentType == GDX_MFSIMG_TYPE_TRACK) {
+        return entry.extension[3] == 'D' ? "Track" : "Track (locked)";
+    }
+    return "Unknown";
+}
+
+// Maps the image reader's type enum onto the content one; the numeric contracts match but the
+// two headers are deliberately decoupled, so convert explicitly at the seam.
+int GdxImageContentType(const GdxMfsImageEntry& entry) {
+    return entry.contentType == GDX_MFSIMG_TYPE_MACHINE ? GDX_CONTENT_TYPE_MACHINE : GDX_CONTENT_TYPE_TRACK;
+}
+
+#ifdef _WIN32
+// Native open dialog; other platforms type/paste the path into the text field, the same split
+// the first-boot pickers make (gdx_firstboot.cpp).
+bool GdxPickDiskImage(char* outPath, size_t outCap) {
+    wchar_t fileName[MAX_PATH] = {};
+    OPENFILENAMEW ofn = {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFilter = L"64DD disk images (*.ndd, *.ram)\0*.ndd;*.ram\0All files (*.*)\0*.*\0";
+    ofn.lpstrFile = fileName;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrTitle = L"Open a 64DD disk image";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (!GetOpenFileNameW(&ofn)) {
+        return false;
+    }
+    return WideCharToMultiByte(CP_UTF8, 0, fileName, -1, outPath, (int) outCap, nullptr, nullptr) > 0;
+}
+#endif
+
 } // namespace
+
+GdxContentWindow::~GdxContentWindow() {
+    CloseDiskImage();
+}
 
 int GdxContentWindow::RefreshLibrary() {
     int count = gdx_content_list(mEntries, GDX_CONTENT_MAX_ENTRIES);
@@ -249,6 +300,7 @@ void GdxContentWindow::DrawElement() {
 
     DrawCupPicker(busy, inGameplay);
     DrawImportSection(busy, inGameplay);
+    DrawImageImportSection(busy, inGameplay);
 
     if (mStatus[0] != '\0') {
         ImGui::Separator();
@@ -458,6 +510,219 @@ void GdxContentWindow::DrawImportSection(bool busy, bool inGameplay) {
                 } else {
                     snprintf(mStatus, sizeof(mStatus), "Import of '%s' failed: %s.", entry.fileName,
                              gdx_content_error_string(rc));
+                }
+            }
+        }
+        ImGui::EndDisabled();
+        ImGui::PopID();
+    }
+    ImGui::EndTable();
+}
+
+void GdxContentWindow::CloseDiskImage() {
+    if (mDiskImage != nullptr) {
+        gdx_mfsimg_close(mDiskImage);
+        mDiskImage = nullptr;
+    }
+    mImageEntryCount = 0;
+    mImageTotalCount = 0;
+    mImageArmed = -1;
+}
+
+void GdxContentWindow::OpenDiskImage(const char* path) {
+    GdxMfsImage* image = nullptr;
+    int rc = gdx_mfsimg_open(path, &image);
+    if (rc != GDX_MFSIMG_OK) {
+        snprintf(mStatus, sizeof(mStatus), "Could not open the disk image: %s.", gdx_mfsimg_strerror(rc));
+        return;
+    }
+
+    int count = gdx_mfsimg_list(image, nullptr, 0);
+    if (count < 0) {
+        snprintf(mStatus, sizeof(mStatus), "Could not list the disk image: %s.", gdx_mfsimg_strerror(count));
+        gdx_mfsimg_close(image);
+        return;
+    }
+
+    CloseDiskImage();
+    mDiskImage = image;
+    mImageTotalCount = count;
+    if (count > GDX_CONTENT_MAX_ENTRIES) {
+        count = GDX_CONTENT_MAX_ENTRIES;
+    }
+    mImageEntryCount = count > 0 ? gdx_mfsimg_list(mDiskImage, mImageEntries, count) : 0;
+    if (mImageEntryCount < 0) {
+        snprintf(mStatus, sizeof(mStatus), "Could not list the disk image: %s.",
+                 gdx_mfsimg_strerror(mImageEntryCount));
+        CloseDiskImage();
+        return;
+    }
+
+    // Per-row validation for display, mirroring RefreshImports: read each payload and run the
+    // same chain begin_payload re-runs authoritatively at click time.
+    for (int i = 0; i < mImageEntryCount; i++) {
+        GdxMfsImageEntry& entry = mImageEntries[i];
+        GdxContentImportEntry& row = mImageImportRows[i];
+        memset(&row, 0, sizeof(row));
+        row.classFileCount = -1;
+        row.bundleTrackCount = -1;
+        if (entry.encoded) {
+            continue; // rendered as a refused row from the encoded flag itself
+        }
+        if (entry.fileSize <= 0 || entry.fileSize > GDX_CONTENT_TRACK_PAYLOAD_SIZE) {
+            row.errors = GDX_IMPORT_ERR_BAD_SIZE;
+            continue;
+        }
+        uint8_t* payload = static_cast<uint8_t*>(malloc(entry.fileSize));
+        if (payload == nullptr) {
+            row.errors = GDX_IMPORT_ERR_IO;
+            continue;
+        }
+        rc = gdx_mfsimg_read_file(mDiskImage, entry.entryId, payload, entry.fileSize);
+        if (rc != GDX_MFSIMG_OK) {
+            row.errors = GDX_IMPORT_ERR_IO;
+        } else {
+            gdx_content_import_validate_payload(entry.name, entry.extension, GdxImageContentType(entry), payload,
+                                                entry.fileSize, &row);
+        }
+        free(payload);
+    }
+    snprintf(mStatus, sizeof(mStatus), "Disk image opened: %d track/machine file%s found.", mImageTotalCount,
+             mImageTotalCount == 1 ? "" : "s");
+}
+
+void GdxContentWindow::DrawImageImportSection(bool busy, bool inGameplay) {
+    ImGui::Separator();
+    ImGui::TextUnformatted("Import from a disk image (EXPERIMENTAL)");
+    ImGui::TextWrapped("Reads tracks and machines straight out of a 64DD disk dump (.ndd or raw .ram) from an "
+                       "emulator or console — no .gdxc conversion step needed. The image is only read, never "
+                       "written.");
+
+    ImGui::InputTextWithHint("##diskimagepath", "Path to a .ndd / .ram disk image...", mDiskImageInput,
+                             sizeof(mDiskImageInput));
+    ImGui::SameLine();
+#ifdef _WIN32
+    if (ImGui::Button("Browse...")) {
+        GdxPickDiskImage(mDiskImageInput, sizeof(mDiskImageInput));
+    }
+    ImGui::SameLine();
+#endif
+    if (ImGui::Button("Open image")) {
+        if (mDiskImageInput[0] == '\0') {
+            snprintf(mStatus, sizeof(mStatus), "Enter or pick a disk-image path first.");
+        } else {
+            OpenDiskImage(mDiskImageInput);
+        }
+    }
+    if (mDiskImage != nullptr) {
+        ImGui::SameLine();
+        if (ImGui::Button("Close image")) {
+            CloseDiskImage();
+        }
+    }
+
+    if (mDiskImage == nullptr) {
+        return;
+    }
+    if (mImageTotalCount > mImageEntryCount) {
+        ImGui::TextDisabled("Showing the first %d of %d files in the image.", mImageEntryCount, mImageTotalCount);
+    }
+    if (mImageEntryCount == 0) {
+        ImGui::TextDisabled("The image holds no Course Edit tracks or Create Machine machines.");
+        return;
+    }
+    if (!ImGui::BeginTable("GdxImageImportTable", 5,
+                           ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
+                               ImGuiTableFlags_SizingFixedFit,
+                           ImVec2(0.0f, 200.0f))) {
+        return;
+    }
+    ImGui::TableSetupColumn("Name");
+    ImGui::TableSetupColumn("Type");
+    ImGui::TableSetupColumn("Size");
+    ImGui::TableSetupColumn("Status");
+    ImGui::TableSetupColumn("");
+    ImGui::TableHeadersRow();
+
+    for (int i = 0; i < mImageEntryCount; i++) {
+        GdxMfsImageEntry& entry = mImageEntries[i];
+        GdxContentImportEntry& row = mImageImportRows[i];
+        const bool valid = !entry.encoded && row.errors == 0;
+        // STATE_UNKNOWN alone means the live disk state could not be probed, not that the payload
+        // failed validation.
+        const bool stateUnknown = row.errors == GDX_IMPORT_ERR_STATE_UNKNOWN;
+        const bool needsConfirm =
+            (row.warnings & (GDX_IMPORT_WARN_OVERWRITE | GDX_IMPORT_WARN_TWIN_DELETE | GDX_IMPORT_WARN_CUP_CLEAR)) !=
+            0;
+        ImGui::PushID(3000 + i);
+        ImGui::TableNextRow();
+
+        ImGui::TableNextColumn();
+        ImGui::TextUnformatted(entry.name[0] != '\0' ? entry.name : "(unnamed)");
+        ImGui::TableNextColumn();
+        ImGui::TextUnformatted(GdxImageTypeLabel(entry));
+        ImGui::TableNextColumn();
+        ImGui::Text("%d B", (int) entry.fileSize);
+        if (row.classFileCount >= 0) {
+            ImGui::TextDisabled("%d/100 in class", row.classFileCount);
+        }
+        ImGui::TableNextColumn();
+        if (entry.encoded) {
+            ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "Refused");
+            ImGui::TextWrapped("Copy-protected (encoded) payload; extraction is not supported.");
+        } else if (valid) {
+            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "OK");
+        } else if (stateUnknown) {
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "Unknown");
+            ImGui::TextWrapped("Disk state not probed (disk busy or still mounting); close and reopen the image in a "
+                               "moment.");
+        } else {
+            char errors[384];
+            gdx_content_import_format_errors(row.errors, errors, sizeof(errors));
+            ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "Rejected");
+            ImGui::TextWrapped("%s", errors);
+        }
+        if (row.warnings != 0) {
+            char warnings[256];
+            gdx_content_import_format_warnings(row.warnings, warnings, sizeof(warnings));
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "%s", warnings);
+        }
+        ImGui::TableNextColumn();
+        ImGui::BeginDisabled(!valid || busy || inGameplay || mImportWaiting || mCupWaiting);
+        // Same two-click rule as the exports import: overwrite/twin/cup side effects confirm.
+        const bool armed = mImageArmed == i;
+        if (ImGui::SmallButton(needsConfirm && !armed ? "Import..." : (needsConfirm ? "Confirm" : "Import"))) {
+            if (needsConfirm && !armed) {
+                mImageArmed = i;
+            } else {
+                mImageArmed = -1;
+                // Re-read the payload at click time: never trust the list's earlier snapshot.
+                uint8_t* payload = static_cast<uint8_t*>(malloc(entry.fileSize));
+                if (payload == nullptr) {
+                    snprintf(mStatus, sizeof(mStatus), "Out of memory reading '%s' from the image.", entry.name);
+                } else {
+                    int readRc = gdx_mfsimg_read_file(mDiskImage, entry.entryId, payload, entry.fileSize);
+                    if (readRc != GDX_MFSIMG_OK) {
+                        snprintf(mStatus, sizeof(mStatus), "Could not read '%s' from the image: %s.", entry.name,
+                                 gdx_mfsimg_strerror(readRc));
+                    } else {
+                        int irc = gdx_content_import_begin_payload(entry.name, entry.extension,
+                                                                   GdxImageContentType(entry), payload,
+                                                                   entry.fileSize);
+                        if (irc == GDX_CONTENT_OK) {
+                            // The shared completion poll in DrawImportSection reports and refreshes.
+                            mImportWaiting = true;
+                        } else if (irc == GDX_CONTENT_IMPORT_ERR_VALIDATION) {
+                            snprintf(mStatus, sizeof(mStatus),
+                                     "'%s' failed its re-check; close and reopen the image to refresh.", entry.name);
+                        } else if (irc == GDX_CONTENT_IMPORT_ERR_IN_GAMEPLAY) {
+                            snprintf(mStatus, sizeof(mStatus), "Import is unavailable while a race is live.");
+                        } else {
+                            snprintf(mStatus, sizeof(mStatus), "Import of '%s' failed: %s.", entry.name,
+                                     gdx_content_error_string(irc));
+                        }
+                    }
+                    free(payload);
                 }
             }
         }

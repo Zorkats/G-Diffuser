@@ -1170,6 +1170,138 @@ int32_t gdx_content_import_bundle_failed_index(void) {
 }
 
 /* ---------------------------------------------------------------------------------
+ * A2 direct-payload import (disk-image source). Content read out of a foreign 64DD image by
+ * gdx_mfs_image.c arrives as raw payload bytes, so the container-only checks (magic, version,
+ * CRC) do not apply -- the image's own MFS volume checksum and FAT walk already gated the bytes.
+ * Everything else runs unchanged and in the container's order: type -> ext -> pairing -> exact
+ * size -> Mfs_ValidateFileName -> the game's payload validators -> live disk state.
+ * ------------------------------------------------------------------------------- */
+
+static uint32_t gdx_import_validate_direct(const char* name, const char* extension, int32_t contentType,
+                                           const uint8_t* payload, int32_t payloadSize, GdxContentImportEntry* entry,
+                                           uint32_t* warnings) {
+    uint32_t errors = 0;
+    int32_t expectedSize;
+
+    entry->contentType = contentType;
+    entry->flags = 0;
+
+    if (contentType != GDX_CONTENT_TYPE_TRACK && contentType != GDX_CONTENT_TYPE_MACHINE) {
+        errors |= GDX_IMPORT_ERR_BAD_TYPE;
+    }
+    if (strcmp(extension, "CRSD") == 0 || strcmp(extension, "CRSE") == 0 || strcmp(extension, "CARD") == 0) {
+        memcpy(entry->extension, extension, 5);
+        entry->extension[5] = '\0';
+    } else {
+        entry->extension[0] = '\0';
+        errors |= GDX_IMPORT_ERR_BAD_EXT;
+    }
+    /* Pairing: tracks carry CRSD/CRSE ('S' at [2]), machines carry CARD. */
+    if ((errors & (GDX_IMPORT_ERR_BAD_TYPE | GDX_IMPORT_ERR_BAD_EXT)) == 0 &&
+        ((contentType == GDX_CONTENT_TYPE_TRACK) != (entry->extension[2] == 'S'))) {
+        errors |= GDX_IMPORT_ERR_TYPE_EXT_MISMATCH;
+    }
+
+    snprintf(entry->name, sizeof(entry->name), "%s", name);
+    if (Mfs_ValidateFileName(entry->name) != 0) {
+        errors |= GDX_IMPORT_ERR_BAD_NAME;
+    }
+
+    expectedSize = (errors & (GDX_IMPORT_ERR_BAD_TYPE | GDX_IMPORT_ERR_BAD_EXT)) == 0
+                       ? gdx_import_expected_payload_size(contentType)
+                       : -1;
+    if (expectedSize < 0 || payloadSize != expectedSize) {
+        errors |= GDX_IMPORT_ERR_BAD_SIZE;
+    } else if (contentType == GDX_CONTENT_TYPE_TRACK) {
+        gdx_import_validate_track(payload, &errors);
+    } else {
+        gdx_import_validate_machine(payload, &errors);
+    }
+
+    /* Same gate as validate_all: live disk state is probed only when the identity checks passed. */
+    if ((errors & (GDX_IMPORT_ERR_BAD_TYPE | GDX_IMPORT_ERR_BAD_EXT | GDX_IMPORT_ERR_TYPE_EXT_MISMATCH |
+                   GDX_IMPORT_ERR_BAD_NAME)) == 0) {
+        gdx_import_check_disk_state(entry, &errors, warnings);
+    } else {
+        errors |= GDX_IMPORT_ERR_STATE_UNKNOWN;
+    }
+    return errors;
+}
+
+void gdx_content_import_validate_payload(const char* name, const char* extension, int32_t contentType,
+                                         const uint8_t* payload, int32_t payloadSize, GdxContentImportEntry* outEntry) {
+    uint32_t warnings = 0;
+
+    if (outEntry == NULL) {
+        return;
+    }
+    memset(outEntry, 0, sizeof(*outEntry));
+    outEntry->classFileCount = -1;
+    outEntry->bundleTrackCount = -1;
+    if (name == NULL || name[0] == '\0' || strlen(name) > 20) {
+        outEntry->errors = GDX_IMPORT_ERR_BAD_NAME | GDX_IMPORT_ERR_STATE_UNKNOWN;
+        return;
+    }
+    if (extension == NULL) {
+        outEntry->errors = GDX_IMPORT_ERR_BAD_EXT | GDX_IMPORT_ERR_STATE_UNKNOWN;
+        return;
+    }
+    if (payload == NULL || payloadSize <= 0) {
+        outEntry->errors = GDX_IMPORT_ERR_BAD_SIZE | GDX_IMPORT_ERR_STATE_UNKNOWN;
+        return;
+    }
+    outEntry->errors =
+        gdx_import_validate_direct(name, extension, contentType, payload, payloadSize, outEntry, &warnings);
+    outEntry->warnings = warnings;
+}
+
+int gdx_content_import_begin_payload(const char* name, const char* extension, int32_t contentType,
+                                     const uint8_t* payload, int32_t payloadSize) {
+    GdxContentImportEntry entry;
+    uint32_t warnings = 0;
+
+    if (name == NULL || name[0] == '\0' || strlen(name) > 20 || extension == NULL || payload == NULL ||
+        payloadSize <= 0 || payloadSize > GDX_CONTENT_TRACK_PAYLOAD_SIZE) {
+        return GDX_CONTENT_ERR_BAD_ARGS;
+    }
+    if (gdx_input_in_gameplay()) {
+        return GDX_CONTENT_IMPORT_ERR_IN_GAMEPLAY;
+    }
+    if (sImportState == GDX_IMPORT_PENDING || sCupState == GDX_CUP_PENDING) {
+        return GDX_CONTENT_IMPORT_ERR_PENDING;
+    }
+    if (gdx_content_mfs_busy()) {
+        return GDX_CONTENT_ERR_BUSY;
+    }
+
+    /* Re-validate what was handed in: never trust the menu's earlier snapshot. The payload then
+     * stages straight into the buffer the disk thread installs. */
+    memset(&entry, 0, sizeof(entry));
+    entry.classFileCount = -1;
+    entry.bundleTrackCount = -1;
+    entry.errors = gdx_import_validate_direct(name, extension, contentType, payload, payloadSize, &entry, &warnings);
+    if (entry.errors != 0) {
+        return GDX_CONTENT_IMPORT_ERR_VALIDATION;
+    }
+
+    memcpy(sImportName, entry.name, sizeof(sImportName));
+    memcpy(sImportExtension, entry.extension, sizeof(sImportExtension));
+    sImportContentType = entry.contentType;
+    sImportPayloadSize = (uint32_t) gdx_import_expected_payload_size(entry.contentType);
+    memcpy(sImportPayload, payload, sImportPayloadSize);
+    sImportRc = 0;
+    sImportMfsError = 0;
+    sImportCupCleared = 0;
+    sImportState = GDX_IMPORT_PENDING;
+
+    if (GdxContentImport_EnqueueDiskOp() != 0) {
+        sImportState = GDX_IMPORT_IDLE;
+        return GDX_CONTENT_ERR_BUSY;
+    }
+    return GDX_CONTENT_OK;
+}
+
+/* ---------------------------------------------------------------------------------
  * E3 Edit-Cup registration API (menu-thread entry points; the disk-thread runner sits with the
  * staging above).
  * ------------------------------------------------------------------------------- */
