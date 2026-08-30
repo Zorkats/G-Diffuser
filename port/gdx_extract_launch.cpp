@@ -1,6 +1,8 @@
 // G-Diffuser — runtime O2R asset extraction launcher. See gdx_extract_launch.h for the contract map.
 
 #include "gdx_extract_launch.h"
+
+#include "gdx_hackmods.h" // GDX_HACKMOD_NAME_MAX + the picker's own basename sanitiser
 #include "gdx_firstboot.h" // GdxFindIplSourceInDir -- shared IPL-source alt-name probe
 #include "port_log.h"
 
@@ -1968,6 +1970,184 @@ const char* GdxExtractOutcomeString(ExtractOutcome outcome) {
             return "not available — booting from the raw ROM";
     }
     return "unknown";
+}
+
+HackBuildResult GdxExtractBuildHackArchive(const char* romPathC, const char* hackNameC,
+                                           const char* hackDirC, const char* exeDirC) {
+    HackBuildResult out;
+
+    if (romPathC == nullptr || hackNameC == nullptr || hackDirC == nullptr || exeDirC == nullptr ||
+        romPathC[0] == '\0' || hackNameC[0] == '\0' || hackDirC[0] == '\0' || exeDirC[0] == '\0') {
+        out.message = "Internal error: missing ROM path, hack name, hack folder or program folder.";
+        return out;
+    }
+
+    // The basename becomes a file name and, at boot, part of a save file name. It goes through the
+    // picker own sanitiser rather than a second, subtly different one.
+    char safeName[GDX_HACKMOD_NAME_MAX];
+    if (gdx_hackmod_sanitize_name(hackNameC, safeName, sizeof(safeName)) == 0) {
+        out.message = "That name has no characters usable in a file name. Use letters, digits, dots, "
+                      "dashes or underscores.";
+        return out;
+    }
+
+    std::error_code ec;
+    const fs::path romPath(romPathC);
+    const fs::path hackDir(hackDirC);
+    const fs::path exeDir(exeDirC);
+    const fs::path extractBin = exeDir / kExtractBinaryName;
+    const fs::path recipesDir = exeDir / kRecipesDirName;
+
+    if (!fileExists(romPath)) {
+        out.message = "That ROM file does not exist.";
+        return out;
+    }
+    if (!fileExists(extractBin)) {
+        out.message = "The extractor component (gdx-extract) is missing. Reinstall G-Diffuser.";
+        return out;
+    }
+    if (!fs::is_directory(recipesDir, ec)) {
+        ec.clear();
+        out.message = "The recipe data (decomp-recipes) is missing. Reinstall G-Diffuser.";
+        return out;
+    }
+    ec.clear();
+
+    // runExtraction stages a short-path copy of the recipes when the install is deep. This path is
+    // user-initiated rather than boot-critical, so it refuses with advice instead of duplicating that
+    // machinery onto a second code path.
+    constexpr size_t kDeepestRecipeSuffix = 54;
+    if (recipesDir.string().size() + kDeepestRecipeSuffix >= 248) {
+        out.message = "G-Diffuser sits in a folder too deep for the extractor to read its recipes. "
+                      "Move the installation somewhere shorter and try again.";
+        return out;
+    }
+
+    // Identify the ROM before spawning anything. A stock dump is not a hack: it belongs in the normal
+    // extraction path, and packaging one here would only shadow the base game with a copy of itself.
+    const std::string romSha1 = toLowerHex(sha1File(romPath));
+    if (romSha1.empty()) {
+        out.message = "Could not read that ROM.";
+        return out;
+    }
+
+    const std::vector<RomProfile> profiles = buildRomProfiles(recipesDir / "config.yml");
+    const RomProfile* base = nullptr;
+    for (const RomProfile& p : profiles) {
+        if (romSha1 == p.expectedSha1) {
+            out.message = std::string("That is the stock ") + p.key +
+                          " ROM, not a ROM hack, so nothing would change. Choose a patched ROM.";
+            return out;
+        }
+        if (base == nullptr && std::string(p.key) == "us/rev0") {
+            base = &p;
+        }
+    }
+    if (base == nullptr || base->expectedSha1.empty()) {
+        out.message = "Could not resolve the base US recipe tree from decomp-recipes/config.yml.";
+        return out;
+    }
+    out.expectedEntryCount = base->goldenEntryCount;
+
+    fs::create_directories(hackDir, ec);
+    if (ec) {
+        out.message = "Could not create " + hackDir.string() + ": " + ec.message();
+        return out;
+    }
+    ec.clear();
+
+    // Staged inside the destination folder so the install below is a rename on one filesystem.
+    const fs::path tmpDir = hackDir / ".gdx_hackbuild.tmp";
+    removeIfExists(tmpDir);
+    fs::create_directories(tmpDir, ec);
+    if (ec) {
+        out.message = "Could not create a temporary folder in " + hackDir.string() + ": " + ec.message();
+        return out;
+    }
+    ec.clear();
+
+    char versionArg[16];
+    std::snprintf(versionArg, sizeof(versionArg), "%u", static_cast<unsigned>(base->versionCrc));
+
+    gdx_port_logf("[hackbuild] building %s from %s (sha1 %s) using the %s recipe tree.\n", safeName,
+                  romPath.string().c_str(), romSha1.c_str(), base->key);
+
+    ExtractState state;
+    int exitCode = 1;
+    bool ok = false;
+#ifdef _WIN32
+    auto q = [](const std::wstring& v) { return L"\"" + v + L"\""; };
+    std::wstring cmd = q(extractBin.wstring());
+    cmd += L" o2r ";
+    cmd += q(romPath.wstring());
+    cmd += L" -s ";
+    cmd += q(recipesDir.wstring());
+    cmd += L" -d ";
+    cmd += q(tmpDir.wstring());
+    cmd += L" -u ";
+    cmd += std::wstring(versionArg, versionArg + std::strlen(versionArg));
+    // The whole point of this path: a hack's own hash names no recipe tree, so the base game's tree is
+    // named explicitly instead.
+    cmd += L" --config-key ";
+    cmd += std::wstring(base->expectedSha1.begin(), base->expectedSha1.end());
+    // The archive is structurally a base-game archive, so its version entry must say so. Without
+    // this it carries the HACK ROM's CRC and the mount-time version gate rejects it on sight.
+    cmd += L" --version-crc ";
+    cmd += std::wstring(versionArg, versionArg + std::strlen(versionArg));
+    ok = runExtractorWindows(extractBin, cmd, tmpDir, exitCode, state);
+#else
+    std::vector<std::string> args = { "o2r",           romPath.string(), "-s", recipesDir.string(),
+                                      "-d",            tmpDir.string(),  "-u", versionArg,
+                                      "--config-key",  base->expectedSha1,
+                                      // See the Windows branch: the version entry describes the
+                                      // recipe tree that produced the archive, not the ROM's origin.
+                                      "--version-crc", versionArg };
+    ok = runExtractorPosix(extractBin, args, tmpDir, exitCode, state);
+#endif
+
+    removeIfExists(tmpDir / kTorchHashName);
+
+    const fs::path produced = tmpDir / kExtractorOutputName;
+    if (!ok || !fileExists(produced)) {
+        // torch exits 0 when it finds no recipe tree at all, so "exited cleanly but produced nothing"
+        // is a real case and deserves its own wording rather than blaming the exit code.
+        out.message = !ok ? ("The extractor failed (exit code " + std::to_string(exitCode) + ").")
+                          : std::string("The extractor exited cleanly but produced no archive, which "
+                                        "usually means it could not read this ROM with the base "
+                                        "recipes.");
+        gdx_port_logf("[hackbuild] ERROR: %s\n", out.message.c_str());
+        removeIfExists(tmpDir);
+        return out;
+    }
+
+    // The recipe tree fixes the entry count regardless of ROM contents, so a shortfall is a real
+    // damage signal. It is reported rather than enforced: a hack has no golden to be right against.
+    out.entryCount = zipEntryCount(produced);
+
+    const fs::path finalPath = hackDir / (std::string(safeName) + ".o2r");
+    if (!atomicReplace(produced, finalPath)) {
+        out.message = "Could not install the archive into " + hackDir.string() + ".";
+        gdx_port_logf("[hackbuild] ERROR: %s\n", out.message.c_str());
+        removeIfExists(tmpDir);
+        return out;
+    }
+    removeIfExists(tmpDir);
+
+    out.ok = true;
+    out.archivePath = finalPath.string();
+
+    std::string damage;
+    if (out.entryCount >= 0 && out.expectedEntryCount > 0 && out.entryCount != out.expectedEntryCount) {
+        damage = " It holds " + std::to_string(out.entryCount) + " entries where the base game has " +
+                 std::to_string(out.expectedEntryCount) +
+                 ", so some assets could not be read; those fall back to the base game's versions.";
+    }
+    out.message = "Built " + finalPath.filename().string() + "." + damage +
+                  " Select it under ROM Hacks and restart to play it. Only the assets and courses "
+                  "come across: code the hack patched is never run.";
+    gdx_port_logf("[hackbuild] installed %s (%ld entries, base game has %ld).\n",
+                  finalPath.string().c_str(), out.entryCount, out.expectedEntryCount);
+    return out;
 }
 
 // ── Async driver (see header) ────────────────────────────────────────────────────────────────────

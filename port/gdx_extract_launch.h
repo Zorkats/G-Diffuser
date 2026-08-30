@@ -49,6 +49,36 @@ ExtractOutcome GdxExtractEnsureArchive(const char* dataDir, const char* romPath,
 // Human-readable label for logging.
 const char* GdxExtractOutcomeString(ExtractOutcome outcome);
 
+// -- ROM-hack archive build ----------------------------------------------------------------------
+// Builds <hackDir>/<name>.o2r from a PATCHED ROM by running the packaged extractor against the stock
+// recipe tree, named explicitly through gdx-extract's --config-key because a hack hashes to something
+// decomp-recipes/config.yml does not describe.
+//
+// Deliberately weaker than the cartridge path, and it says so. A hack can never have a golden archive
+// to compare against, because nobody has produced a verified one. The zip entry count IS still
+// meaningful, since the recipe tree fixes it regardless of what the ROM contains, and it is reported;
+// it does not veto the install. Asset CONTENT cannot be checked at all: an asset read from an offset
+// the hack repurposed is structurally valid and visually wrong, and only running it reveals that.
+//
+// Scope limit the UI must state: G-Diffuser executes decompiled game code, so the archive carries the
+// hack's ASSETS and COURSES. Code the hack patched is never executed.
+struct HackBuildResult {
+    bool ok = false;
+    std::string archivePath;     // installed archive path; set only when ok
+    std::string message;         // human-readable outcome; always set, on success and failure
+    long entryCount = -1;        // zip records in the produced archive (-1 = unknown)
+    long expectedEntryCount = 0; // the stock archive's record count (0 = no golden was generated)
+};
+
+// romPath   Absolute path to the patched ROM.
+// hackName  Display name; sanitised into the archive basename with gdx_hackmod_sanitize_name.
+// hackDir   Absolute path to mods/~romhacks: the install target, and host of the temp staging dir.
+// exeDir    Absolute path to the directory shipping gdx-extract and decomp-recipes.
+//
+// Never throws. Complete-or-absent: on any failure nothing is installed and the temp dir is removed.
+HackBuildResult GdxExtractBuildHackArchive(const char* romPath, const char* hackName, const char* hackDir,
+                                           const char* exeDir);
+
 // ── Async driver for the in-window setup GUI ─────────────────────────────────────────────────────
 // GdxExtractEnsureArchive blocks (normally ~2s, up to a 120s hang deadline), but the ImGui setup
 // screen must keep pumping frames, so this wrapper runs it on a background thread behind a pollable

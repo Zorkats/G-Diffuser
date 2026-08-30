@@ -1,4 +1,5 @@
 #include "sram_buffer.h"
+#include "gdx_hackmods.h" // per-hack save isolation: gdx_hackmod_active_save_basename
 #include "port_log.h"
 #include <cstdio>
 #include <cstring>
@@ -44,7 +45,17 @@ static bool gdx_sram_path(wchar_t* outPath, size_t outCapChars) {
     }
     slash[1] = L'\0';
 
-    const wchar_t* fileName = L"fzerox.sav";
+    // The active hack mod (if any) owns its own save file, so a hack's cup completion never
+    // lands in the stock progression. gdx_hackmod_active_save_basename is latched at boot.
+    wchar_t fileName[GDX_HACKMOD_SAVE_MAX];
+    {
+        const char* narrow = gdx_hackmod_active_save_basename();
+        size_t i = 0;
+        for (; narrow[i] != '\0' && i + 1 < GDX_HACKMOD_SAVE_MAX; i++) {
+            fileName[i] = static_cast<wchar_t>(static_cast<unsigned char>(narrow[i]));
+        }
+        fileName[i] = L'\0';
+    }
     const wchar_t* savesDir = L"saves\\";
     if (wcslen(exePath) + wcslen(savesDir) + wcslen(fileName) >= outCapChars) {
         return false;
@@ -64,7 +75,7 @@ static bool gdx_sram_path(wchar_t* outPath, size_t outCapChars) {
         if (GetFileAttributesW(outPath) == INVALID_FILE_ATTRIBUTES &&
             GetFileAttributesW(legacyPath) != INVALID_FILE_ATTRIBUTES) {
             if (MoveFileExW(legacyPath, outPath, MOVEFILE_WRITE_THROUGH)) {
-                gdx_port_logf("[sram] migrated legacy fzerox.sav into saves\\ folder\n");
+                gdx_port_logf("[sram] migrated legacy %s into saves\\ folder\n", gdx_hackmod_active_save_basename());
             }
         }
     }
@@ -124,7 +135,8 @@ static bool gdx_sram_move_file(const char* srcPath, const char* dstPath) {
 }
 
 static bool gdx_sram_path(char* outPath, size_t outCap) {
-    const char* fileName = "fzerox.sav";
+    // See the Windows branch: the active hack mod owns its own save file.
+    const char* fileName = gdx_hackmod_active_save_basename();
     const char* savesDir = "saves";
 
     if (strlen(savesDir) + 1 + strlen(fileName) >= outCap) {
@@ -154,7 +166,8 @@ static bool gdx_sram_path(char* outPath, size_t outCap) {
                     strcat(legacyPath, "saves/");
                     strcat(legacyPath, fileName);
                     if (access(legacyPath, F_OK) == 0 && gdx_sram_move_file(legacyPath, outPath)) {
-                        gdx_port_logf("[sram] migrated legacy exe-relative fzerox.sav into CWD saves/ folder\n");
+                        gdx_port_logf("[sram] migrated legacy exe-relative %s into CWD saves/ folder\n",
+                                      gdx_hackmod_active_save_basename());
                     }
                 }
             }
@@ -180,7 +193,8 @@ void gdx_sram_init(void) {
 
     FILE* f = nullptr;
     if (_wfopen_s(&f, path, L"rb") != 0 || f == nullptr) {
-        gdx_port_logf("[sram] no existing fzerox.sav; starting fresh (first boot creates it on first write).\n");
+        gdx_port_logf("[sram] no existing %s; starting fresh (first boot creates it on first write).\n",
+                      gdx_hackmod_active_save_basename());
         return;
     }
 
@@ -189,17 +203,18 @@ void gdx_sram_init(void) {
     fseek(f, 0, SEEK_SET);
 
     if (sz != (long) GDX_SRAM_SIZE) {
-        gdx_port_logf("[sram] fzerox.sav size mismatch (%ld bytes, expected %u); starting with a fresh save.\n", sz,
-                      GDX_SRAM_SIZE);
+        gdx_port_logf("[sram] %s size mismatch (%ld bytes, expected %u); starting with a fresh save.\n",
+                      gdx_hackmod_active_save_basename(), sz, GDX_SRAM_SIZE);
         fclose(f);
         return;
     }
 
     if (fread(s_sramBuffer, 1, GDX_SRAM_SIZE, f) != GDX_SRAM_SIZE) {
-        gdx_port_logf("[sram] WARNING: failed reading fzerox.sav; starting with a fresh save.\n");
+        gdx_port_logf("[sram] WARNING: failed reading %s; starting with a fresh save.\n",
+                      gdx_hackmod_active_save_basename());
         memset(s_sramBuffer, 0, sizeof(s_sramBuffer));
     } else {
-        gdx_port_logf("[sram] loaded %u bytes from fzerox.sav\n", GDX_SRAM_SIZE);
+        gdx_port_logf("[sram] loaded %u bytes from %s\n", GDX_SRAM_SIZE, gdx_hackmod_active_save_basename());
     }
     fclose(f);
 #else
@@ -211,7 +226,8 @@ void gdx_sram_init(void) {
 
     FILE* f = fopen(path, "rb");
     if (f == nullptr) {
-        gdx_port_logf("[sram] no existing fzerox.sav; starting fresh (first boot creates it on first write).\n");
+        gdx_port_logf("[sram] no existing %s; starting fresh (first boot creates it on first write).\n",
+                      gdx_hackmod_active_save_basename());
         return;
     }
 
@@ -220,17 +236,18 @@ void gdx_sram_init(void) {
     fseek(f, 0, SEEK_SET);
 
     if (sz != (long) GDX_SRAM_SIZE) {
-        gdx_port_logf("[sram] fzerox.sav size mismatch (%ld bytes, expected %u); starting with a fresh save.\n", sz,
-                      GDX_SRAM_SIZE);
+        gdx_port_logf("[sram] %s size mismatch (%ld bytes, expected %u); starting with a fresh save.\n",
+                      gdx_hackmod_active_save_basename(), sz, GDX_SRAM_SIZE);
         fclose(f);
         return;
     }
 
     if (fread(s_sramBuffer, 1, GDX_SRAM_SIZE, f) != GDX_SRAM_SIZE) {
-        gdx_port_logf("[sram] WARNING: failed reading fzerox.sav; starting with a fresh save.\n");
+        gdx_port_logf("[sram] WARNING: failed reading %s; starting with a fresh save.\n",
+                      gdx_hackmod_active_save_basename());
         memset(s_sramBuffer, 0, sizeof(s_sramBuffer));
     } else {
-        gdx_port_logf("[sram] loaded %u bytes from fzerox.sav\n", GDX_SRAM_SIZE);
+        gdx_port_logf("[sram] loaded %u bytes from %s\n", GDX_SRAM_SIZE, gdx_hackmod_active_save_basename());
     }
     fclose(f);
 #endif
@@ -257,7 +274,8 @@ static void gdx_sram_flush(void) {
 
     FILE* f = nullptr;
     if (_wfopen_s(&f, tempPath, L"wb") != 0 || f == nullptr) {
-        gdx_port_logf("[sram] WARNING: failed to open fzerox.sav.tmp for writing; save not persisted.\n");
+        gdx_port_logf("[sram] WARNING: failed to open %s.tmp for writing; save not persisted.\n",
+                      gdx_hackmod_active_save_basename());
         return;
     }
     bool ok = fwrite(s_sramBuffer, 1, GDX_SRAM_SIZE, f) == GDX_SRAM_SIZE;
@@ -268,12 +286,14 @@ static void gdx_sram_flush(void) {
         ok = false;
     }
     if (!ok) {
-        gdx_port_logf("[sram] WARNING: failed writing fzerox.sav.tmp; save not persisted.\n");
+        gdx_port_logf("[sram] WARNING: failed writing %s.tmp; save not persisted.\n",
+                      gdx_hackmod_active_save_basename());
         _wremove(tempPath);
         return;
     }
     if (!MoveFileExW(tempPath, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        gdx_port_logf("[sram] WARNING: could not replace fzerox.sav; save not persisted.\n");
+        gdx_port_logf("[sram] WARNING: could not replace %s; save not persisted.\n",
+                      gdx_hackmod_active_save_basename());
         _wremove(tempPath);
         return;
     }
@@ -296,7 +316,8 @@ static void gdx_sram_flush(void) {
 
     FILE* f = fopen(tempPath, "wb");
     if (f == nullptr) {
-        gdx_port_logf("[sram] WARNING: failed to open fzerox.sav.tmp for writing; save not persisted.\n");
+        gdx_port_logf("[sram] WARNING: failed to open %s.tmp for writing; save not persisted.\n",
+                      gdx_hackmod_active_save_basename());
         return;
     }
     bool ok = fwrite(s_sramBuffer, 1, GDX_SRAM_SIZE, f) == GDX_SRAM_SIZE;
@@ -307,12 +328,14 @@ static void gdx_sram_flush(void) {
         ok = false;
     }
     if (!ok) {
-        gdx_port_logf("[sram] WARNING: failed writing fzerox.sav.tmp; save not persisted.\n");
+        gdx_port_logf("[sram] WARNING: failed writing %s.tmp; save not persisted.\n",
+                      gdx_hackmod_active_save_basename());
         remove(tempPath);
         return;
     }
     if (rename(tempPath, path) != 0) {
-        gdx_port_logf("[sram] WARNING: could not replace fzerox.sav; save not persisted.\n");
+        gdx_port_logf("[sram] WARNING: could not replace %s; save not persisted.\n",
+                      gdx_hackmod_active_save_basename());
         remove(tempPath);
         return;
     }

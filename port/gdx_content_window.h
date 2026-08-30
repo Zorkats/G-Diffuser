@@ -3,6 +3,7 @@
 #include "gdx_content_import.h"
 #include "gdx_content_io.h"
 #include "gdx_mfs_image.h"
+#include "gdx_rom_courses.h"
 #include "ship/window/gui/GuiWindow.h"
 
 /**
@@ -16,7 +17,9 @@
  * bundles: "Export Edit Cup as bundle" writes exports/edit-cup.gdxc and bundle imports install
  * via op slot 32. A2 adds a third import source: tracks/machines read directly out of a foreign
  * 64DD disk image (.ndd/.ram dump from an emulator or console), validated per-row and installed
- * through the same op-30 path (gdx_content_import_begin_payload).
+ * through the same op-30 path (gdx_content_import_begin_payload). W2 adds a fourth: courses read
+ * straight out of an F-Zero X ROM (gdx_rom_courses.h), which is how an FZEP or other course-table
+ * hack becomes a Content Library track without any ROM swap or hack-mod archive.
  */
 class GdxContentWindow : public Ship::GuiWindow {
   public:
@@ -37,6 +40,10 @@ class GdxContentWindow : public Ship::GuiWindow {
     void OpenDiskImage(const char* path);
     void CloseDiskImage();
     void DrawImageImportSection(bool busy, bool inGameplay);
+    void OpenRomCourses(const char* path);
+    void CloseRomCourses();
+    void ValidateRomRow(int row);
+    void DrawRomImportSection(bool busy, bool inGameplay);
 
     GdxContentEntry mEntries[GDX_CONTENT_MAX_ENTRIES] = {};
     int mEntryCount = 0;
@@ -57,6 +64,21 @@ class GdxContentWindow : public Ship::GuiWindow {
     int mImageEntryCount = 0;
     int mImageTotalCount = 0; // pre-truncation count, for the "showing first N" note
     int mImageArmed = -1;     // image row whose overwrite/twin confirmation is primed
+    // W2 ROM course import: one read-only ROM pair at a time (the supplied ROM plus the player's
+    // clean ROM as the baseline that says which courses a hack actually changed).
+    GdxRomCourseSet* mRomCourses = nullptr;
+    char mRomInput[1024] = {}; // editable path field (the only picker on non-Windows)
+    GdxRomCourseEntry mRomEntries[GDX_ROMCOURSE_COUNT] = {};
+    GdxContentImportEntry mRomImportRows[GDX_ROMCOURSE_COUNT] = {}; // per-row validation
+    // Editable MFS name per row. A ROM course carries its internal slot id ("JACK1", "l1"), which
+    // is rarely what a player wants on disk and collides as soon as two are imported.
+    char mRomNames[GDX_ROMCOURSE_COUNT][21] = {}; // 20-byte MFS dir-entry name + NUL
+    int mRomEntryCount = 0;
+    int mRomArmed = -1;              // ROM row whose overwrite/twin confirmation is primed
+    bool mRomChangedOnly = true;     // hacks are the common case; stock courses hide by default
+    bool mRomHasBaseline = false;
+    bool mRomTouchesNonCourse = false;
+    bool mRomHeaderChecksumChanged = false;
     // Startup auto-retry: the disk filesystem mounts after the window initializes, so a failed
     // first listing (and the stale error it prints) retries on a timer instead of waiting for
     // the user to find the Refresh button.

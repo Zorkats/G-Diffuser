@@ -26,6 +26,8 @@
 #include "libultraship/window/gui/InputEditorWindow.h"
 #include "gdx_ghost_window.h"
 #include "gdx_content_window.h"
+#include "gdx_hackmods.h"
+#include "gdx_hackmods_window.h"
 #include "gdx_input_viewer.h"
 #include "gdx_console_log.h"
 #include "port_log.h"
@@ -646,6 +648,16 @@ static void addArchiveCandidateRoots(std::vector<std::filesystem::path>& roots, 
     }
 }
 
+// A pack is any .o2r, matched case-insensitively. Shared by the mount scan and the diagnostics
+// beside it so the two can never disagree about what counts as a pack.
+static bool gdxIsO2rFile(const std::filesystem::path& p) {
+    std::string ext = p.extension().string();
+    for (char& c : ext) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return ext == ".o2r";
+}
+
 static std::vector<std::string> findArchivePaths(const char* argv0) {
     std::vector<std::filesystem::path> roots;
     std::error_code ec;
@@ -692,12 +704,105 @@ static std::vector<std::string> findArchivePaths(const char* argv0) {
     // menu's hot reload — boot and reload mount the same set in the same order. First root with
     // a mods/ dir wins, like the base archives.
     //
+    // W3: the selected ROM-hack archive from mods/~romhacks/, mounted BEFORE the texture packs so
+    // a cosmetic pack still overrides a hack's assets rather than the other way round. Scanned
+    // independently of the Workshop master switch, because a hack is game content and its
+    // presence must not depend on a texture-pack setting. At most one can be selected
+    // (gdx_hackmods.h), so there is no conflict to resolve here, and the choice is latched now:
+    // the save file is derived from it and must not move mid-session.
+    for (const auto& root : roots) {
+        const auto hackDir = root / "mods" / GDX_HACKMODS_DIR;
+        if (!std::filesystem::is_directory(hackDir, ec)) {
+            ec.clear();
+            continue;
+        }
+        GdxHackModsSetDirectory(std::filesystem::absolute(hackDir, ec).string());
+        break; // first root with a hack dir wins, like the base archives
+    }
+    {
+        const std::string hackPath = GdxHackModsLatchActivePath();
+        if (!hackPath.empty()) {
+            archives.push_back(hackPath);
+        }
+    }
+
+    const bool packsEnabled = CVarGetInteger("gEnhancements.Workshop.TexturePacks", 0) != 0;
+
+    // Diagnostics for the three ways a correctly built pack can silently do nothing: the master
+    // switch being off, the pack sitting one folder too deep, or it living under a root this scan
+    // never reaches. All three used to produce NO output at all, so a player could not tell "no
+    // packs found" from "packs found and ignored" -- the shape behind repeated reports of packs not
+    // loading. This probe changes no behaviour; it only makes the silence audible.
+    {
+        bool describedWinner = false;
+        for (const auto& root : roots) {
+            const auto modsDir = root / "mods";
+            if (!std::filesystem::is_directory(modsDir, ec)) {
+                ec.clear();
+                continue;
+            }
+            ec.clear();
+
+            if (describedWinner) {
+                // Mirrors the `break` in the scan below: only the first mods folder is ever read.
+                gdx_port_logf("[workshop] note: %s also exists, but only the first mods folder is "
+                              "scanned, so packs there are ignored.\n",
+                              modsDir.string().c_str());
+                continue;
+            }
+            describedWinner = true;
+
+            int topLevel = 0;
+            int nested = 0;
+            for (const auto& entry : std::filesystem::directory_iterator(modsDir, ec)) {
+                if (entry.is_regular_file(ec)) {
+                    if (gdxIsO2rFile(entry.path())) {
+                        topLevel++;
+                    }
+                    continue;
+                }
+                if (!entry.is_directory(ec)) {
+                    continue;
+                }
+                // ~romhacks is not a misplaced pack: it is the ROM-hack folder, mounted by its own
+                // scan above. Counting it here would tell the player to move files that are already
+                // exactly where they belong.
+                if (entry.path().filename().string() == GDX_HACKMODS_DIR) {
+                    continue;
+                }
+                // One level down is where an unzipped pack usually lands.
+                for (const auto& sub : std::filesystem::directory_iterator(entry.path(), ec)) {
+                    if (sub.is_regular_file(ec) && gdxIsO2rFile(sub.path())) {
+                        nested++;
+                    }
+                }
+                ec.clear();
+            }
+            ec.clear();
+
+            if (nested > 0) {
+                gdx_port_logf("[workshop] %d .o2r file(s) sit in SUBFOLDERS of %s and are not scanned. "
+                              "Move them directly into that folder.\n",
+                              nested, modsDir.string().c_str());
+            }
+            if (!packsEnabled) {
+                if (topLevel + nested > 0) {
+                    gdx_port_logf("[workshop] %d pack(s) present in %s, but the Workshop \"Texture "
+                                  "packs\" switch is OFF, so none were mounted.\n",
+                                  topLevel + nested, modsDir.string().c_str());
+                }
+            } else if (topLevel == 0) {
+                gdx_port_logf("[workshop] no .o2r packs directly in %s.\n", modsDir.string().c_str());
+            }
+        }
+    }
+
     // The Workshop "Texture packs" master switch gates the WHOLE scan (M-A, owner decision M1):
     // with it off, no pack mounts at all, so the direct-key shadowing channel (a pack entry at a
     // base resource's own key) is off too — previously only the textures/pack/ lookup consulted
     // the switch and direct-key packs kept applying. InitConsoleVariables has already run by the
     // time findArchivePaths is called, so the persisted value is live here.
-    if (CVarGetInteger("gEnhancements.Workshop.TexturePacks", 0) != 0) {
+    if (packsEnabled) {
     for (const auto& root : roots) {
         const auto modsDir = root / "mods";
         if (!std::filesystem::is_directory(modsDir, ec)) {
@@ -706,14 +811,7 @@ static std::vector<std::string> findArchivePaths(const char* argv0) {
         }
         std::vector<std::string> modPaths;
         for (const auto& entry : std::filesystem::directory_iterator(modsDir, ec)) {
-            if (!entry.is_regular_file(ec)) {
-                continue;
-            }
-            std::string extLower = entry.path().extension().string();
-            for (char& c : extLower) {
-                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-            }
-            if (extLower != ".o2r") {
+            if (!entry.is_regular_file(ec) || !gdxIsO2rFile(entry.path())) {
                 continue;
             }
             modPaths.push_back(std::filesystem::absolute(entry.path(), ec).string());
@@ -744,6 +842,10 @@ int main(int argc, char** argv) {
     if (firstBoot.status == gdx::FirstBootStatus::Aborted) {
         return 1;
     }
+
+    // The ROM Hacks window builds hack archives with the packaged extractor, which ships beside the
+    // executable and not in the data dir. Recorded once here, where the resolved layout is known.
+    GdxHackModsSetProgramDir(firstBoot.exeDir);
 
     // Must run BEFORE findArchivePaths builds the mount list: the data dir is a candidate root, so
     // a freshly extracted archive is picked up this same boot. Skipped on a development tree,
@@ -817,6 +919,11 @@ int main(int argc, char** argv) {
     //   * fzerox.o2r/generic.o2r is ENFORCING (version = US-rev0 ROM CRC). The SETTIMG OTR rewrite
     //     path is not partial-resilient, so a mismatched archive renders blank textures with no
     //     recovery; on mismatch it is UNMOUNTED and the raw-ROM fallback carries the session.
+    //   * the mounted ROM-hack archive is ENFORCING under the SAME rule: it is built from the
+    //     hack ROM with the BASE recipes and stamped with the base ROM CRC (gdx-extract is
+    //     given --version-crc for exactly this), so it is a game archive that merely carries a
+    //     different filename. Judging it by the schema version below is what made every
+    //     freshly built hack pop a spurious "stale or incompatible" warning.
     //   * every other archive is WARN-ONLY; unversioned archives pass through untouched.
     static constexpr uint32_t kGdxExpectedArchiveVersion = 1u;        // schema v1 = first versioned O2R
     static constexpr uint32_t kGdxExpectedGenericRomCrc = 0x78D90EB3u; // US-rev0 ROM CRC stamp
@@ -844,28 +951,57 @@ int main(int argc, char** argv) {
                 }
                 const uint32_t got = archive->GetGameVersion();
 
-                if (basename == "fzerox.o2r" || basename == "generic.o2r") {
+                // The latched hack mounts as "<name>.o2r" beside the base archive and is a game
+                // archive in every way that matters here, so it is classified with one.
+                std::string hackBasename = GdxHackModsActiveName();
+                if (!hackBasename.empty()) {
+                    for (char& c : hackBasename) {
+                        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                    }
+                    hackBasename += ".o2r";
+                }
+                const bool isHackArchive = !hackBasename.empty() && (basename == hackBasename);
+
+                if (basename == "fzerox.o2r" || basename == "generic.o2r" || isHackArchive) {
                     // ENFORCING: version ROM-CRC must match US rev0.
                     if (got != kGdxExpectedGenericRomCrc) {
+                        // Unmounting a hack drops the session back to the STOCK GAME, not to the raw
+                        // ROM, and the fix is a rebuild rather than a delete. Same gate, different
+                        // consequence, so the wording follows the case.
                         gdx_port_logf(
-                            "[G-Diffuser] ERROR: game archive \"%s\" version ROM-CRC is 0x%08X but this "
-                            "build expects 0x%08X (US rev0). Unmounting it and booting from the raw ROM; "
-                            "delete it (or the gdx_extract_state.cfg sidecar) to force a fresh "
-                            "extraction.\n",
-                            path.c_str(), got, kGdxExpectedGenericRomCrc);
+                            "[G-Diffuser] ERROR: %s \"%s\" version ROM-CRC is 0x%08X but this build "
+                            "expects 0x%08X (US rev0). Unmounting it; %s.\n",
+                            isHackArchive ? "ROM-hack archive" : "game archive", path.c_str(), got,
+                            kGdxExpectedGenericRomCrc,
+                            isHackArchive ? "the stock game runs instead; rebuild the hack to fix it"
+                                          : "booting from the raw ROM; delete it (or the "
+                                            "gdx_extract_state.cfg sidecar) to force a fresh extraction");
 #ifdef _WIN32
                         char msg[512];
-                        snprintf(msg, sizeof(msg),
-                                 "The extracted asset archive does not match your ROM:\n\n%s\n\nversion "
-                                 "ROM-CRC 0x%08X, expected 0x%08X (US rev0).\n\nG-Diffuser will boot "
-                                 "from the raw ROM. Delete this file to force a fresh extraction.",
-                                 path.c_str(), got, kGdxExpectedGenericRomCrc);
-                        MessageBoxA(nullptr, msg, "G-Diffuser — incompatible generic.o2r",
+                        if (isHackArchive) {
+                            snprintf(msg, sizeof(msg),
+                                     "This ROM-hack archive was built for a different game "
+                                     "revision:\n\n%s\n\nversion ROM-CRC 0x%08X, expected 0x%08X (US "
+                                     "rev0).\n\nG-Diffuser will run the stock game. Rebuild the archive "
+                                     "from its ROM under Workshop > ROM Hacks.",
+                                     path.c_str(), got, kGdxExpectedGenericRomCrc);
+                        } else {
+                            snprintf(msg, sizeof(msg),
+                                     "The extracted asset archive does not match your ROM:\n\n%s\n\nversion "
+                                     "ROM-CRC 0x%08X, expected 0x%08X (US rev0).\n\nG-Diffuser will boot "
+                                     "from the raw ROM. Delete this file to force a fresh extraction.",
+                                     path.c_str(), got, kGdxExpectedGenericRomCrc);
+                        }
+                        MessageBoxA(nullptr, msg,
+                                    isHackArchive ? "G-Diffuser — incompatible ROM-hack archive"
+                                                  : "G-Diffuser — incompatible generic.o2r",
                                     MB_OK | MB_ICONWARNING);
 #endif
                         toUnmount.push_back(path);
-                    } else {
-                        archivesValidated = true; // the no-ROM boot gate's predicate
+                    } else if (!isHackArchive) {
+                        // Only the BASE archive satisfies the no-ROM boot gate. A hack replaces
+                        // content on top of it and can never stand in for it.
+                        archivesValidated = true;
                     }
                 } else if (got != kGdxExpectedArchiveVersion) {
                     // WARN-ONLY for every other versioned archive.
@@ -936,6 +1072,7 @@ int main(int argc, char** argv) {
         // The F12 unified Export/Import shell; v1 hosts E1 .gdxc track/machine export.
         pgui->AddGuiWindow(
             std::make_shared<GdxContentWindow>("gEnhancements.Content.LibraryOpen", "Content Library"));
+        pgui->AddGuiWindow(std::make_shared<GdxHackModsWindow>("gEnhancements.Hacks.WindowOpen", "ROM Hacks"));
         pgui->AddGuiWindow(std::make_shared<GdxInputViewer>());
         pgui->AddGuiWindow(std::make_shared<GdxFpsOverlay>());
 

@@ -1,15 +1,27 @@
 /* port/gdx_mfs_image.h -- read-only MFS filesystem over a foreign 64DD disk image file.
  *
- * Opens a full SDK-format .ndd (64,931,840 bytes) or a raw .ram RAM-partition dump (exactly
- * LEORAM_BYTE[type] bytes), validates the MFS volume header (primary, then the backup copy),
- * lists Course Edit tracks ("CRS" extension) and Create Machine machines ("CAR"), and extracts
- * file payloads byte-exact. Both big-endian (console/emulator dumps) and little-endian
- * (port-written) images are accepted; the interpretation is chosen per image by the volume
- * checksum. Read-only by design: installing content onto the live disk goes through the .gdxc
- * validation chain (gdx_content_import.c), never through here.
+ * Opens any of the four 64DD image layouts in circulation, validates the MFS volume header
+ * (primary, then the backup copy), lists Course Edit tracks ("CRS" extension) and Create Machine
+ * machines ("CAR"), and extracts file payloads byte-exact:
  *
- * Format provenance: decomp/include/leo/mfs.h, decomp/src/leo/mfs/*.c, zone tables in
- * decomp/src/leo/lib/leo_tbl.c. Design record: devdocs/change-plan.md (2026-08-26, A1).
+ *   .ndd   SDK layout, exactly 64,931,840 bytes: libleo block order after the system area.
+ *   .disk  MAME/ares physical layout, exactly 70,627,520 bytes: physical surface order, with
+ *          room reserved for every block on the disk and defective tracks skipped per the
+ *          system data's defect table.
+ *   .d64   variable size: a 0x200-byte header followed only by the ROM and RAM area LBAs.
+ *   .ram   raw RAM-partition dump, exactly LEORAM_BYTE[type] bytes.
+ *
+ * The layout is chosen by exact file size and then confirmed by a real MFS parse, so a size
+ * match alone never counts as recognition. Both big-endian (console/emulator dumps) and
+ * little-endian (port-written) images are accepted; the interpretation is pinned per image by
+ * the slot-0 root directory entry. Read-only by design: installing content onto the live disk
+ * goes through the .gdxc validation chain (gdx_content_import.c), never through here.
+ *
+ * Format provenance: decomp/include/leo/mfs.h, the sources under decomp/src/leo/mfs/, zone tables in
+ * decomp/src/leo/lib/leo_tbl.c. The physical-surface geometry (track and zone-start tables) and
+ * the D64 range header match ares mia/medium/nintendo-64dd.cpp; both describe 64DD media
+ * geometry rather than game content. Design record: devdocs/change-plan.md (2026-08-26, A1) and
+ * devdocs/1.2.0-import-and-limits-scope.md (2026-08-27, W1).
  */
 #ifndef GDX_MFS_IMAGE_H
 #define GDX_MFS_IMAGE_H
@@ -30,7 +42,7 @@ extern "C" {
 #define GDX_MFSIMG_OK 0
 #define GDX_MFSIMG_ERR_BAD_ARGS (-1) /* NULL out-params, undersized buffer, unknown entryId */
 #define GDX_MFSIMG_ERR_IO (-2)       /* fopen/fread/malloc failure */
-#define GDX_MFSIMG_ERR_NOT_MFS (-3)  /* size, "64dd-Multi" id, or checksum: not an MFS image */
+#define GDX_MFSIMG_ERR_NOT_MFS (-3)  /* size/layout, "64dd-Multi" id, or checksum: not an MFS image */
 #define GDX_MFSIMG_ERR_CORRUPT (-4)  /* FAT chain broken / entry out of range / read past EOF */
 #define GDX_MFSIMG_ERR_ENCODED (-5)  /* MFS_FILE_ATTR_ENCODE payload: extraction refused */
 

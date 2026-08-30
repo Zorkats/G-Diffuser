@@ -2,6 +2,8 @@
 
 #include <imgui.h>
 
+#include "rom_buffer.h" // gdx_rom_path: the clean ROM baseline for W2 course comparison
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -68,10 +70,27 @@ bool GdxPickDiskImage(char* outPath, size_t outCap) {
     wchar_t fileName[MAX_PATH] = {};
     OPENFILENAMEW ofn = {};
     ofn.lStructSize = sizeof(ofn);
-    ofn.lpstrFilter = L"64DD disk images (*.ndd, *.ram)\0*.ndd;*.ram\0All files (*.*)\0*.*\0";
+    ofn.lpstrFilter = L"64DD disk images (*.ndd, *.ndr, *.d6r, *.n64dd, *.disk, *.disk_save, *.d64, *.ram)\0"
+                      L"*.ndd;*.ndr;*.d6r;*.n64dd;*.disk;*.disk_save;*.d64;*.ram\0"
+                      L"All files (*.*)\0*.*\0";
     ofn.lpstrFile = fileName;
     ofn.nMaxFile = MAX_PATH;
     ofn.lpstrTitle = L"Open a 64DD disk image";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (!GetOpenFileNameW(&ofn)) {
+        return false;
+    }
+    return WideCharToMultiByte(CP_UTF8, 0, fileName, -1, outPath, (int) outCap, nullptr, nullptr) > 0;
+}
+
+bool GdxPickRom(char* outPath, size_t outCap) {
+    wchar_t fileName[MAX_PATH] = {};
+    OPENFILENAMEW ofn = {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFilter = L"N64 ROM images (*.z64, *.n64, *.v64)\0*.z64;*.n64;*.v64\0All files (*.*)\0*.*\0";
+    ofn.lpstrFile = fileName;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrTitle = L"Open an F-Zero X ROM";
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
     if (!GetOpenFileNameW(&ofn)) {
         return false;
@@ -84,6 +103,7 @@ bool GdxPickDiskImage(char* outPath, size_t outCap) {
 
 GdxContentWindow::~GdxContentWindow() {
     CloseDiskImage();
+    CloseRomCourses();
 }
 
 int GdxContentWindow::RefreshLibrary() {
@@ -301,6 +321,7 @@ void GdxContentWindow::DrawElement() {
     DrawCupPicker(busy, inGameplay);
     DrawImportSection(busy, inGameplay);
     DrawImageImportSection(busy, inGameplay);
+    DrawRomImportSection(busy, inGameplay);
 
     if (mStatus[0] != '\0') {
         ImGui::Separator();
@@ -591,15 +612,282 @@ void GdxContentWindow::OpenDiskImage(const char* path) {
              mImageTotalCount == 1 ? "" : "s");
 }
 
+void GdxContentWindow::CloseRomCourses() {
+    if (mRomCourses != nullptr) {
+        gdx_romcourse_close(mRomCourses);
+        mRomCourses = nullptr;
+    }
+    mRomEntryCount = 0;
+    mRomArmed = -1;
+    mRomHasBaseline = false;
+    mRomTouchesNonCourse = false;
+    mRomHeaderChecksumChanged = false;
+}
+
+// Runs the shared validation chain for one ROM row against its current (possibly edited) name.
+// Same chain gdx_content_import_begin_payload re-runs authoritatively at click time.
+void GdxContentWindow::ValidateRomRow(int row) {
+    if (row < 0 || row >= mRomEntryCount || mRomCourses == nullptr) {
+        return;
+    }
+    GdxRomCourseEntry& entry = mRomEntries[row];
+    GdxContentImportEntry& out = mRomImportRows[row];
+    memset(&out, 0, sizeof(out));
+    out.classFileCount = -1;
+    out.bundleTrackCount = -1;
+
+    uint8_t* payload = static_cast<uint8_t*>(malloc(GDX_ROMCOURSE_PAYLOAD_SIZE));
+    if (payload == nullptr) {
+        out.errors = GDX_IMPORT_ERR_IO;
+        return;
+    }
+    int rc = gdx_romcourse_payload(mRomCourses, entry.index, payload, GDX_ROMCOURSE_PAYLOAD_SIZE);
+    if (rc != GDX_ROMCOURSE_OK) {
+        out.errors = GDX_IMPORT_ERR_IO;
+    } else {
+        // Courses install as CRSD, the finished playable form the Edit Cup references.
+        gdx_content_import_validate_payload(mRomNames[row], "CRSD", GDX_CONTENT_TYPE_TRACK, payload,
+                                            GDX_ROMCOURSE_PAYLOAD_SIZE, &out);
+    }
+    free(payload);
+}
+
+void GdxContentWindow::OpenRomCourses(const char* path) {
+    // The player's clean ROM is the baseline that says which courses a hack actually changed. It
+    // is the same path first-boot extraction used; when it is gone we still list every course,
+    // just without the changed/unchanged split.
+    const char* baseline = (gdx_rom_path[0] != '\0') ? gdx_rom_path : nullptr;
+
+    GdxRomCourseSet* set = nullptr;
+    int rc = gdx_romcourse_open(path, baseline, &set);
+    if (rc == GDX_ROMCOURSE_ERR_NO_BASELINE && baseline != nullptr) {
+        // A missing or moved clean ROM must not block the import outright.
+        rc = gdx_romcourse_open(path, nullptr, &set);
+    }
+    if (rc != GDX_ROMCOURSE_OK) {
+        snprintf(mStatus, sizeof(mStatus), "Could not read the ROM: %s.", gdx_romcourse_strerror(rc));
+        return;
+    }
+
+    CloseRomCourses();
+    mRomCourses = set;
+    mRomHasBaseline = gdx_romcourse_has_baseline(set) != 0;
+    mRomTouchesNonCourse = gdx_romcourse_touches_non_course(set) != 0;
+    mRomHeaderChecksumChanged = gdx_romcourse_header_checksum_changed(set) != 0;
+
+    // With no baseline there is no "changed" to filter on, so show everything.
+    if (!mRomHasBaseline) {
+        mRomChangedOnly = false;
+    }
+    int count = gdx_romcourse_list(mRomCourses, mRomEntries, GDX_ROMCOURSE_COUNT, mRomChangedOnly ? 1 : 0);
+    if (count < 0) {
+        snprintf(mStatus, sizeof(mStatus), "Could not list the ROM's courses: %s.", gdx_romcourse_strerror(count));
+        CloseRomCourses();
+        return;
+    }
+    mRomEntryCount = count;
+
+    for (int i = 0; i < mRomEntryCount; i++) {
+        // Seed the editable name from the course's own internal id, truncated to the MFS limit.
+        snprintf(mRomNames[i], sizeof(mRomNames[i]), "%s", mRomEntries[i].name);
+        ValidateRomRow(i);
+    }
+
+    if (mRomHasBaseline) {
+        snprintf(mStatus, sizeof(mStatus), "ROM read: %d course%s differ from your clean ROM.",
+                 gdx_romcourse_changed_count(mRomCourses),
+                 gdx_romcourse_changed_count(mRomCourses) == 1 ? "" : "s");
+    } else {
+        snprintf(mStatus, sizeof(mStatus), "ROM read: %d courses (no clean ROM to compare against).",
+                 mRomEntryCount);
+    }
+}
+
+void GdxContentWindow::DrawRomImportSection(bool busy, bool inGameplay) {
+    ImGui::Separator();
+    ImGui::TextUnformatted("Import courses from a ROM (EXPERIMENTAL)");
+    ImGui::TextWrapped("A course inside an F-Zero X ROM and a Course Edit track are the same structure, so a "
+                       "course-table ROM hack (FZEP tracks, New Lap, and the like) can be read straight into your "
+                       "Content Library — no ROM swap, no separate save. Patch your own clean ROM with any "
+                       "patcher first, then point this at the result. Both ROMs are only read, never written.");
+
+    ImGui::InputTextWithHint("##romcoursepath", "Path to a patched .z64 / .n64 / .v64 ROM...", mRomInput,
+                             sizeof(mRomInput));
+    ImGui::SameLine();
+#ifdef _WIN32
+    if (ImGui::Button("Browse...##rom")) {
+        GdxPickRom(mRomInput, sizeof(mRomInput));
+    }
+    ImGui::SameLine();
+#endif
+    if (ImGui::Button("Read ROM")) {
+        if (mRomInput[0] == '\0') {
+            snprintf(mStatus, sizeof(mStatus), "Enter or pick a ROM path first.");
+        } else {
+            OpenRomCourses(mRomInput);
+        }
+    }
+    if (mRomCourses != nullptr) {
+        ImGui::SameLine();
+        if (ImGui::Button("Close ROM")) {
+            CloseRomCourses();
+        }
+    }
+
+    if (mRomCourses == nullptr) {
+        return;
+    }
+
+    if (mRomHasBaseline) {
+        if (ImGui::Checkbox("Only courses this ROM changed", &mRomChangedOnly)) {
+            int count = gdx_romcourse_list(mRomCourses, mRomEntries, GDX_ROMCOURSE_COUNT, mRomChangedOnly ? 1 : 0);
+            mRomEntryCount = (count > 0) ? count : 0;
+            mRomArmed = -1;
+            for (int i = 0; i < mRomEntryCount; i++) {
+                snprintf(mRomNames[i], sizeof(mRomNames[i]), "%s", mRomEntries[i].name);
+                ValidateRomRow(i);
+            }
+        }
+    } else {
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
+                           "No clean ROM available to compare against, so every course is listed.");
+    }
+
+    if (mRomTouchesNonCourse) {
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
+                           "This ROM also changes data outside the course table.");
+        ImGui::TextWrapped("Courses below still import normally. Anything else the hack changes (music, textures, "
+                           "code) cannot come across this way and needs the ROM-hack path instead.");
+    }
+    if (mRomHeaderChecksumChanged) {
+        // Benign and common: patchers recalculate the header CRC so the ROM still boots. Said out
+        // loud so the difference is not mistaken for a silent one.
+        ImGui::TextDisabled("The ROM header checksum was recalculated. That is normal after patching and "
+                            "affects no course data.");
+    }
+
+    if (mRomEntryCount == 0) {
+        ImGui::TextDisabled(mRomChangedOnly ? "This ROM's courses are identical to your clean ROM."
+                                            : "No readable courses in this ROM.");
+        return;
+    }
+
+    if (!ImGui::BeginTable("GdxRomImportTable", 5,
+                           ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
+                               ImGuiTableFlags_SizingFixedFit,
+                           ImVec2(0.0f, 220.0f))) {
+        return;
+    }
+    ImGui::TableSetupColumn("Slot");
+    ImGui::TableSetupColumn("Save as");
+    ImGui::TableSetupColumn("Course");
+    ImGui::TableSetupColumn("Status");
+    ImGui::TableSetupColumn("");
+    ImGui::TableHeadersRow();
+
+    for (int i = 0; i < mRomEntryCount; i++) {
+        GdxRomCourseEntry& entry = mRomEntries[i];
+        GdxContentImportEntry& row = mRomImportRows[i];
+        const bool valid = row.errors == 0;
+        const bool stateUnknown = row.errors == GDX_IMPORT_ERR_STATE_UNKNOWN;
+        const bool needsConfirm =
+            (row.warnings & (GDX_IMPORT_WARN_OVERWRITE | GDX_IMPORT_WARN_TWIN_DELETE | GDX_IMPORT_WARN_CUP_CLEAR)) !=
+            0;
+        ImGui::PushID(4000 + i);
+        ImGui::TableNextRow();
+
+        ImGui::TableNextColumn();
+        ImGui::TextUnformatted(entry.symbol != nullptr ? entry.symbol : "(slot)");
+        if (entry.changed) {
+            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "changed");
+        }
+
+        ImGui::TableNextColumn();
+        ImGui::SetNextItemWidth(160.0f);
+        if (ImGui::InputText("##romname", mRomNames[i], sizeof(mRomNames[i]))) {
+            ValidateRomRow(i);
+            mRomArmed = -1;
+        }
+
+        ImGui::TableNextColumn();
+        ImGui::Text("id %s", entry.name[0] != '\0' ? entry.name : "(none)");
+        ImGui::TextDisabled("%d points, venue %d", (int) entry.controlPointCount, (int) entry.venue);
+
+        ImGui::TableNextColumn();
+        if (valid) {
+            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "OK");
+        } else if (stateUnknown) {
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "Unknown");
+            ImGui::TextWrapped("Disk state not probed (disk busy or still mounting); close and reopen the ROM in a "
+                               "moment.");
+        } else {
+            char errors[384];
+            gdx_content_import_format_errors(row.errors, errors, sizeof(errors));
+            ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "Rejected");
+            ImGui::TextWrapped("%s", errors);
+        }
+        if (row.warnings != 0) {
+            char warnings[256];
+            gdx_content_import_format_warnings(row.warnings, warnings, sizeof(warnings));
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "%s", warnings);
+        }
+
+        ImGui::TableNextColumn();
+        ImGui::BeginDisabled(!valid || busy || inGameplay || mImportWaiting || mCupWaiting);
+        const bool armed = mRomArmed == i;
+        if (ImGui::SmallButton(needsConfirm && !armed ? "Import..." : (needsConfirm ? "Confirm" : "Import"))) {
+            if (needsConfirm && !armed) {
+                mRomArmed = i;
+            } else {
+                mRomArmed = -1;
+                // Re-read the course at click time: never trust the list's earlier snapshot.
+                uint8_t* payload = static_cast<uint8_t*>(malloc(GDX_ROMCOURSE_PAYLOAD_SIZE));
+                if (payload == nullptr) {
+                    snprintf(mStatus, sizeof(mStatus), "Out of memory reading '%s' from the ROM.", mRomNames[i]);
+                } else {
+                    int readRc = gdx_romcourse_payload(mRomCourses, entry.index, payload, GDX_ROMCOURSE_PAYLOAD_SIZE);
+                    if (readRc != GDX_ROMCOURSE_OK) {
+                        snprintf(mStatus, sizeof(mStatus), "Could not read that course from the ROM: %s.",
+                                 gdx_romcourse_strerror(readRc));
+                    } else {
+                        int irc = gdx_content_import_begin_payload(mRomNames[i], "CRSD", GDX_CONTENT_TYPE_TRACK,
+                                                                   payload, GDX_ROMCOURSE_PAYLOAD_SIZE);
+                        if (irc == GDX_CONTENT_OK) {
+                            // The shared completion poll in DrawImportSection reports and refreshes.
+                            mImportWaiting = true;
+                        } else if (irc == GDX_CONTENT_IMPORT_ERR_VALIDATION) {
+                            snprintf(mStatus, sizeof(mStatus),
+                                     "'%s' failed its re-check; close and reopen the ROM to refresh.", mRomNames[i]);
+                        } else if (irc == GDX_CONTENT_IMPORT_ERR_IN_GAMEPLAY) {
+                            snprintf(mStatus, sizeof(mStatus), "Import is unavailable while a race is live.");
+                        } else {
+                            snprintf(mStatus, sizeof(mStatus), "Import of '%s' failed: %s.", mRomNames[i],
+                                     gdx_content_error_string(irc));
+                        }
+                    }
+                    free(payload);
+                }
+            }
+        }
+        ImGui::EndDisabled();
+        ImGui::PopID();
+    }
+    ImGui::EndTable();
+}
+
 void GdxContentWindow::DrawImageImportSection(bool busy, bool inGameplay) {
     ImGui::Separator();
     ImGui::TextUnformatted("Import from a disk image (EXPERIMENTAL)");
-    ImGui::TextWrapped("Reads tracks and machines straight out of a 64DD disk dump (.ndd or raw .ram) from an "
-                       "emulator or console — no .gdxc conversion step needed. The image is only read, never "
-                       "written.");
+    ImGui::TextWrapped("Reads tracks and machines straight out of a 64DD disk dump from an emulator or console "
+                       "— no .gdxc conversion step needed. Accepts .ndd, .ndr, .d6r and .n64dd (Project64, "
+                       "Mupen64Plus, RMG, ares, 64DD Dump Tool), .disk and .disk_save (ares, MAME, RetroArch), "
+                       ".d64, and raw .ram partition dumps (MiSTer). The extension is not what decides: the image "
+                       "is identified by its size and filesystem, so a renamed dump still opens. It is only read, "
+                       "never written.");
 
-    ImGui::InputTextWithHint("##diskimagepath", "Path to a .ndd / .ram disk image...", mDiskImageInput,
-                             sizeof(mDiskImageInput));
+    ImGui::InputTextWithHint("##diskimagepath",
+                             "Path to a 64DD disk image (.ndd, .ndr, .d6r, .n64dd, .disk, .disk_save, .d64, .ram)...",
+                             mDiskImageInput, sizeof(mDiskImageInput));
     ImGui::SameLine();
 #ifdef _WIN32
     if (ImGui::Button("Browse...")) {
