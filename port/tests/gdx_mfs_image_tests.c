@@ -132,6 +132,205 @@ static int64_t hx_lba_offset(int isRawRam, int diskType, int32_t startLBA, int32
     return HX_SYS_AREA_BYTES + hx_range_bytes(diskType, 0, logicalLba);
 }
 
+/* ---------------------------------------------------------------------------------
+ * Foreign-layout encoders. These exist so the round-trip tests never need a captured disk
+ * dump: a synthesized .ndd is re-encoded here into the MAME/ares physical layout and into
+ * D64, and the module must read identical files and identical payload bytes out of all three.
+ * Tables are retyped independently of the module, same rule as the zone tables above.
+ * ------------------------------------------------------------------------------- */
+
+static const uint16_t hxTrackPhysical[16] = { 0x000, 0x09E, 0x13C, 0x1D1, 0x266, 0x2FB, 0x390, 0x425,
+                                              0x091, 0x12F, 0x1C4, 0x259, 0x2EE, 0x383, 0x418, 0x48A };
+
+static const uint32_t hxPzoneStartOffset[16] = { 0x0000000, 0x05F15E0, 0x0B79D00, 0x10801A0,
+                                                 0x1523720, 0x1963D80, 0x1D414C0, 0x20BBCE0,
+                                                 0x23196E0, 0x28A1E00, 0x2DF5DC0, 0x3299340,
+                                                 0x36D99A0, 0x3AB70E0, 0x3E31900, 0x4149200 };
+
+#define HX_MAME_TOTAL_BYTES 70627520 /* 0x435B0C0 */
+#define HX_PHYS_LBA_COUNT 0x10DC
+#define HX_PHYS_LBA_BIAS 0x18
+#define HX_SYS_DATA_BYTES 0xE8
+#define HX_D64_DATA_OFFSET 0x200
+
+static int32_t hx_phys_block_bytes(int diskType, int32_t physLba) {
+    int vzone;
+    int zone;
+
+    if (physLba < 0 || physLba >= HX_PHYS_LBA_COUNT) {
+        return 0;
+    }
+    for (vzone = 0; vzone < 0x10; vzone++) {
+        if ((uint32_t)physLba < hxVzoneTbl[diskType][vzone]) {
+            break;
+        }
+    }
+    if (vzone == 0x10) {
+        return 0;
+    }
+    zone = hxPzoneHdTbl[diskType][vzone];
+    if (zone >= 8) {
+        zone -= 7;
+    }
+    return hxByteTbl2[zone];
+}
+
+/* Offset of a physical LBA inside a full .ndd: the SDK layout is simply every physical block
+ * end to end, and the first 24 of them are the system area (0x18 * 0x4D08 == 0x738C0). */
+static int64_t hx_ndd_phys_offset(int diskType, int32_t physLba) {
+    int64_t off = 0;
+    int32_t i;
+    for (i = 0; i < physLba; i++) {
+        off += hx_phys_block_bytes(diskType, i);
+    }
+    return off;
+}
+
+static int64_t hx_physical_offset(int diskType, const uint8_t* sysData, int32_t physLba) {
+    int vzone;
+    int pzone;
+    int head;
+    int sizeIndex;
+    int32_t lbaInVzone;
+    int32_t trackStart;
+    int32_t track;
+    int32_t blockSize;
+    int32_t blockIndex;
+    int defectOffset;
+    int defectAmount;
+
+    if (physLba < 0 || physLba >= HX_PHYS_LBA_COUNT) {
+        return -1;
+    }
+    for (vzone = 0; vzone < 0x10; vzone++) {
+        if ((uint32_t)physLba < hxVzoneTbl[diskType][vzone]) {
+            break;
+        }
+    }
+    if (vzone == 0x10) {
+        return -1;
+    }
+    pzone = hxPzoneHdTbl[diskType][vzone];
+    head = (pzone > 7) ? 1 : 0;
+    sizeIndex = head ? (pzone - 7) : pzone;
+
+    lbaInVzone = physLba;
+    if (vzone > 0) {
+        lbaInVzone -= (int32_t)hxVzoneTbl[diskType][vzone - 1];
+    }
+
+    trackStart = (int32_t)hxTrackPhysical[head ? (pzone - 8) : pzone];
+    track = (int32_t)hxTrackPhysical[pzone];
+    if (head) {
+        track -= (lbaInVzone >> 1);
+    } else {
+        track += (lbaInVzone >> 1);
+    }
+
+    defectOffset = (pzone > 0) ? (int)sysData[8 + pzone - 1] : 0;
+    defectAmount = (int)sysData[8 + pzone] - defectOffset;
+    while (defectAmount > 0 && HX_SYS_DATA_BYTES > 0x20 + defectOffset &&
+           (int32_t)sysData[0x20 + defectOffset] + trackStart <= track) {
+        track++;
+        defectOffset++;
+        defectAmount--;
+    }
+
+    blockIndex = ((physLba & 3) == 0 || (physLba & 3) == 3) ? 0 : 1;
+    blockSize = (int32_t)hxByteTbl2[sizeIndex];
+
+    return (int64_t)hxPzoneStartOffset[pzone] + (int64_t)(track - trackStart) * blockSize * 2 +
+           (int64_t)blockSize * blockIndex;
+}
+
+/* Re-encode a full .ndd buffer into the MAME/ares physical layout. */
+static uint8_t* hx_encode_physical(const uint8_t* ndd, int64_t nddSize, int diskType, const uint8_t* sysData,
+                                   int64_t* outSize) {
+    uint8_t* out = (uint8_t*)calloc(1, HX_MAME_TOTAL_BYTES);
+    int64_t srcOff = 0;
+    int32_t lba;
+
+    if (out == NULL) {
+        return NULL;
+    }
+    for (lba = 0; lba < HX_PHYS_LBA_COUNT; lba++) {
+        int32_t bytes = hx_phys_block_bytes(diskType, lba);
+        int64_t dstOff = hx_physical_offset(diskType, sysData, lba);
+        if (bytes <= 0 || dstOff < 0 || dstOff + bytes > HX_MAME_TOTAL_BYTES || srcOff + bytes > nddSize) {
+            free(out);
+            return NULL;
+        }
+        memcpy(out + dstOff, ndd + srcOff, (size_t)bytes);
+        srcOff += bytes;
+    }
+    /* The physical layout's own system data sits at physical block 0, which maps to offset 0. */
+    memcpy(out, sysData, HX_SYS_DATA_BYTES);
+    *outSize = HX_MAME_TOTAL_BYTES;
+    return out;
+}
+
+/* Re-encode a full .ndd buffer into D64: 0x200-byte header, then only the ROM and RAM ranges. */
+static uint8_t* hx_encode_d64(const uint8_t* ndd, int64_t nddSize, int diskType, const uint8_t* sysData,
+                              int32_t romEndStored, int64_t* outSize) {
+    int32_t romStart = HX_PHYS_LBA_BIAS;
+    int32_t romEnd = romEndStored + HX_PHYS_LBA_BIAS;
+    int32_t ramStartStored = hxRamStartLba[diskType] - HX_PHYS_LBA_BIAS;
+    int32_t ramEndStored = HX_LBA_COUNT - 1;
+    int32_t ramStart = ramStartStored + HX_PHYS_LBA_BIAS;
+    int32_t ramEnd = ramEndStored + HX_PHYS_LBA_BIAS;
+    int64_t total = HX_D64_DATA_OFFSET;
+    uint8_t* out;
+    int64_t dstOff;
+    int32_t lba;
+
+    for (lba = 0; lba < HX_PHYS_LBA_COUNT; lba++) {
+        if (lba < romStart) {
+            continue;
+        }
+        if (lba > romEnd && lba < ramStart) {
+            continue;
+        }
+        if (lba > ramEnd) {
+            continue;
+        }
+        total += hx_phys_block_bytes(diskType, lba);
+    }
+    out = (uint8_t*)calloc(1, (size_t)total);
+    if (out == NULL) {
+        return NULL;
+    }
+    memcpy(out, sysData, HX_SYS_DATA_BYTES);
+    out[0xE0] = (uint8_t)((romEndStored >> 8) & 0xFF);
+    out[0xE1] = (uint8_t)(romEndStored & 0xFF);
+    out[0xE2] = (uint8_t)((ramStartStored >> 8) & 0xFF);
+    out[0xE3] = (uint8_t)(ramStartStored & 0xFF);
+    out[0xE4] = (uint8_t)((ramEndStored >> 8) & 0xFF);
+    out[0xE5] = (uint8_t)(ramEndStored & 0xFF);
+
+    dstOff = HX_D64_DATA_OFFSET;
+    for (lba = 0; lba < HX_PHYS_LBA_COUNT; lba++) {
+        int32_t bytes = hx_phys_block_bytes(diskType, lba);
+        int64_t srcOff = hx_ndd_phys_offset(diskType, lba);
+        if (lba < romStart) {
+            continue;
+        }
+        if (lba > romEnd && lba < ramStart) {
+            continue;
+        }
+        if (lba > ramEnd) {
+            continue;
+        }
+        if (bytes <= 0 || srcOff + bytes > nddSize || dstOff + bytes > total) {
+            free(out);
+            return NULL;
+        }
+        memcpy(out + dstOff, ndd + srcOff, (size_t)bytes);
+        dstOff += bytes;
+    }
+    *outSize = total;
+    return out;
+}
+
 static void hx_wr16(uint8_t* p, uint16_t v, int be) {
     if (be) {
         p[0] = (uint8_t)(v >> 8);
@@ -675,6 +874,223 @@ static void CaseFatIdOutOfRangeRefused(void) {
     remove(HX_TEMP_PATH);
 }
 
+/* ---------------------------------------------------------------------------------
+ * Foreign-layout cases
+ * ------------------------------------------------------------------------------- */
+
+static int hx_cmp_int64(const void* a, const void* b) {
+    int64_t x = *(const int64_t*)a;
+    int64_t y = *(const int64_t*)b;
+    return (x < y) ? -1 : ((x > y) ? 1 : 0);
+}
+
+/* Anchors the physical track/zone-start tables. Every physical LBA on every disk type must land
+ * at a distinct, in-bounds offset; a single mistyped table entry collapses two blocks onto the
+ * same address or runs off the end, and both show up here. */
+static void CasePhysicalGeometryInjective(void) {
+    uint8_t sysData[HX_SYS_DATA_BYTES];
+    int64_t* offsets = (int64_t*)malloc(sizeof(int64_t) * HX_PHYS_LBA_COUNT);
+    int t;
+
+    memset(sysData, 0, sizeof(sysData));
+    checkTrue("offset scratch alloc", offsets != NULL);
+    if (offsets == NULL) {
+        return;
+    }
+    for (t = 0; t < 6; t++) {
+        int32_t lba;
+        int collisions = 0;
+        int outOfBounds = 0;
+        for (lba = 0; lba < HX_PHYS_LBA_COUNT; lba++) {
+            int32_t bytes = hx_phys_block_bytes(t, lba);
+            int64_t off = hx_physical_offset(t, sysData, lba);
+            offsets[lba] = off;
+            if (off < 0 || bytes <= 0 || off + bytes > HX_MAME_TOTAL_BYTES) {
+                outOfBounds++;
+            }
+        }
+        qsort(offsets, HX_PHYS_LBA_COUNT, sizeof(int64_t), hx_cmp_int64);
+        for (lba = 1; lba < HX_PHYS_LBA_COUNT; lba++) {
+            if (offsets[lba] == offsets[lba - 1]) {
+                collisions++;
+            }
+        }
+        checkEqLong("physical offsets in bounds", outOfBounds, 0);
+        checkEqLong("physical offsets distinct", collisions, 0);
+    }
+    free(offsets);
+}
+
+typedef struct HxSnapshot {
+    int count;
+    GdxMfsImageEntry entries[8];
+    uint8_t* payloads[8];
+} HxSnapshot;
+
+static int hx_snapshot(const char* path, HxSnapshot* snap) {
+    GdxMfsImage* img = NULL;
+    int rc;
+    int i;
+
+    memset(snap, 0, sizeof(*snap));
+    rc = gdx_mfsimg_open(path, &img);
+    if (rc != GDX_MFSIMG_OK) {
+        return rc;
+    }
+    snap->count = gdx_mfsimg_list(img, snap->entries, 8);
+    for (i = 0; i < snap->count && i < 8; i++) {
+        int32_t sz = snap->entries[i].fileSize;
+        if (snap->entries[i].encoded || sz <= 0) {
+            continue;
+        }
+        snap->payloads[i] = (uint8_t*)malloc((size_t)sz);
+        if (snap->payloads[i] == NULL) {
+            continue;
+        }
+        if (gdx_mfsimg_read_file(img, snap->entries[i].entryId, snap->payloads[i], sz) != GDX_MFSIMG_OK) {
+            free(snap->payloads[i]);
+            snap->payloads[i] = NULL;
+        }
+    }
+    gdx_mfsimg_close(img);
+    return GDX_MFSIMG_OK;
+}
+
+static void hx_free_snapshot(HxSnapshot* snap) {
+    int i;
+    for (i = 0; i < 8; i++) {
+        free(snap->payloads[i]);
+        snap->payloads[i] = NULL;
+    }
+}
+
+/* Builds a synthesized .ndd, reads it, re-encodes the very same bytes into a foreign layout,
+ * reads that, and requires the two readings to agree entry for entry and byte for byte. */
+static void RunLayoutEquivalence(int diskType, int bigEndian, int asD64, int withDefects) {
+    HxSpec spec;
+    HxFixture fx;
+    HxSnapshot base;
+    HxSnapshot conv;
+    uint8_t sysData[HX_SYS_DATA_BYTES];
+    uint8_t* encoded = NULL;
+    int64_t encodedSize = 0;
+    int i;
+
+    memset(&spec, 0, sizeof(spec));
+    spec.diskType = diskType;
+    spec.bigEndian = bigEndian;
+    spec.isRawRam = 0;
+
+    checkTrue("fixture built", hx_build_fixture(&spec, &fx) == 0);
+    if (fx.data == NULL) {
+        return;
+    }
+
+    memcpy(sysData, fx.data, HX_SYS_DATA_BYTES);
+    if (withDefects) {
+        /* One defective track in physical zone 0. The cumulative table must stay monotonic, so
+         * every later zone repeats the running total. */
+        int z;
+        for (z = 0; z < 16; z++) {
+            sysData[8 + z] = 1;
+        }
+        sysData[0x20] = 5; /* track 5 of zone 0 is bad; later tracks shift outward by one */
+    }
+
+    checkTrue("baseline .ndd written", hx_write_temp(fx.data, fx.size) == 0);
+    checkEqLong("baseline .ndd opened", hx_snapshot(HX_TEMP_PATH, &base), GDX_MFSIMG_OK);
+    remove(HX_TEMP_PATH);
+
+    if (asD64) {
+        encoded = hx_encode_d64(fx.data, fx.size, diskType, sysData, 100, &encodedSize);
+    } else {
+        encoded = hx_encode_physical(fx.data, fx.size, diskType, sysData, &encodedSize);
+    }
+    checkTrue("layout re-encoded", encoded != NULL);
+    if (encoded == NULL) {
+        hx_free_snapshot(&base);
+        hx_free_fixture(&fx);
+        return;
+    }
+    checkTrue("converted image written", hx_write_temp(encoded, encodedSize) == 0);
+
+    {
+        int rc = hx_snapshot(HX_TEMP_PATH, &conv);
+        checkEqLong("converted image opened", rc, GDX_MFSIMG_OK);
+        if (rc != GDX_MFSIMG_OK) {
+            printf("      (strerror: %s)\n", gdx_mfsimg_strerror(rc));
+            free(encoded);
+            hx_free_snapshot(&base);
+            hx_free_fixture(&fx);
+            remove(HX_TEMP_PATH);
+            return;
+        }
+    }
+
+    checkEqLong("same listed file count", conv.count, base.count);
+    checkEqLong("expected file count", base.count, 3);
+    if (conv.count == base.count) {
+        for (i = 0; i < base.count && i < 8; i++) {
+            checkTrue("same name", strcmp(base.entries[i].name, conv.entries[i].name) == 0);
+            checkTrue("same extension", strcmp(base.entries[i].extension, conv.entries[i].extension) == 0);
+            checkEqLong("same file size", conv.entries[i].fileSize, base.entries[i].fileSize);
+            checkEqLong("same content type", conv.entries[i].contentType, base.entries[i].contentType);
+            checkEqLong("same encoded flag", conv.entries[i].encoded, base.entries[i].encoded);
+            checkEqLong("same entry id", conv.entries[i].entryId, base.entries[i].entryId);
+            if (base.payloads[i] != NULL) {
+                checkTrue("converted payload present", conv.payloads[i] != NULL);
+                if (conv.payloads[i] != NULL) {
+                    checkTrue("payload byte-exact across layouts",
+                              memcmp(base.payloads[i], conv.payloads[i], (size_t)base.entries[i].fileSize) == 0);
+                }
+            }
+        }
+    }
+
+    free(encoded);
+    hx_free_snapshot(&base);
+    hx_free_snapshot(&conv);
+    hx_free_fixture(&fx);
+    remove(HX_TEMP_PATH);
+}
+
+static void CasePhysicalBE(void) {
+    RunLayoutEquivalence(0, 1, 0, 0);
+}
+
+static void CasePhysicalLEType3(void) {
+    RunLayoutEquivalence(3, 0, 0, 0);
+}
+
+static void CasePhysicalWithDefects(void) {
+    RunLayoutEquivalence(0, 1, 0, 1);
+}
+
+static void CaseD64BE(void) {
+    RunLayoutEquivalence(0, 1, 1, 0);
+}
+
+static void CaseD64LEType2(void) {
+    RunLayoutEquivalence(2, 0, 1, 0);
+}
+
+/* A file the right size for the physical layout but with no volume in it must refuse, proving
+ * the size match alone never counts as recognition. */
+static void CaseZeroedPhysicalRefused(void) {
+    uint8_t* buf = (uint8_t*)calloc(1, HX_MAME_TOTAL_BYTES);
+    GdxMfsImage* img = NULL;
+
+    checkTrue("zeroed physical buffer alloc", buf != NULL);
+    if (buf == NULL) {
+        return;
+    }
+    checkTrue("zeroed physical written", hx_write_temp(buf, HX_MAME_TOTAL_BYTES) == 0);
+    checkEqLong("zeroed .disk refused", gdx_mfsimg_open(HX_TEMP_PATH, &img), GDX_MFSIMG_ERR_NOT_MFS);
+    checkTrue("no handle leaked", img == NULL);
+    free(buf);
+    remove(HX_TEMP_PATH);
+}
+
 int main(void) {
     struct {
         const char* name;
@@ -692,6 +1108,13 @@ int main(void) {
         { "FAT cycle -> CORRUPT (no hang)", CaseFatCycleRefused },
         { "chain ends early -> CORRUPT", CaseChainEndsEarlyRefused },
         { "fatId past the disk -> CORRUPT", CaseFatIdOutOfRangeRefused },
+        { "physical geometry: offsets distinct and in bounds", CasePhysicalGeometryInjective },
+        { "MAME/ares .disk == .ndd, big-endian", CasePhysicalBE },
+        { "MAME/ares .disk == .ndd, little-endian, disk type 3", CasePhysicalLEType3 },
+        { "MAME/ares .disk with a defective track == .ndd", CasePhysicalWithDefects },
+        { "D64 == .ndd, big-endian", CaseD64BE },
+        { "D64 == .ndd, little-endian, disk type 2", CaseD64LEType2 },
+        { "zeroed .disk-size file -> refused", CaseZeroedPhysicalRefused },
     };
     int numCases = (int)(sizeof(cases) / sizeof(cases[0]));
     int i, failedCases = 0;

@@ -271,6 +271,10 @@ add_executable(G-Diffuser
     input_bridge.c
     gdx_course_edit_mouse.cpp  # Course Edit absolute mouse drive + issue #18 steering; extern "C"
                                # wrappers over Fast3dWindow for the decomp-side C callers
+    gdx_course_bounds.c        # Course Edit control-point bounds; the decomp clamp sites call in
+                               # here so editor and save validator agree on the y range
+    gdx_course_strings.c       # Per-course names/subtitles/BGM from the mounted archive, so a ROM
+                               # hack shows its own track names instead of the retail ones
     gdx_input_script.c
     n64_gfx_bridge.cpp
     gdx_interp.cpp
@@ -297,8 +301,13 @@ add_executable(G-Diffuser
                                    # mirrors the ghost structs, walking gMfsRamArea directly
     gdx_content_import.c           # E2 .gdxc import; validation chain + disk-thread install
                                    # staging (op slot 30 in decomp/src/sys/disk/75000.c)
+    gdx_rom_courses.c              # W2 ROM course table reader; converts ROM courses (including
+                                   # FZEP hack courses) into CRSD payloads for the same import chain
     gdx_mfs_image.c                # A2 read-only MFS over foreign .ndd/.ram images; feeds the
                                    # direct-payload import (gdx_content_import_begin_payload)
+    gdx_hackmods.cpp           # W3 ROM-hack archive discovery, single-selection and per-hack
+                               # save isolation; name helpers are unit-tested standalone
+    gdx_hackmods_window.cpp    # W3 ROM Hacks picker, separate from the Workshop pack list
     gdx_content_window.cpp         # Content Library window; the F12 unified Export/Import shell
     gdx_xcup_seed.c                # M3 X Cup seed codes; hooked from Course_GenerateRandomCourse
     gdx_palette.cpp              # F2 palette editor; mirrors Machine like gdx_ghost_io.c mirrors
@@ -603,6 +612,56 @@ elseif(GDX_PORT_WARN_FLAGS)
     target_compile_options(gdx_mfs_image_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
 endif()
 
+# Hack-mod name helper unit test: compiles gdx_hackmods.cpp UNMODIFIED (it declares its CVar and
+# logging dependencies rather than including libultraship) and checks that no archive filename can
+# escape saves/ or collide with the stock save.
+add_executable(gdx_hackmods_tests
+    tests/gdx_hackmods_tests.cpp
+    gdx_hackmods.cpp)
+target_compile_features(gdx_hackmods_tests PRIVATE cxx_std_17)
+if(MSVC)
+    target_compile_options(gdx_hackmods_tests PRIVATE /W3)
+    # Same definition the G-Diffuser target carries, so this harness sees the same C4996
+    # posture as the real build instead of warning on strcpy/strcat the module already uses.
+    target_compile_definitions(gdx_hackmods_tests PRIVATE _CRT_SECURE_NO_WARNINGS=1)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_hackmods_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+
+# ROM course reader unit test: compiles gdx_rom_courses.c UNMODIFIED and drives its public API
+# against synthesized ROM images (.z64/.v64/.n64, clean vs patched). No real ROM is read.
+add_executable(gdx_rom_courses_tests
+    tests/gdx_rom_courses_tests.c
+    gdx_rom_courses.c)
+if(MSVC)
+    target_compile_options(gdx_rom_courses_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_rom_courses_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+
+add_executable(gdx_course_bounds_tests
+    tests/gdx_course_bounds_tests.c
+    gdx_course_bounds.c)
+if(MSVC)
+    target_compile_options(gdx_course_bounds_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_course_bounds_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+
+# Course-strings test: compiles gdx_course_strings.c UNMODIFIED and drives both halves. The
+# test TU supplies the four decomp tables and the archive reader as stubs, so apply() is
+# exercised end to end against synthesized payloads with no archive and no ROM in sight.
+add_executable(gdx_course_strings_tests
+    tests/gdx_course_strings_tests.c
+    gdx_course_strings.c)
+target_include_directories(gdx_course_strings_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_course_strings_tests PRIVATE /W3)
+    target_compile_definitions(gdx_course_strings_tests PRIVATE _CRT_SECURE_NO_WARNINGS=1)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_course_strings_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+
 # Wide-Gfx packing test: compiles only the real decomp gbi.h with the game's defines, so the
 # gSP*/gDP* macros under test are exactly the ones the game emits. Verifies w1 holds a full
 # 64-bit host pointer and a bridge-style reader recovers it. See tests/gfx_pack_tests.c.
@@ -753,6 +812,8 @@ if(GDX_BUILD_JP)
         gdx_discord.cpp
         input_bridge.c
         gdx_input_script.c
+        gdx_course_strings.c   # decomp game.c calls gdx_course_strings_apply() under PORT, so this
+                               # is a link dependency and not an optional feature
         n64_gfx_bridge.cpp
         gdx_interp.cpp
         n64_gfx_convert.cpp

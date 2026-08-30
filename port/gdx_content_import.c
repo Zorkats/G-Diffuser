@@ -10,6 +10,7 @@
 #define _CRT_SECURE_NO_WARNINGS /* plain fopen/fread below; harmless on non-MSVC */
 
 #include "gdx_content_import.h"
+#include "gdx_course_bounds.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -194,7 +195,7 @@ static uint32_t gdx_import_course_checksum(const GdxImportCourseData* courseData
 
         if (gdx_import_float_invalid(&controlPoint->pos.x) || controlPoint->pos.x < -15000.0f ||
             controlPoint->pos.x > 15000.0f || gdx_import_float_invalid(&controlPoint->pos.y) ||
-            controlPoint->pos.y < -250.0f || controlPoint->pos.y > 5000.0f ||
+            controlPoint->pos.y < GDX_COURSE_VALIDATOR_MIN_Y || controlPoint->pos.y > gdx_course_edit_max_y() ||
             gdx_import_float_invalid(&controlPoint->pos.z) || controlPoint->pos.z < -15000.0f ||
             controlPoint->pos.z > 15000.0f) {
             *geometryError = 1;
