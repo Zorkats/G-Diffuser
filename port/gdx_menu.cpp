@@ -510,6 +510,11 @@ GdxMenu::GdxMenu() : Ship::GuiWindow("gOpenMenuBar", false, "G-Diffuser Menu") {
     CVarRegisterString("gEnhancements.Graphics.PostPipeline", "");
     CVarRegisterInteger("gEnhancements.Graphics.DrawDistance", 100);
     CVarRegisterInteger("gEnhancements.Graphics.ForceMaxMachineLOD", 0);
+    CVarRegisterInteger("gEnhancements.Graphics.MachineLODDistMod", 0);
+    CVarRegisterInteger("gEnhancements.Graphics.ForceDrawMachineShad", 0);
+    CVarRegisterInteger("gEnhancements.Graphics.MachineBoostLODDistMod", 0);
+    CVarRegisterInteger("gEnhancements.Graphics.FancyLighting", 0);
+
     // FramePacing and FrameInterpolation are mutually exclusive pacing owners, both read live.
     // libultraship's Fast3D backend already caps the loop to ~60fps; FramePacing pins it to the N64
     // NTSC rate (~59.94Hz) instead, and wants VSync OFF to avoid beating against the display.
