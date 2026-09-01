@@ -1595,6 +1595,52 @@ void GdxMenu::RegisterMenu() {
                   .ModifiedMarker()
                   .SearchTerms("lod level of detail model quality machines"));
 
+    AddWidget("Enhancements", "Visuals", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Adjust machine detail", .cVar = "gEnhancements.Graphics.MachineLODDistMod",
+                          .type = GdxUI::WIDGET_CVAR_SLIDER_INT }
+                  .Options(UIWidgets::IntSliderOptions()
+                               .Min(0)
+                               .Max(5)
+                               .DefaultValue(0)
+                               .ShowButtons(false)
+                               .LabelPosition(UIWidgets::LabelPositions::Near)
+                               .Tooltip("Render each machine at a higher-detailed model than default,\n"
+                                        "accounting for distance. 0 = stock distance-based detail."))
+                  .ModifiedMarker()
+                  .SearchTerms("lod level of detail model quality machines"));
+
+    AddWidget("Enhancements", "Visuals", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Force rendering machine shadows", .cVar = "gEnhancements.Graphics.ForceDrawMachineShad",
+                          .type = GdxUI::WIDGET_CVAR_CHECKBOX }
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(false).Tooltip(
+                      "Always renders each machine's shadow, ignoring distance.\n"
+                      "Off = stock distance-based shadow rendering."))
+                  .ModifiedMarker()
+                  .SearchTerms("lod level of detail shadow quality machines"));
+
+    AddWidget("Enhancements", "Visuals", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Adjust machine boosters detail", .cVar = "gEnhancements.Graphics.MachineBoostLODDistMod",
+                          .type = GdxUI::WIDGET_CVAR_SLIDER_INT }
+                  .Options(UIWidgets::IntSliderOptions()
+                               .Min(0)
+                               .Max(2)
+                               .DefaultValue(0)
+                               .ShowButtons(false)
+                               .LabelPosition(UIWidgets::LabelPositions::Near)
+                               .Tooltip("Render each machine's booster graphics at a higher-level than default,\n"
+                                        "accounting for distance. 0 = stock distance-based detail."))
+                  .ModifiedMarker()
+                  .SearchTerms("lod level of detail boosters quality machines"));
+
+    AddWidget("Enhancements", "Visuals", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Fancy lighting", .cVar = "gEnhancements.Graphics.FancyLighting",
+                          .type = GdxUI::WIDGET_CVAR_CHECKBOX }
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(false).Tooltip(
+                      "Dims ambient light on each machine so the point light and custom lights\n"
+                      "read better against segment lighting. Off = stock lighting."))
+                  .ModifiedMarker()
+                  .SearchTerms("lighting ambient fog point light machine"));
+
     // Column 2: pacing / interpolation.
     AddWidget("Enhancements", "Visuals", SECTION_COLUMN_2,
               WidgetInfo{ .name = "Enhancements (parity-gated)", .type = GdxUI::WIDGET_SEPARATOR_TEXT });
