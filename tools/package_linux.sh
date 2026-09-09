@@ -2,24 +2,28 @@
 #
 # Assemble a Linux release tarball from a finished build tree.
 #
-#   tools/package_linux.sh build/x64-linux-release 1.1.0 [output-dir]
+#   tools/package_linux.sh build/x64-linux-release 1.1.0 [output-dir] [arch]
 #
 # The payload is listed by name rather than copied with a wildcard: a release that quietly
 # lost decomp-recipes/ would still boot on the machine that built it and fail everywhere
 # else, so a missing piece has to be a hard error here. Dependencies that no distribution
 # can be relied on to provide are copied into lib/, which the executable finds through its
 # $ORIGIN RUNPATH. Nothing ships until check_linux_abi.py agrees the result is portable.
+#
+# The arch defaults to linux-x64; pass linux-arm64 (or set GDIFFUSER_LINUX_ARCH) to build
+# an ARM64 tarball. Existing callers that omit it keep the original behavior.
 
 set -euo pipefail
 
-if [ $# -lt 2 ] || [ $# -gt 3 ]; then
-    echo "usage: $0 <build-dir> <version> [output-dir]" >&2
+if [ $# -lt 2 ] || [ $# -gt 4 ]; then
+    echo "usage: $0 <build-dir> <version> [output-dir] [arch]" >&2
     exit 2
 fi
 
 build_dir=$1
 version=$2
 out_dir=${3:-dist}
+arch=${4:-${GDIFFUSER_LINUX_ARCH:-linux-x64}}
 repo_root=$(cd "$(dirname "$0")/.." && pwd)
 
 binary_dir="$build_dir/port"
@@ -29,7 +33,7 @@ if [ ! -x "$binary_dir/G-Diffuser" ]; then
     exit 1
 fi
 
-stage="$out_dir/G-Diffuser-v$version-linux-x64"
+stage="$out_dir/G-Diffuser-v$version-$arch"
 rm -rf "$stage"
 mkdir -p "$stage"
 
@@ -83,7 +87,7 @@ python3 "$repo_root/tools/check_linux_abi.py" "${lib_args[@]}" \
 
 # Fixed ownership and sorted order so the same tree always produces the same tarball,
 # matching the determinism the asset extractor already guarantees.
-tarball="$out_dir/G-Diffuser-v$version-linux-x64.tar.gz"
+tarball="$out_dir/G-Diffuser-v$version-$arch.tar.gz"
 tar --sort=name --owner=0 --group=0 --numeric-owner \
     --mtime="@${SOURCE_DATE_EPOCH:-0}" \
     -czf "$tarball" -C "$out_dir" "$(basename "$stage")"

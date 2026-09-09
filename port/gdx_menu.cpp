@@ -488,14 +488,20 @@ GdxMenu::GdxMenu() : Ship::GuiWindow("gOpenMenuBar", false, "G-Diffuser Menu") {
     // On (default), a Course Edit TEST DRIVE renders widescreen like a normal race; off keeps the
     // editor's 4:3 pin for the whole run (stock). port/input_bridge.c gdx_test_drive_active().
     CVarRegisterInteger("gEnhancements.Graphics.WidescreenTestDrive", 1);
-    // UltrawideMode off is bit-exact 16:9 (every consumer collapses to an IEEE-exact 1.0 factor).
-    // On, the game-side CPU culls (track chunks, racers, fireworks, stars) widen to the true frame
-    // so content stops popping at the edges of 21:9/32:9 windows; 3D hor+ needs no switch because
-    // it already works at any aspect.
+    // UltrawideMode defaults on but is auto-gated by actual framebuffer aspect in
+    // gdx_get_ultrawide_cull_xscale(): the widening factor is exactly 1.0 unless the aspect is
+    // wider than 16:9, so 16:9 installs get bit-exact stock culls. On, the game-side CPU culls
+    // (track chunks, racers, fireworks, stars) widen to the true frame so content stops popping at
+    // the edges of 21:9/32:9 windows; 3D hor+ needs no switch because it already works at any aspect.
     // HudMaxAspect 0 leaves ANCHOR-scoped HUD elements on the true screen corners at any aspect. A
     // value in [1.334, 8) confines the HUD to a centred band of that aspect instead, for 32:9 users
     // who find the corners too far apart.
-    CVarRegisterInteger("gEnhancements.Graphics.UltrawideMode", 0);
+    CVarRegisterInteger("gEnhancements.Graphics.UltrawideMode", 1);
+    if (CVarGetInteger("gdx.Migrations.UltrawideModeDefaultOn", 0) == 0) {
+        CVarSetInteger("gdx.Migrations.UltrawideModeDefaultOn", 1);
+        CVarSetInteger("gEnhancements.Graphics.UltrawideMode", 1);
+        CVarSave();
+    }
     CVarRegisterFloat("gEnhancements.Graphics.HudMaxAspect", 0.0f);
     CVarRegisterInteger("gEnhancements.Graphics.HideRaceCurtain", 0);
     CVarRegisterInteger("gEnhancements.Graphics.CourseSelectClipOffscreen", 1);
@@ -556,6 +562,9 @@ GdxMenu::GdxMenu() : Ship::GuiWindow("gOpenMenuBar", false, "G-Diffuser Menu") {
     // stock saves solely via the manual Save-Ghost prompt (menus.c Gdx_AutosaveGhostOnRecord).
     CVarRegisterInteger("gEnhancements.Gameplay.AutosaveOnRecord", 0);
     CVarRegisterInteger("gEnhancements.Gameplay.SkippableTransitions", 0);
+    // LavaNoKill gates the Racer_ReceiveDamage call in racer.c when a machine is on a COURSE_EFFECT_LAVA
+    // strip: off = drain can kill (stock), on = drain stops at 0.1 energy. Default off for stock parity.
+    CVarRegisterInteger("gEnhancements.Gameplay.LavaNoKill", 0);
     // On by default: the node blink/checker parity and the flagged-node size pulse advance at half
     // rate, halving Course Edit's ~20 Hz strobe on modern displays (course_edit/191080.c
     // func_xk2_800E04E0, #ifdef PORT). Off is bit-identical to stock.
@@ -588,6 +597,32 @@ GdxMenu::GdxMenu() : Ship::GuiWindow("gOpenMenuBar", false, "G-Diffuser Menu") {
     // HideCursorInGame hides the OS cursor while gameplay renders; the cursor returns whenever
     // the ImGui menu/menubar is open (gdx_hide_os_cursor_tick in port/gdx_course_edit_mouse.cpp).
     CVarRegisterInteger("gEnhancements.Input.HideCursorInGame", 0);
+
+    // COURSE EDIT MOUSE sub-toggles. All default ON so a user who only enables CourseEditMouse keeps
+    // the same editor behavior as before these fine-grained controls existed. Each gate is read in
+    // port/gdx_course_edit_mouse.cpp; the UI lives in Enhancements -> Mouse.
+    CVarRegisterInteger("gEnhancements.Input.EditorMouseCameraGestures", 1);
+    CVarRegisterInteger("gEnhancements.Input.EditorMouseWheelZoom", 1);
+    CVarRegisterInteger("gEnhancements.Input.EditorMouseKeybinds", 1);
+    CVarRegisterInteger("gEnhancements.Input.EditorMouseDrag", 1);
+    // Sensitivity sliders: the shim multiplies its base constants by percent/100. Default 100 = stock.
+    CVarRegisterInteger("gEnhancements.Input.EditorMouseOrbitSensitivity", 100);
+    CVarRegisterInteger("gEnhancements.Input.EditorMousePanSensitivity", 100);
+    CVarRegisterInteger("gEnhancements.Input.EditorMouseZoomSensitivity", 100);
+    CVarRegisterInteger("gEnhancements.Input.EditorMouseDragSensitivity", 100);
+    // 0 = middle mouse button, 1 = X1 (side back), 2 = X2 (side forward). Drives the camera orbit/pan.
+    CVarRegisterInteger("gEnhancements.Input.EditorCameraGestureButton", 0);
+    // Rebindable number-key shortcuts for the nine Course Edit tool keys. Defaults are SDL_SCANCODE_1..9.
+    CVarRegisterInteger("gEnhancements.Input.EditorKey1", SDL_SCANCODE_1);
+    CVarRegisterInteger("gEnhancements.Input.EditorKey2", SDL_SCANCODE_2);
+    CVarRegisterInteger("gEnhancements.Input.EditorKey3", SDL_SCANCODE_3);
+    CVarRegisterInteger("gEnhancements.Input.EditorKey4", SDL_SCANCODE_4);
+    CVarRegisterInteger("gEnhancements.Input.EditorKey5", SDL_SCANCODE_5);
+    CVarRegisterInteger("gEnhancements.Input.EditorKey6", SDL_SCANCODE_6);
+    CVarRegisterInteger("gEnhancements.Input.EditorKey7", SDL_SCANCODE_7);
+    CVarRegisterInteger("gEnhancements.Input.EditorKey8", SDL_SCANCODE_8);
+    CVarRegisterInteger("gEnhancements.Input.EditorKey9", SDL_SCANCODE_9);
+
     CVarRegisterInteger("gEnhancements.Input.AutoAssignGamepadPorts", 1);
     // GUID->port seat memory written by gdxSyncGamepadPortRouting (port/main.cpp); not user-facing.
     CVarRegisterString("gEnhancements.Input.GamepadSeats", "");
@@ -2353,4 +2388,114 @@ void GdxMenu::DrawAboutMenu() {
     ImGui::Separator();
     ImGui::TextDisabled("https://github.com/Zorkats/G-Diffuser");
 
+}
+
+extern "C" int gdx_course_edit_mouse_key_capture_active(void);
+extern "C" void gdx_course_edit_mouse_key_capture_begin(int index);
+extern "C" void gdx_course_edit_mouse_key_capture_cancel(void);
+extern "C" const char* gdx_course_edit_mouse_key_name(int index);
+extern "C" int gdx_course_edit_mouse_key_scancode(int index);
+extern "C" int gdx_course_edit_mouse_key_default_scancode(int index);
+extern "C" const char* gdx_course_edit_mouse_last_key_name(void);
+extern "C" const char* gdx_course_edit_action_name(int index);
+extern "C" const char* gdx_course_edit_mouse_key_conflict_msg(void);
+extern "C" void gdx_course_edit_mouse_clear_conflict_msg(void);
+
+// Custom block for the seven Course Edit tool-key rebinds. A collapsing header keeps the Mouse page
+// compact; clicking a row arms capture, and the next physical keydown writes that slot's CVar. Esc
+// cancels, Backspace/Delete restores the default number key. Keys live in LUS KbScancode space and
+// arrive through gdx_course_edit_mouse_on_key, so this works identically on the SDL and DX11 backends.
+void GdxMenu::DrawCourseEditKeybinds(GdxUI::WidgetInfo& widget) {
+    const bool disabledByMaster = widget.options != nullptr && widget.options->disabled;
+    if (disabledByMaster) {
+        ImGui::BeginDisabled();
+    }
+
+    const int activeCapture = gdx_course_edit_mouse_key_capture_active();
+    bool anyModified = false;
+    for (int i = 1; i <= 7; i++) {
+        if (gdx_course_edit_mouse_key_scancode(i) != gdx_course_edit_mouse_key_default_scancode(i)) {
+            anyModified = true;
+            break;
+        }
+    }
+
+    bool headerOpen = ImGui::CollapsingHeader("Course Edit tool keys", ImGuiTreeNodeFlags_DefaultOpen);
+    if (anyModified) {
+        GdxModifiedMarker(true);
+    }
+    if (headerOpen) {
+        ImGui::TextDisabled("Click a row to rebind it. Esc cancels; Backspace/Delete resets.");
+        ImGui::TextDisabled("Naming: Direct physical keyboard typing. Esc cancels, Enter saves.");
+        ImGui::TextDisabled("Test Run: Click Test Run to drive; press Esc to pause / return.");
+        const char* conflictMsg = gdx_course_edit_mouse_key_conflict_msg();
+        if (conflictMsg != nullptr) {
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Rebind note: %s", conflictMsg);
+        }
+        if (CVarGetInteger("gEnhancements.Input.EditorKeybindsDebug", 0) != 0) {
+            ImGui::TextDisabled("Last key seen: %s", gdx_course_edit_mouse_last_key_name());
+        }
+        const float rowHeight = ImGui::GetFrameHeight();
+        for (int i = 1; i <= 7; i++) {
+            ImGui::PushID(i);
+
+            const int current = gdx_course_edit_mouse_key_scancode(i);
+            const int def = gdx_course_edit_mouse_key_default_scancode(i);
+            const bool isModified = (current != def);
+            const bool isCapturing = (activeCapture == i);
+
+            // SoH InputEditor-style row: the action name is the clickable row, the bound key sits in
+            // a right-aligned chip so the eye scans actions down the left and bindings down the right.
+            if (isCapturing) {
+                ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.25f, 0.35f, 0.55f, 1.0f));
+            }
+            const bool clicked = ImGui::Selectable(gdx_course_edit_action_name(i), isCapturing,
+                                                   ImGuiSelectableFlags_AllowOverlap, ImVec2(0.0f, rowHeight));
+            if (isCapturing) {
+                ImGui::PopStyleColor();
+            }
+            const bool hovered = ImGui::IsItemHovered();
+            if (clicked) {
+                gdx_course_edit_mouse_clear_conflict_msg();
+                gdx_course_edit_mouse_key_capture_begin(i);
+            }
+
+            char chip[64];
+            if (isCapturing) {
+                snprintf(chip, sizeof(chip), "[ press a key... ]");
+            } else {
+                snprintf(chip, sizeof(chip), "[ %s ]", gdx_course_edit_mouse_key_name(i));
+            }
+            const float chipWidth = ImGui::GetFont()->CalcTextSizeA(ImGui::GetFontSize(), FLT_MAX, 0.0f, chip).x;
+            ImGui::SameLine();
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - chipWidth);
+            if (isCapturing) {
+                ImGui::TextColored(ImVec4(0.55f, 0.75f, 1.0f, 1.0f), "%s", chip);
+            } else if (isModified) {
+                ImGui::TextColored(ImVec4(1.0f, 0.82f, 0.35f, 1.0f), "%s", chip);
+            } else {
+                ImGui::TextDisabled("%s", chip);
+            }
+
+            if (hovered && activeCapture == 0) {
+                if (i == 6) {
+                    ImGui::SetTooltip("Click to rebind. In the editor, selects the point-deletion tool.\n"
+                                      "Pressing A or clicking confirms deletion of selected points.\n"
+                                      "Esc cancels; Backspace/Delete restores default key.%s",
+                                      isModified ? "\nThis slot is currently rebound." : "");
+                } else {
+                    ImGui::SetTooltip("Click, then press the key to use for %s.\n"
+                                      "Esc cancels; Backspace/Delete restores the default key.%s",
+                                      gdx_course_edit_action_name(i),
+                                      isModified ? "\nThis slot is currently rebound." : "");
+                }
+            }
+
+            ImGui::PopID();
+        }
+    }
+
+    if (disabledByMaster) {
+        ImGui::EndDisabled();
+    }
 }

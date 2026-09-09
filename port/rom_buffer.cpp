@@ -161,6 +161,8 @@ static void load_rom_next_to_exe(void) {
     slash[1] = L'\0';
     const wchar_t* candidates[] = {
         L"baserom.us.rev0.z64",
+        L"baserom.pal.rev0.z64",
+        L"baserom.eu.rev0.z64",
         L"fzerox.z64",
         L"f-zero-x.z64",
     };
@@ -191,6 +193,8 @@ static void load_rom_next_to_exe(void) {
 
     const char* candidates[] = {
         "baserom.us.rev0.z64",
+        "baserom.pal.rev0.z64",
+        "baserom.eu.rev0.z64",
         "fzerox.z64",
         "f-zero-x.z64",
     };

@@ -21,6 +21,8 @@
 
 #include "ship/Context.h"
 #include "fast/Fast3dWindow.h"
+#include "fast/resource/type/Texture.h"
+#include "ship/resource/ResourceManager.h"
 #include "fast/lus_gbi.h"
 #include "gdx_perf.h" // no-op when GDX_PERF is disabled
 #include "gdx_dev_gates.h" // gates every GDX_DIAG_* / behavior switch below
@@ -231,6 +233,7 @@ extern "C" const char* gdx_lookup_asset_segment_o2r_key(unsigned int sym_low32);
 // Workshop texture packs (port/gdx_workshop.cpp).
 extern "C" int gdx_workshop_texture_packs_enabled(void);
 extern "C" const char* GdxWorkshopLookupOverridePath(const char* key);
+extern "C" uint32_t GdxWorkshopPackEpoch(void);
 extern "C" const char* GdxWorkshopLookupOverridePathMinSize(const char* key, size_t minBytes);
 
 namespace {
@@ -1551,6 +1554,103 @@ bool ResolveHostPointerStub(uint32_t raw, ResolvedAddress& out) {
 }
 
 bool ResolveVenueBankAlias(uint32_t raw, ResolvedAddress& out); // fwd decl (defined below)
+const char* LookupRacePortraitOverride(uint32_t symbol, uintptr_t source, size_t loadBytes, uint32_t epoch,
+                                       bool& matched) {
+    matched = false;
+    constexpr size_t portraitBytes = 32 * 32 * 2;
+    if (loadBytes != portraitBytes || source == 0 || !GdxSegmentEpochStable(epoch)) {
+        return nullptr;
+    }
+    struct Entry {
+        uint32_t symbol = 0;
+        uintptr_t source = 0;
+        const char* key = nullptr;
+        AssetSegmentLookup binding{};
+        std::array<uint8_t, portraitBytes> original{};
+        std::string path;
+        uint64_t dmaGeneration = 0;
+        uint32_t segmentEpoch = UINT32_MAX;
+        uint32_t packEpoch = UINT32_MAX;
+        bool unchanged = false;
+    };
+    static std::array<Entry, 30> entries{};
+    Entry* entry = nullptr;
+    for (auto& candidate : entries) {
+        if (candidate.symbol == symbol || candidate.symbol == 0) {
+            entry = &candidate;
+            break;
+        }
+    }
+    if (entry == nullptr) {
+        return nullptr;
+    }
+    if (entry->symbol == 0) {
+        AssetSegmentLookup binding{};
+        if (!LookupAssetSegment(Low32(symbol), binding) || binding.segment != 4 ||
+            binding.offset > binding.imageSize || portraitBytes > binding.imageSize - binding.offset) {
+            return nullptr;
+        }
+        const char* key = gdx_lookup_asset_segment_o2r_key(Low32(symbol));
+        if (key == nullptr || std::strncmp(key, "hud_gfx/aPortrait", 17) != 0) {
+            return nullptr;
+        }
+        entry->symbol = symbol;
+        entry->key = key;
+        entry->binding = binding;
+    }
+    matched = true;
+    const auto& binding = entry->binding;
+    if (gdx_mode_owns_segment(binding.segment) == 0 ||
+        gdx_mode_segment_content_matches(binding.segment, binding.romBase) == 0 ||
+        source != gSegments[binding.segment] + binding.offset) {
+        return nullptr;
+    }
+    const uint32_t packEpoch = GdxWorkshopPackEpoch();
+    if (entry->packEpoch != packEpoch) {
+        entry->path.clear();
+        auto rm = Ship::Context::GetInstance()->GetResourceManager();
+        auto original = std::dynamic_pointer_cast<Fast::Texture>(rm->LoadResourceProcess(entry->key));
+        if (original != nullptr && original->Type == Fast::TextureType::RGBA16bpp &&
+            original->Width == 32 && original->Height == 32 && original->ImageData != nullptr &&
+            original->ImageDataSize == portraitBytes) {
+            std::memcpy(entry->original.data(), original->ImageData, portraitBytes);
+            const char* path = GdxWorkshopLookupOverridePathMinSize(entry->key, portraitBytes);
+            auto replacement = path != nullptr
+                ? std::dynamic_pointer_cast<Fast::Texture>(rm->LoadResourceProcess(path)) : nullptr;
+            if (replacement != nullptr && replacement->Type == Fast::TextureType::RGBA16bpp &&
+                replacement->ImageData != nullptr && std::isfinite(replacement->HByteScale) &&
+                std::isfinite(replacement->VPixelScale) && replacement->HByteScale >= 1 &&
+                replacement->VPixelScale >= 1 && std::floor(replacement->HByteScale) == replacement->HByteScale &&
+                std::floor(replacement->VPixelScale) == replacement->VPixelScale &&
+                replacement->Width == 32.0f * replacement->HByteScale &&
+                replacement->Height == 32.0f * replacement->VPixelScale &&
+                replacement->Width <= 8192 && replacement->Height <= 8192 &&
+                uint64_t(replacement->Width) * replacement->Height * 2 <= replacement->ImageDataSize) {
+                entry->path = path;
+            }
+        }
+        entry->packEpoch = packEpoch;
+        entry->segmentEpoch = UINT32_MAX;
+    }
+    if (entry->path.empty()) {
+        return nullptr;
+    }
+    if (entry->source != source || entry->segmentEpoch != epoch ||
+        HostRangeChanged(source, portraitBytes, entry->dmaGeneration)) {
+        // Super-machine portraits overwrite ordinary slots; their live bytes must win.
+        entry->unchanged = ReadableByteLimit(source) >= portraitBytes &&
+            std::memcmp(reinterpret_cast<const void*>(source), entry->original.data(), portraitBytes) == 0;
+        if (!GdxSegmentEpochStable(epoch)) {
+            entry->segmentEpoch = UINT32_MAX;
+            return nullptr;
+        }
+        entry->source = source;
+        entry->segmentEpoch = epoch;
+        entry->dmaGeneration = gDmaGeneration;
+    }
+    return entry->unchanged ? entry->path.c_str() : nullptr;
+}
+
 /* Game-BUILT wide DLs carry the REAL host address of a generated 1-byte asset stub whenever a
    compile-time table stores asset symbols -- course.c:101-112 stores the venue banks
    D_A000000..D_A008000 directly. Taken verbatim by the wide host-pointer fast path (the EXE
@@ -4596,7 +4696,11 @@ class N64DisplayListAdapter {
         return (static_cast<uint64_t>(highIndex) + 1) * 2;
     }
 
-    size_t EstimateRawTextureCopyBytes(const N64Gfx* source, size_t index, size_t limit, size_t stride, bool isBig) const {
+    size_t EstimateRawTextureCopyBytes(const N64Gfx* source, size_t index, size_t limit, size_t stride, bool isBig,
+                                       bool* wholePortrait = nullptr) const {
+        if (wholePortrait != nullptr) {
+            *wholePortrait = false;
+        }
         /* ReadCommand is an 8-byte reader (w1 at +4), but a wide 16-byte packet stores w1 at +8
            with zero padding at +4. Without this compensation every w1-derived load extent
            (LOADBLOCK lrs, LOADTILE lrt/lrs, TLUT count) reads as 0 on wide lists, the estimate
@@ -4627,6 +4731,11 @@ class N64DisplayListAdapter {
                     i = scanEnd;
                     break;
                 case kOpLoadBlock:
+                    if (wholePortrait != nullptr) {
+                        *wholePortrait = ((setImg.w0 >> 21) & 7) == G_IM_FMT_RGBA &&
+                            size == G_IM_SIZ_16b && imageWidth == 1 && (command.w0 & 0xFFFFFF) == 0 &&
+                            ((command.w1 >> 12) & 0xFFF) == 1023;
+                    }
                     required = std::max(required, LoadBlockCopyBytes(command, size, imageWidth));
                     break;
                 case kOpLoadTile:
@@ -5655,15 +5764,18 @@ class N64DisplayListAdapter {
                            state; without it a mode transition reloading segments 4/7/9 mid-read
                            produced an AV inside strlen on Create Machine entry. */
                         const uint32_t settimgEpoch = GdxSegmentEpochSnapshot();
+                        bool wholePortrait = false;
+                        const bool portraitTransfer = (in.w0 & 0x00FFFFFFu) == (G_IM_SIZ_16b << 19);
+                        const size_t estimatedBytes = w1IsHostPointer || portraitTransfer
+                            ? EstimateRawTextureCopyBytes(item.source, i, item.limit, stride, isBig, &wholePortrait) : 0;
+                        const uintptr_t stubResolved = w1IsHostPointer
+                            ? ResolveWideAssetStubPointer(w1full, mModuleBegin, mModuleEnd,
+                                                          std::max<size_t>(estimatedBytes, 1)) : 0;
                         const uintptr_t translated =
                             w1IsHostPointer ? w1full : TranslateDataPointer(in.w1);
-                        /* A raced reload can leave both the translated pointer and the bytes it
-                           addresses torn. Host-pointer textures never read gSegments[] and are
-                           exempt. Drop the texture for one frame -- the previous binding persists
-                           and the skip is invisible during a transition -- rather than sampling or
-                           stringifying half-written state. */
+                        // Wide generated stubs also read live segments and require the same reload guard.
                         const bool segmentReloadRaced =
-                            !w1IsHostPointer && !GdxSegmentEpochStable(settimgEpoch);
+                            (!w1IsHostPointer || stubResolved != 0) && !GdxSegmentEpochStable(settimgEpoch);
                         if (segmentReloadRaced) {
                             if (mStats != nullptr) mStats->skippedTextures++;
                             continue;
@@ -5701,6 +5813,7 @@ class N64DisplayListAdapter {
                            CVar off no lookup runs at all. */
                         const char* packPath = nullptr;
                         bool packViaRdram = false;
+                        bool generatedPortrait = false;
                         /* Same multi-tile exclusion as the o2rKey emit above: an RDRAM-backed
                            buffer is a contiguous atlas sampled at many ULS offsets and a
                            single-OTEX override covers only the first band, which garbles every
@@ -5718,14 +5831,25 @@ class N64DisplayListAdapter {
                            override is served only when the pack payload covers the whole
                            registered buffer; a band-sized payload is single-glyph atlas business
                            and keeps the raw-copy path. */
-                        if (!o2rKey && resolutionUsable && gdx_workshop_texture_packs_enabled()) {
-                            if (!IsRdramHostPointer(translated)) {
+                        if (resolutionUsable && gdx_workshop_texture_packs_enabled()) {
+                            if (wholePortrait) {
+                                packPath = LookupRacePortraitOverride(in.w1,
+                                    w1IsHostPointer ? stubResolved : translated, estimatedBytes, settimgEpoch,
+                                    generatedPortrait);
+                                packViaRdram = packPath != nullptr;
+                            }
+                            if (!generatedPortrait && o2rKey != nullptr) {
+                                /* Segment-keyed textures are served from the base archive by the
+                                   o2r emit below, which never consults workshop packs -- probe the
+                                   pack for the same key so a pack overrides the archive (issue #35). */
+                                packPath = GdxWorkshopLookupOverridePath(o2rKey);
+                            } else if (!generatedPortrait && !IsRdramHostPointer(translated)) {
                                 const char* assetKey = GDiffuser_LookupLoadedAssetKey(
                                     reinterpret_cast<const void*>(translated), 0, 0);
                                 if (assetKey != nullptr) {
                                     packPath = GdxWorkshopLookupOverridePath(assetKey);
                                 }
-                            } else if (!IsVenueBuildingTextureRange(translated)) {
+                            } else if (!generatedPortrait && !IsVenueBuildingTextureRange(translated)) {
                                 size_t bufSize = 0;
                                 const char* assetKey = GDiffuser_LookupLoadedAssetKeyAndSize(
                                     reinterpret_cast<const void*>(translated), &bufSize);
@@ -5748,30 +5872,20 @@ class N64DisplayListAdapter {
                                 }
                             }
                         }
-                        if (o2rKey) {
-                            texCensusPath = "o2r";
-                            outW0 = (outW0 & 0x00FFFFFFu) | (static_cast<uintptr_t>(kOpSetTextureImageOtrFilepath) << 24);
-                            outW1 = reinterpret_cast<uintptr_t>(o2rKey);
-                        } else if (packPath) {
+                        if (packPath) {
                             texCensusPath = packViaRdram ? "pack-o2r-rdram" : "pack-o2r";
                             outW0 = (outW0 & 0x00FFFFFFu) |
                                     (static_cast<uintptr_t>(kOpSetTextureImageOtrFilepath) << 24);
                             outW1 = reinterpret_cast<uintptr_t>(packPath);
+                        } else if (o2rKey) {
+                            texCensusPath = "o2r";
+                            outW0 = (outW0 & 0x00FFFFFFu) | (static_cast<uintptr_t>(kOpSetTextureImageOtrFilepath) << 24);
+                            outW1 = reinterpret_cast<uintptr_t>(o2rKey);
                         } else if (w1IsHostPointer) {
                             // Real host pointer to texel data — use directly,
                             // UNLESS it is a generated asset stub (see
                             // ResolveWideAssetStubPointer): stubs must be re-routed to
                             // the decoded asset image or the sampler reads EXE data.
-                            // The upcoming load-size estimate is computed here (rather
-                            // than left at the resolver's default requiredBytes=1) so
-                            // E1's bounds check in ResolveGeneratedAssetStub validates
-                            // against the actual copy size instead of silently
-                            // accepting a 1-byte-wide match; reused below for the
-                            // native-RGBA16 copy so it is computed only once.
-                            const size_t estimatedBytes =
-                                EstimateRawTextureCopyBytes(item.source, i, item.limit, stride, isBig);
-                            const uintptr_t stubResolved = ResolveWideAssetStubPointer(
-                                w1full, mModuleBegin, mModuleEnd, std::max<size_t>(estimatedBytes, 1));
                             const uintptr_t hostTextureSource =
                                 (stubResolved != 0) ? stubResolved : w1full;
                             // [stub-miss] diagnostic, strip later: a module-range texture pointer
@@ -5888,7 +6002,7 @@ class N64DisplayListAdapter {
                            every content copy, before the bytes reach the census or the
                            interpreter -- and drop the texture for this frame if a reload began
                            anywhere in that window. */
-                        if (!w1IsHostPointer && !GdxSegmentEpochStable(settimgEpoch)) {
+                        if ((!w1IsHostPointer || stubResolved != 0) && !GdxSegmentEpochStable(settimgEpoch)) {
                             if (mStats != nullptr) mStats->skippedTextures++;
                             NoteEpochSkip();
                             continue;
@@ -7017,16 +7131,19 @@ static void SeedFramebufferQuad(Fast::Interpreter* interp, const uint16_t* srcPi
     // point filtering (dsdx=0x0400 = 1 texel/pixel, so 320 texels -> 320px).
     interp->GfxSpSetOtherMode(G_MDSFT_CYCLETYPE + 32, 2, static_cast<uint64_t>(G_CYC_COPY) << 32);
 
-    // The CPU framebuffer is top-down, which D3D11 samples correctly. OpenGL samples the same
-    // upload bottom-up, so the logo would appear upside-down on the GL path that bypasses the
-    // post-pass V flip. Start from the top texel (S10.5) and sample downward on OpenGL only.
+    // The CPU framebuffer is top-down and every backend samples this upload top-down as-is.
+    // An earlier GL-only compensation (start at the bottom texel, dtdy=-0x0400) double-flipped
+    // the boot logo on OpenGL (issue #34). GDX_VI_SCANOUT_FLIP=1 re-enables the legacy behavior
+    // as a diagnostic escape hatch.
     int16_t texT = 0;
     int16_t dtdy = 0x0400;
-    if (Fast::GfxRenderingAPI* rapi = interp->GetCurrentRenderingAPI()) {
-        if (std::strcmp(rapi->GetName(), "OpenGL") == 0) {
-            texT = static_cast<int16_t>((kFbH - 1) << 5);
-            dtdy = -0x0400;
-        }
+    static const bool sLegacyFlip = [] {
+        const char* e = std::getenv("GDX_VI_SCANOUT_FLIP");
+        return e != nullptr && e[0] == '1';
+    }();
+    if (sLegacyFlip) {
+        texT = static_cast<int16_t>((kFbH - 1) << 5);
+        dtdy = -0x0400;
     }
 
     interp->GfxDpTextureRectangle(0, 0, (kFbW - 1) << G_TEXTURE_IMAGE_FRAC, (kFbH - 1) << G_TEXTURE_IMAGE_FRAC,

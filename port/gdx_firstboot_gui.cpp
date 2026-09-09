@@ -79,7 +79,7 @@ class SetupScreen {
   public:
     SetupScreen(std::string dataDir, std::string exeDir)
         : mDataDir(std::move(dataDir)), mExeDir(std::move(exeDir)) {
-        mRows[0] = { "F-Zero X ROM (US rev0, .z64)", SetupRomFileName(), &ValidateRomFile, &PickRomFile };
+        mRows[0] = { "F-Zero X ROM (US/PAL rev0, .z64)", SetupRomFileName(), &ValidateRomFile, &PickRomFile };
         mRows[1] = { "Expansion Kit disk (.ndd)", SetupDiskFileName(), &ValidateDiskFile, &PickDiskFile };
         mRows[2] = { "64DD IPL ROM (N64DDIPLROM.n64)", SetupIplFileName(), &ValidateIplFile, &PickIplFile };
         for (Row& r : mRows) {
@@ -168,9 +168,11 @@ class SetupScreen {
     // Name of the installed archive that satisfies a given row's input (originals are deletable
     // once the archive covers them). Empty string for an unrecognized canonical name.
     static const char* ArchiveForCanonical(const char* canonicalName) {
-        if (std::string(canonicalName) == SetupRomFileName())  return SetupGameArchiveFileName();
-        if (std::string(canonicalName) == SetupDiskFileName()) return SetupDiskArchiveFileName();
-        if (std::string(canonicalName) == SetupIplFileName())  return SetupIplArchiveFileName();
+        if (std::string(canonicalName) == SetupRomFileName())     return SetupGameArchiveFileName();
+        if (std::string(canonicalName) == SetupRomFileNamePal())  return SetupGameArchiveFileName();
+        if (std::string(canonicalName) == SetupRomFileNameEuPal()) return SetupGameArchiveFileName();
+        if (std::string(canonicalName) == SetupDiskFileName())    return SetupDiskArchiveFileName();
+        if (std::string(canonicalName) == SetupIplFileName())     return SetupIplArchiveFileName();
         return "";
     }
 
@@ -178,9 +180,11 @@ class SetupScreen {
     // through the hash-validating GdxFirstbootArchiveSatisfies rather than a presence probe, which
     // would accept a corrupt/foreign archive. False (outKind untouched) for an unrecognized name.
     static bool ArchiveKindForCanonical(const char* canonicalName, GdxFirstbootArchiveKind& outKind) {
-        if (std::string(canonicalName) == SetupRomFileName())  { outKind = GdxFirstbootArchiveKind::Game; return true; }
-        if (std::string(canonicalName) == SetupDiskFileName()) { outKind = GdxFirstbootArchiveKind::Disk; return true; }
-        if (std::string(canonicalName) == SetupIplFileName())  { outKind = GdxFirstbootArchiveKind::Ipl;  return true; }
+        if (std::string(canonicalName) == SetupRomFileName())     { outKind = GdxFirstbootArchiveKind::Game; return true; }
+        if (std::string(canonicalName) == SetupRomFileNamePal())  { outKind = GdxFirstbootArchiveKind::Game; return true; }
+        if (std::string(canonicalName) == SetupRomFileNameEuPal()) { outKind = GdxFirstbootArchiveKind::Game; return true; }
+        if (std::string(canonicalName) == SetupDiskFileName())    { outKind = GdxFirstbootArchiveKind::Disk; return true; }
+        if (std::string(canonicalName) == SetupIplFileName())     { outKind = GdxFirstbootArchiveKind::Ipl;  return true; }
         return false;
     }
 
@@ -203,17 +207,33 @@ class SetupScreen {
                     dst = found;
                 }
             } else {
-                const char* altName = nullptr;
+                // Accepted alternate names come before any derived fallback, so a JP or PAL test
+                // folder (baserom.jp.rev0.z64 / baserom.pal.rev0.z64 / baserom.eu.rev0.z64) is detected
+                // without renaming. The JP alt is checked first to preserve the existing priority.
+                const char* romAltName = nullptr;
                 if (std::string(r.canonicalName) == SetupRomFileName()) {
-                    altName = SetupRomFileNameJp();
+                    romAltName = SetupRomFileNameJp();
                 } else if (std::string(r.canonicalName) == SetupDiskFileName()) {
-                    altName = SetupDiskFileNameJp();
+                    romAltName = SetupDiskFileNameJp();
                 }
-                if (altName != nullptr) {
-                    std::string alt = (fs::path(mDataDir) / altName).string();
+                if (romAltName != nullptr) {
+                    std::string alt = (fs::path(mDataDir) / romAltName).string();
                     std::error_code altEc;
                     if (fs::is_regular_file(fs::path(alt), altEc)) {
                         dst = alt;
+                    }
+                }
+                if (std::string(r.canonicalName) == SetupRomFileName()) {
+                    std::error_code palEc;
+                    std::string pal = (fs::path(mDataDir) / SetupRomFileNamePal()).string();
+                    if (fs::is_regular_file(fs::path(pal), palEc)) {
+                        dst = pal;
+                    } else {
+                        std::error_code euEc;
+                        std::string eu = (fs::path(mDataDir) / SetupRomFileNameEuPal()).string();
+                        if (fs::is_regular_file(fs::path(eu), euEc)) {
+                            dst = eu;
+                        }
                     }
                 }
             }
