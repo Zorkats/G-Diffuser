@@ -105,6 +105,18 @@ extern int gdx_mouse_steer_stick_x(void);
 // from OS left/right clicks while the Course Edit / Create Machine absolute mouse drive is active.
 extern int gdx_course_edit_mouse_buttons(void);
 
+static u16 sEditorControllerPrevious[MAXCONTROLLERS];
+static u16 sEditorControllerPending[MAXCONTROLLERS];
+static u16 sEditorControllerPressed[MAXCONTROLLERS];
+
+int gdx_course_edit_controller_a_pressed(int port) {
+    return port >= 0 && port < MAXCONTROLLERS && (sEditorControllerPressed[port] & BTN_A) != 0;
+}
+
+// Implemented in gdx_course_edit_mouse.cpp (C++). Finalizes accumulated number-key presses on
+// game-boundary frames, updating gMoveOption for Course Edit keyboard shortcuts.
+extern void gdx_course_edit_mouse_keyboard_tick(int gameBoundary);
+
 // Zero exactly the input fields Controller_ClearInputs() clears (decomp/src/sys/controller.c:47-51)
 // without touching pfs / rumble bookkeeping. Used when a port goes away mid-session so a pad that
 // was unplugged mid-corner cannot leave a latched throttle behind, and to initialise the
@@ -812,9 +824,12 @@ void gdx_controller_poll(void) {
         stick_y[0] = scriptPad.stickY;
     }
 
-    // Course Edit / Create Machine mouse buttons: when the absolute mouse drive is active, map OS
-    // left/right clicks to N64 A/B. This is OR'd onto the LUS ControlDeck state so players do not
-    // need to manually bind LMB/RMB in the Input Editor to use the editor mouse cursor.
+    // Course Edit / Create Machine mouse buttons supplement the resolved controller state for
+    // chrome and non-transaction tools; point gestures remain source-specific below the bridge.
+    for (i = 0; i < MAXCONTROLLERS; i++) {
+        sEditorControllerPending[i] |= buttons[i] & ~sEditorControllerPrevious[i];
+        sEditorControllerPrevious[i] = buttons[i];
+    }
     buttons[0] |= gdx_course_edit_mouse_buttons();
 
     // Publish presence BEFORE the per-port update: a port that just went away has its Controller
@@ -828,6 +843,15 @@ void gdx_controller_poll(void) {
     divider = (D_800CCFB8 > 0) ? D_800CCFB8 : 1;
     gameBoundary = !s_have_baseline || ((D_800CCFB0 + 1 - D_800CCFB4) >= divider);
     s_have_baseline = 1;
+    if (gameBoundary) {
+        for (i = 0; i < MAXCONTROLLERS; i++) {
+            sEditorControllerPressed[i] = sEditorControllerPending[i];
+            sEditorControllerPending[i] = 0;
+        }
+    }
+
+    // S2: apply accumulated number-key shortcuts on game-boundary frames.
+    gdx_course_edit_mouse_keyboard_tick(gameBoundary);
 
     for (i = 0; i < MAXCONTROLLERS; i++) {
         if (connected[i] == 0) {

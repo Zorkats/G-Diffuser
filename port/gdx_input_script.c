@@ -34,6 +34,13 @@
 //       Emits "[autotest] <text>" via gdx_port_logf the moment playback reaches this line
 //       (i.e. at the scripted poll, not at parse time). <text> is the rest of the line verbatim.
 //
+//   KEY <scancode>
+//       Injects a real SDL key tap (keydown+keyup) for the given SDL scancode (decimal or
+//       0x-prefixed hex; SDL_SCANCODE_1 is 30) at the next host-frame event pump. Unlike the pad
+//       commands this drives the keyboard path (Course Edit tool keys, menu rebind capture), not
+//       the N64 controller. Instant: does not consume a poll — put a WAIT between repeated taps
+//       of the same key.
+//
 //   SHOT <label>
 //       Requests a one-shot framebuffer dump named "autotest/<label>.bmp" (see
 //       gdx_request_frame_dump, n64_gfx_bridge.cpp) of the next frame the game presents.
@@ -84,6 +91,9 @@ extern void gdx_request_quit(void);
 // n64_gfx_bridge.cpp: arms a one-shot BMP dump of the next presented frame.
 extern void gdx_request_frame_dump(const char* label);
 
+// gdx_course_edit_mouse.cpp: pushes a real SDL keydown+keyup pair for the KEY command.
+extern void gdx_course_edit_mouse_inject_key_tap(int scancode);
+
 // N64 standard controller bitmask (decomp/include/controller.h BTN_*; identical layout to LUS's
 // OSContPad.button). Redefined locally with the GDX_ prefix so this TU stays decomp-header-free;
 // the values are fixed by the N64 SI protocol and never change.
@@ -109,6 +119,7 @@ typedef enum GdxScriptOp {
     GDX_SCRIPT_OP_HOLD,     // WAIT / PRESS / STICK / INPUT all reduce to "hold this pad state N polls"
     GDX_SCRIPT_OP_WAITMODE,
     GDX_SCRIPT_OP_LOG,
+    GDX_SCRIPT_OP_KEY,
     GDX_SCRIPT_OP_SHOT,
     GDX_SCRIPT_OP_QUIT
 } GdxScriptOp;
@@ -118,7 +129,7 @@ typedef struct GdxScriptCmd {
     unsigned short buttons;              // HOLD
     signed char stickX, stickY;          // HOLD
     int frames;                          // HOLD: hold duration (polls). WAITMODE: timeout (polls).
-    int mode;                            // WAITMODE: target GET_MODE value
+    int mode;                            // WAITMODE: target GET_MODE value. KEY: SDL scancode.
     char text[GDX_SCRIPT_TEXT_CAP];      // LOG: message. SHOT: label.
 } GdxScriptCmd;
 
@@ -300,6 +311,19 @@ static int gdx_script_parse_line(char* line) {
     if (gdx_ci_streq(kw, "LOG")) {
         return gdx_script_push(GDX_SCRIPT_OP_LOG, 0, 0, 0, 0, 0, rest);
     }
+    if (gdx_ci_streq(kw, "KEY")) {
+        char scTok[32];
+        char* endptr = NULL;
+        long scancode;
+        if (sscanf(rest, "%31s", scTok) != 1) {
+            return 0;
+        }
+        scancode = strtol(scTok, &endptr, 0); // accepts decimal or 0x-prefixed hex
+        if (endptr == scTok || scancode <= 0 || scancode > 0x7FFFFFFF) {
+            return 0;
+        }
+        return gdx_script_push(GDX_SCRIPT_OP_KEY, 0, 0, 0, 0, (int) scancode, NULL);
+    }
     if (gdx_ci_streq(kw, "SHOT")) {
         char label[128];
         if (sscanf(rest, "%127s", label) != 1) {
@@ -435,6 +459,12 @@ void gdx_input_script_override(GdxInputPad* pad) {
             }
             case GDX_SCRIPT_OP_LOG: {
                 gdx_port_logf("[autotest] %s\n", cmd->text);
+                s_ip++;
+                continue;
+            }
+            case GDX_SCRIPT_OP_KEY: {
+                gdx_port_logf("[autotest] KEY scancode=%d\n", cmd->mode);
+                gdx_course_edit_mouse_inject_key_tap(cmd->mode);
                 s_ip++;
                 continue;
             }

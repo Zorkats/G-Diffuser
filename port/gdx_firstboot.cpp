@@ -69,6 +69,12 @@ constexpr const char* kRomSha1JpRev0 = "a418b0151521b76691fa03f8658c8b567c69498b
 // archives exist for it) — see GdxRecognizeInput's jpRom handling and FirstBootRun's raw-boot branch.
 constexpr const char* kRomNameJp = "baserom.jp.rev0.z64";
 constexpr const char* kDiskNameJp = "baserom.jp.ek.ndd";
+
+constexpr const char* kRomSha1PalRev0 = "af9038bcb543a2b4faaab876dbdab4663859e092"; // F-Zero X (Europe)
+// Alternate canonical filenames for the PAL dumps, accepted directly so a PAL test folder needs no
+// renaming. PAL extraction uses the pal/rev0 recipe tree and produces fzerox-pal.o2r.
+constexpr const char* kRomNamePal = "baserom.pal.rev0.z64";
+constexpr const char* kRomNameEuPal = "baserom.eu.rev0.z64";
 // Accepted alternate filename for the US prototype IPL dump, so a folder holding it under its
 // original dump name needs no renaming — see SetupIplFileNameUsProto() in gdx_firstboot.h.
 constexpr const char* kIplNameUsProto = "64DD_IPL_US_MJR.n64";
@@ -130,7 +136,7 @@ constexpr const char* kJpRefusedDiskMessage =
 constexpr const char* kManagedMediaSubdir = "media";
 
 // ROM candidate names probed for DEV-layout detection (mirrors rom_buffer.cpp's next-to-exe list).
-const char* const kRomDevCandidates[] = { "baserom.us.rev0.z64", "fzerox.z64", "f-zero-x.z64" };
+const char* const kRomDevCandidates[] = { "baserom.us.rev0.z64", "baserom.pal.rev0.z64", "baserom.eu.rev0.z64", "fzerox.z64", "f-zero-x.z64" };
 
 // ── Path helpers ─────────────────────────────────────────────────────────────────────────────────
 
@@ -540,14 +546,21 @@ bool diskArchiveSatisfies(const fs::path& dataDir) {
     return false;
 }
 
-// True when a valid cart archive (fzerox.o2r) is installed under `dataDir`. Mirrors
-// diskArchiveSatisfies: against a recorded archive_sha256 the file must hash to it, and a container
-// swapped for a stale/foreign/corrupt one is rejected and quarantined (renamed <name>.bad) so the
-// wizard re-runs and rebuilds it from the original ROM. With no recorded hash, acceptance degrades to
-// presence. Costs one ~15 MiB hash on the archive-only boot path, next to the ~30 MB the disk already
-// hashes every boot.
+// True when a valid cart archive is installed under `dataDir`. Mirrors diskArchiveSatisfies: against a
+// recorded archive_sha256 the file must hash to it, and a container swapped for a stale/foreign/corrupt
+// one is rejected and quarantined (renamed <name>.bad) so the wizard re-runs and rebuilds it from the
+// original ROM. With no recorded hash, acceptance degrades to presence. The expected archive name is
+// driven by the recorded profile so US, JP-raw (no archive), and PAL installs each resolve their own
+// container.
 bool gameArchiveSatisfies(const fs::path& dataDir) {
-    fs::path archive = dataDir / kGameArchiveName;
+    const std::string profile = GdxExtractRecordedCartProfile(dataDir.string().c_str());
+    const char* archiveName = kGameArchiveName;
+    if (profile == "jp/rev0") {
+        archiveName = "fzerox-jp.o2r";
+    } else if (profile == "pal/rev0") {
+        archiveName = "fzerox-pal.o2r";
+    }
+    fs::path archive = dataDir / archiveName;
     if (!fileExists(archive)) {
         return false;
     }
@@ -561,7 +574,7 @@ bool gameArchiveSatisfies(const fs::path& dataDir) {
     std::string actual = GdxExtractFileSha256(archive.string().c_str());
     if (actual.empty()) {
         gdx_port_logf("[firstboot] %s could not be hashed (read error); treating as unsatisfied this "
-                      "boot without quarantining\n", kGameArchiveName);
+                      "boot without quarantining\n", archiveName);
         return false;
     }
     if (actual == recorded) {
@@ -571,8 +584,8 @@ bool gameArchiveSatisfies(const fs::path& dataDir) {
         return true;
     }
     gdx_port_logf("[firstboot] %s failed verification (does not match the recorded archive_sha256); "
-                  "quarantining it — re-run setup with the original ROM to rebuild it\n", kGameArchiveName);
-    GdxExtractQuarantineArchive(dataDir.string().c_str(), kGameArchiveName);
+                  "quarantining it — re-run setup with the original ROM to rebuild it\n", archiveName);
+    GdxExtractQuarantineArchive(dataDir.string().c_str(), archiveName);
     return false;
 }
 
@@ -920,6 +933,14 @@ const char* SetupDiskFileNameJp() {
     return kDiskNameJp;
 }
 
+const char* SetupRomFileNamePal() {
+    return kRomNamePal;
+}
+
+const char* SetupRomFileNameEuPal() {
+    return kRomNameEuPal;
+}
+
 bool ValidateRomFile(const std::string& path, std::string& why) {
     return validateRom(fs::path(path), why);
 }
@@ -958,7 +979,7 @@ GdxInputRecognition GdxRecognizeInput(const std::string& canonicalName, const st
         return r;
     }
 
-    // ROM — STRICT: only this build's US-rev0 dump is accepted; the JP dump gets a precise message.
+    // ROM — STRICT: this build accepts the US-rev0 and PAL-rev0 dumps; the JP dump gets a precise message.
     if (canonicalName == kRomName) {
         const std::string expectedUs = GdxExtractExpectedRomSha1(exeDir.c_str()); // recipe-authoritative
         if (!expectedUs.empty() && r.sha1 == expectedUs) {
@@ -981,6 +1002,12 @@ GdxInputRecognition GdxRecognizeInput(const std::string& canonicalName, const st
             r.message = "Japanese ROM accepted (SHA-1 verified). Experimental: boots directly from "
                         "the ROM; asset extraction and archive features are unavailable for the "
                         "Japanese version, so keep this ROM file in place.";
+        } else if (r.sha1 == kRomSha1PalRev0) {
+            // PAL is extracted with the pal/rev0 recipe tree and produces fzerox-pal.o2r. Unlike JP,
+            // it supports archive-only boot once extraction succeeds.
+            r.verdict = GdxInputVerdict::VerifiedKnown;
+            r.okHeaderOverride = "OK (F-Zero X (PAL) — experimental)";
+            r.message = "SHA-1 verified: " + r.sha1;
         } else if (romIsRefusedJapanese(fs::path(path))) {
             // A Japanese dump this build has no hash for (alternate dump, trimmed/overdumped image, an
             // uncatalogued revision). The header country code still identifies it, so say WHY it is
@@ -992,6 +1019,20 @@ GdxInputRecognition GdxRecognizeInput(const std::string& canonicalName, const st
             r.verdict = GdxInputVerdict::Rejected;
             r.message = "SHA-1 mismatch — this dump is not the US rev0 cartridge\nyours:    " + r.sha1 +
                         "\nexpected: " + expectedUs;
+        }
+        return r;
+    }
+
+    // Alternate PAL canonical names are also accepted directly (same recognition as the main row).
+    if (canonicalName == kRomNamePal || canonicalName == kRomNameEuPal) {
+        if (r.sha1 == kRomSha1PalRev0) {
+            r.verdict = GdxInputVerdict::VerifiedKnown;
+            r.okHeaderOverride = "OK (F-Zero X (PAL) — experimental)";
+            r.message = "SHA-1 verified: " + r.sha1;
+        } else {
+            r.verdict = GdxInputVerdict::Rejected;
+            r.message = "SHA-1 mismatch — this dump is not the PAL rev0 cartridge\nyours:    " + r.sha1 +
+                        "\nexpected: " + std::string(kRomSha1PalRev0);
         }
         return r;
     }

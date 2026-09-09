@@ -156,6 +156,7 @@ if(GDX_EXPANSION_KIT)
     add_dependencies(gdiffuser_game gdiffuser_ek_compile_assets)
 
     target_sources(gdiffuser_game PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_native.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/n64_leo.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gen/EkAssetBindings.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gen/EkLinkStubs.c"
@@ -271,6 +272,7 @@ add_executable(G-Diffuser
     input_bridge.c
     gdx_course_edit_mouse.cpp  # Course Edit absolute mouse drive + issue #18 steering; extern "C"
                                # wrappers over Fast3dWindow for the decomp-side C callers
+    gdx_course_edit_input.c
     gdx_course_bounds.c        # Course Edit control-point bounds; the decomp clamp sites call in
                                # here so editor and save validator agree on the y range
     gdx_course_strings.c       # Per-course names/subtitles/BGM from the mounted archive, so a ROM
@@ -312,6 +314,8 @@ add_executable(G-Diffuser
     gdx_xcup_seed.c                # M3 X Cup seed codes; hooked from Course_GenerateRandomCourse
     gdx_palette.cpp              # F2 palette editor; mirrors Machine like gdx_ghost_io.c mirrors
                                  # the ghost structs, so it links against racer.c without decomp headers
+    gdx_machine_stats.cpp        # F2b machine stat editor; mirrors Machine like gdx_palette.cpp,
+                                 # applies at the same func_8008D33C hook under #ifdef PORT
     gdx_custom_grid.c            # F3 custom grid; roster-string CVar parse/format, called from
                                  # func_80089800 (racer.c) under #ifdef PORT
     gdx_achievements.cpp         # F10 playtime + local achievements; mirrors SaveContext layout
@@ -482,8 +486,8 @@ add_custom_command(TARGET G-Diffuser POST_BUILD
 
 # Deploy the recipe tree as decomp-recipes/ next to the exe. The packaged layout mirrors the
 # decomp source tree verbatim so config.yml needs no edits (Torch resolves paths relative to it).
-# Only us/rev0 ships; other revisions' config keys are never dereferenced because recipe
-# selection is by matched ROM SHA1.
+# US and PAL rev0 ship; JP is built by the separate G-Diffuser-JP target below. Recipe selection
+# is by matched ROM SHA1, so only the needed tree is dereferenced at runtime.
 set(GDX_RECIPES_SRC "${CMAKE_SOURCE_DIR}/decomp")
 set(GDX_RECIPES_DST "$<TARGET_FILE_DIR:G-Diffuser>/decomp-recipes")
 # The EK slice manifest ships beside the recipes so the runtime disk step can pass it to
@@ -491,6 +495,7 @@ set(GDX_RECIPES_DST "$<TARGET_FILE_DIR:G-Diffuser>/decomp-recipes")
 set(GDX_EK_SLICE_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/gen/ek_slice_manifest.txt")
 add_custom_command(TARGET G-Diffuser POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${GDX_RECIPES_DST}/assets/yaml/us"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${GDX_RECIPES_DST}/assets/yaml/pal"
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "${GDX_RECIPES_SRC}/config.yml"
             "${GDX_RECIPES_DST}/config.yml"
@@ -503,6 +508,9 @@ add_custom_command(TARGET G-Diffuser POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E copy_directory
             "${GDX_RECIPES_SRC}/assets/yaml/us/rev0"
             "${GDX_RECIPES_DST}/assets/yaml/us/rev0"
+    COMMAND "${CMAKE_COMMAND}" -E copy_directory
+            "${GDX_RECIPES_SRC}/assets/yaml/pal/rev0"
+            "${GDX_RECIPES_DST}/assets/yaml/pal/rev0"
     # Dump All data files, generated from the single source of truth at build time: audio tables
     # from decomp audio_tables.c and the EK TLUT map from the EK recipe tree, so the dump classes
     # work on machines without decomp source.
@@ -648,6 +656,55 @@ elseif(GDX_PORT_WARN_FLAGS)
     target_compile_options(gdx_course_bounds_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
 endif()
 
+add_executable(gdx_course_edit_input_tests
+    tests/gdx_course_edit_input_tests.c
+    gdx_course_edit_input.c)
+target_include_directories(gdx_course_edit_input_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_course_edit_input_tests PRIVATE /W3 /UNDEBUG)
+else()
+    target_compile_options(gdx_course_edit_input_tests PRIVATE ${GDX_PORT_WARN_FLAGS} -UNDEBUG)
+endif()
+
+add_executable(gdx_course_edit_native_tests
+    tests/gdx_course_edit_native_tests.c
+    gdx_course_edit_native.c)
+target_include_directories(gdx_course_edit_native_tests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${DECOMP}"
+    "${DECOMP}/include"
+    "${DECOMP}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../include")
+target_compile_definitions(gdx_course_edit_native_tests PRIVATE
+    PORT=1 GDIFFUSER_PORT=1 EXPANSION_KIT=1
+    F3DEX_GBI_2=1 _LANGUAGE_C=1 VERSION_US=1
+    ASSET_VERSION=us ASSET_REVISION=rev0)
+if(MSVC)
+    target_compile_options(gdx_course_edit_native_tests PRIVATE /W0 /we4715 /we4716 /we4013)
+else()
+    target_compile_options(gdx_course_edit_native_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+
+add_executable(gdx_background_skyline_tests
+    tests/gdx_background_skyline_tests.c)
+target_include_directories(gdx_background_skyline_tests PRIVATE
+    "${DECOMP}"
+    "${DECOMP}/include"
+    "${DECOMP}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../include")
+target_compile_definitions(gdx_background_skyline_tests PRIVATE
+    PORT=1
+    GDIFFUSER_PORT=1
+    EXPANSION_KIT=1
+    F3DEX_GBI_2=1
+    _LANGUAGE_C=1
+    VERSION_US=1)
+if(MSVC)
+    target_compile_options(gdx_background_skyline_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_background_skyline_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+
 # Course-strings test: compiles gdx_course_strings.c UNMODIFIED and drives both halves. The
 # test TU supplies the four decomp tables and the archive reader as stubs, so apply() is
 # exercised end to end against synthesized payloads with no archive and no ROM in sight.
@@ -694,6 +751,9 @@ endif()
 # Resource smoke test: links libultraship only (no game objects), so the .o2r pipeline can be
 # verified independently of the full game.
 if(TARGET libultraship)
+    add_executable(gdx_hd_texture_tests tests/gdx_hd_texture_tests.cpp)
+    target_link_libraries(gdx_hd_texture_tests PRIVATE libultraship)
+    target_compile_features(gdx_hd_texture_tests PRIVATE cxx_std_20)
     add_executable(resource_smoketest resource_smoketest.cpp resource/ResourceFactories.cpp)
     target_include_directories(resource_smoketest PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"

@@ -71,6 +71,11 @@ const char* SetupIplFileName();   // "N64DDIPLROM.n64"
 // by hash and by ROM-header country code, never by filename.
 const char* SetupRomFileNameJp();  // "baserom.jp.rev0.z64"
 const char* SetupDiskFileNameJp(); // "baserom.jp.ek.ndd"
+// Accepted alternate names for the PAL dumps: the wizard probes these when the canonical name is
+// absent, so a PAL test folder needs no renaming. PAL extraction uses the pal/rev0 recipe tree and
+// produces fzerox-pal.o2r.
+const char* SetupRomFileNamePal();    // "baserom.pal.rev0.z64"
+const char* SetupRomFileNameEuPal();  // "baserom.eu.rev0.z64"
 // Accepted alternate name for the US prototype 64DD IPL dump, probed when N64DDIPLROM.n64 is absent
 // so a folder holding it under its original filename needs no renaming. See kKnownIplDumps in
 // gdx_firstboot.cpp for the recognized SHA-1/label.
@@ -101,9 +106,10 @@ bool CopyInputInto(const std::string& srcPath, const std::string& dataDir, const
 // The known-good SHA-1 sets live as named tables in gdx_firstboot.cpp so the future JP build can
 // reuse them. GdxRecognizeInput hashes a file that has ALREADY passed its structural Validate*File
 // check and classifies it:
-//   * ROM  — the US-rev0 dump is VerifiedKnown; the Japan dump is ACCEPTED (AcceptedUnknownWarn with
-//            `jpRom` set) for the experimental raw-ROM boot — setup then SKIPS archive extraction for
-//            it. Any other hash is Rejected with the generic mismatch message.
+//   * ROM  — the US-rev0 dump is VerifiedKnown; the PAL-rev0 dump is VerifiedKnown (experimental). The
+//            Japan dump is ACCEPTED (AcceptedUnknownWarn with `jpRom` set) for the experimental
+//            raw-ROM boot — setup then SKIPS archive extraction for it. Any other hash is Rejected
+//            with the generic mismatch message.
 //   * IPL  — each known dump (JP retail, US prototype) is labelled by region (VerifiedKnown); every
 //            other correctly-sized dump is AcceptedUnknownWarn (accepted, but the caller must surface
 //            the warning text visibly).

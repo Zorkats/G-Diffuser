@@ -47,6 +47,23 @@
 #define GDX_O2R_EXPECTED_ENTRY_COUNT_JP 0
 #endif
 
+// PAL-profile golden constants. No validated PAL archive exists yet, so the placeholder zeros below
+// make the PAL path EXPERIMENTAL: it produces and installs fzerox-pal.o2r but SKIPS the SHA-256 /
+// entry-count gates and logs the archive loudly as unverified. Generating a real
+// gen/gdx_o2r_expected.pal.h (tools/o2r_harness/gen_expected_header.py --profile pal) engages the
+// gates automatically.
+#if defined(__has_include)
+#if __has_include("gen/gdx_o2r_expected.pal.h")
+#include "gen/gdx_o2r_expected.pal.h"
+#endif
+#endif
+#ifndef GDX_O2R_EXPECTED_SHA256_PAL
+#define GDX_O2R_EXPECTED_SHA256_PAL "0000000000000000000000000000000000000000000000000000000000000000"
+#endif
+#ifndef GDX_O2R_EXPECTED_ENTRY_COUNT_PAL
+#define GDX_O2R_EXPECTED_ENTRY_COUNT_PAL 0
+#endif
+
 // The IPL archive's golden constants are PER-USER self-consistency checks — no single canonical
 // retail IPL hash is assumed — so they are diagnostic only: a dev build warns on drift from the
 // reference header, and the runtime IPL step never gates the mount on them (the archive carries its
@@ -129,6 +146,7 @@ namespace {
 // dir; the atomic install renames it to the selected profile's name.
 constexpr const char* kArchiveName = "fzerox.o2r";
 constexpr const char* kArchiveNameJp = "fzerox-jp.o2r";
+constexpr const char* kArchiveNamePal = "fzerox-pal.o2r";
 constexpr const char* kExtractorOutputName = "generic.o2r";
 constexpr const char* kSidecarName = "gdx_extract_state.cfg";
 constexpr const char* kRecipesDirName = "decomp-recipes";
@@ -175,16 +193,19 @@ constexpr const char* kExtractBinaryName = "gdx-extract";
 // recipes are the single source of truth -- and these are read only when it cannot be.
 constexpr const char* kExpectedRomSha1Fallback = "5f658e88ffa9de23cba6986a8fd3d3a90d7b4340";
 constexpr const char* kExpectedRomSha1FallbackJp = "a418b0151521b76691fa03f8658c8b567c69498b";
+constexpr const char* kExpectedRomSha1FallbackPal = "af9038bcb543a2b4faaab876dbdab4663859e092";
 
 // The config.yml `path:` selectors that key each recipe tree (SHA1 -> recipe tree).
 constexpr const char* kRecipePathUs = "assets/yaml/us/rev0";
 constexpr const char* kRecipePathJp = "assets/yaml/jp/rev0";
+constexpr const char* kRecipePathPal = "assets/yaml/pal/rev0";
 
 // Version-entry contract: Torch stamps generic.o2r's game version = the US-rev0 ROM CRC.
 constexpr std::uint32_t kExpectedRomCrc = 0x78D90EB3u;
-// The JP-rev0 ROM CRC is unknown. 0 is passed through as the -u version arg as-is, and the resulting
-// archive is treated as experimental.
+// The JP-rev0 and PAL-rev0 ROM CRCs are unknown. 0 is passed through as the -u version arg as-is,
+// and the resulting archive is treated as experimental.
 constexpr std::uint32_t kExpectedRomCrcJp = 0u;
+constexpr std::uint32_t kExpectedRomCrcPal = 0u;
 
 // Require >= 3x an estimated archive size before spawning. The exact archive size is not a
 // compile-time constant here, hence the conservative upper estimate.
@@ -609,9 +630,9 @@ std::string expectedRomSha1FromConfig(const fs::path& configYml,
 // expectedSha1 to pick recipe tree + output archive name + golden. `experimental` marks a profile with
 // no real golden yet (JP today), and the install then skips the SHA-256 / entry-count gates.
 struct RomProfile {
-    const char* key;              // "us/rev0" / "jp/rev0"
+    const char* key;              // "us/rev0" / "jp/rev0" / "pal/rev0"
     const char* recipePath;       // config.yml `path:` selector
-    const char* archiveName;      // fzerox.o2r / fzerox-jp.o2r
+    const char* archiveName;      // fzerox.o2r / fzerox-jp.o2r / fzerox-pal.o2r
     std::string expectedSha1;     // ROM SHA-1 (config.yml, else fallback constant)
     std::string goldenSha256;     // lowercase; all-zeros == no golden (experimental)
     long goldenEntryCount;        // 0 == unknown (experimental)
@@ -627,7 +648,7 @@ bool isPlaceholderSha256(const std::string& s) {
     return true;
 }
 
-// Build the US + JP profiles, resolving each ROM SHA-1 from config.yml (fallback to the constants).
+// Build the US + JP + PAL profiles, resolving each ROM SHA-1 from config.yml (fallback to the constants).
 std::vector<RomProfile> buildRomProfiles(const fs::path& configYml) {
     auto resolveSha1 = [&](const char* recipePath, const char* fallback) {
         std::string s = expectedRomSha1FromConfig(configYml, recipePath);
@@ -657,6 +678,18 @@ std::vector<RomProfile> buildRomProfiles(const fs::path& configYml) {
         jp.versionCrc = kExpectedRomCrcJp;
         jp.experimental = isPlaceholderSha256(jp.goldenSha256);
         out.push_back(jp);
+    }
+    {
+        RomProfile pal;
+        pal.key = "pal/rev0";
+        pal.recipePath = kRecipePathPal;
+        pal.archiveName = kArchiveNamePal;
+        pal.expectedSha1 = resolveSha1(kRecipePathPal, kExpectedRomSha1FallbackPal);
+        pal.goldenSha256 = toLowerHex(std::string(GDX_O2R_EXPECTED_SHA256_PAL));
+        pal.goldenEntryCount = static_cast<long>(GDX_O2R_EXPECTED_ENTRY_COUNT_PAL);
+        pal.versionCrc = kExpectedRomCrcPal;
+        pal.experimental = isPlaceholderSha256(pal.goldenSha256);
+        out.push_back(pal);
     }
     return out;
 }
@@ -722,9 +755,9 @@ struct ExtractState {
     // gdx-extract `ipl` step); iplArchiveSha256 is n64ddipl.o2r itself. Self-consistency only.
     std::string iplSha256;
     std::string iplArchiveSha256;
-    // Which ROM profile this data-dir's cartridge archive was extracted for ("us/rev0" / "jp/rev0"),
-    // so the shared launcher/wizard can confirm it matches the running binary and offer to launch the
-    // matching one on a mismatch.
+    // Which ROM profile this data-dir's cartridge archive was extracted for ("us/rev0" / "jp/rev0" /
+    // "pal/rev0"), so the shared launcher/wizard can confirm it matches the running binary and offer
+    // to launch the matching one on a mismatch.
     std::string profile;
     bool valid = false; // true only if the file was read and parsed
 };
@@ -1202,7 +1235,7 @@ void removeIfExists(const fs::path& p) {
 ExtractOutcome runExtraction(const fs::path& dataDir, const fs::path& romPath, const fs::path& exeDir,
                              const std::string& romSha1, const RomProfile& profile) {
     std::error_code ec;
-    const char* archiveName = profile.archiveName; // fzerox.o2r (US) / fzerox-jp.o2r (JP)
+    const char* archiveName = profile.archiveName; // fzerox.o2r (US) / fzerox-jp.o2r (JP) / fzerox-pal.o2r (PAL)
 
     const fs::path extractBin = exeDir / kExtractBinaryName;
     const fs::path recipesDir = exeDir / kRecipesDirName;
@@ -1254,7 +1287,7 @@ ExtractOutcome runExtraction(const fs::path& dataDir, const fs::path& romPath, c
     // temp dir, which is short on real systems, and hand THAT to the extractor instead.
     fs::path effectiveRecipes = recipesDir;
     fs::path stagedRecipes;
-    constexpr size_t kDeepestRecipeSuffix = 54; // "/assets/yaml/us/rev0/expansion_kit_textures_beta.yaml"
+    constexpr size_t kDeepestRecipeSuffix = 55; // "/assets/yaml/pal/rev0/expansion_kit_textures_beta.yaml"
     if (recipesDir.string().size() + kDeepestRecipeSuffix >= 248) {
         std::error_code sec;
         fs::path shortBase = fs::temp_directory_path(sec);
@@ -1845,11 +1878,12 @@ static ExtractOutcome ensureCartArchive(const char* dataDirC, const char* romPat
         gdx_port_logf("[extract] existing %s does not match this build's golden reference.\n", kArchiveName);
     }
 
-    // ── Resolve supported ROM profiles (US + JP) from the recipe config ────────────────────────────
+    // ── Resolve supported ROM profiles (US + JP + PAL) from the recipe config ───────────────────────
     const fs::path configYml = exeDir / kRecipesDirName / kConfigYmlName;
     std::vector<RomProfile> profiles = buildRomProfiles(configYml);
     const RomProfile& usProfile = profiles[0];
     const RomProfile& jpProfile = profiles[1];
+    const RomProfile& palProfile = profiles[2];
 
     // ── JP warm-boot ───────────────────────────────────────────────────────────────────────────────
     // With no JP golden, a present JP archive is checked for self-consistency against the sidecar
@@ -1864,6 +1898,24 @@ static ExtractOutcome ensureCartArchive(const char* dataDirC, const char* romPat
                 if (!actual.empty() && actual == sc.archiveSha256) {
                     gdx_port_logf("[extract] existing %s [%s] matches the recorded sidecar; up to date "
                                   "(EXPERIMENTAL — no golden).\n", jpProfile.archiveName, jpProfile.key);
+                    return ExtractOutcome::UpToDate;
+                }
+            }
+        }
+    }
+
+    // ── PAL warm-boot ──────────────────────────────────────────────────────────────────────────────
+    // Mirror of the JP warm-boot path: no validated PAL archive exists yet, so a present PAL archive is
+    // accepted when the sidecar records it as pal/rev0 and the SHA-256 matches.
+    {
+        const fs::path palArchive = dataDir / palProfile.archiveName;
+        if (fileExists(palArchive)) {
+            ExtractState sc = loadSidecar(dataDir);
+            if (sc.valid && sc.profile == std::string(palProfile.key) && !sc.archiveSha256.empty()) {
+                std::string actual = sha256File(palArchive);
+                if (!actual.empty() && actual == sc.archiveSha256) {
+                    gdx_port_logf("[extract] existing %s [%s] matches the recorded sidecar; up to date "
+                                  "(EXPERIMENTAL — no golden).\n", palProfile.archiveName, palProfile.key);
                     return ExtractOutcome::UpToDate;
                 }
             }
@@ -1922,12 +1974,14 @@ static ExtractOutcome ensureCartArchive(const char* dataDirC, const char* romPat
         gdx_port_logf("[extract] ERROR: ROM matches no supported profile — extraction skipped, booting "
                       "from the raw ROM.\n"
                       "  ROM sha1:  %s\n"
-                      "  supported: US rev0 %s -> fzerox.o2r\n"
-                      "             JP rev0 %s -> fzerox-jp.o2r\n"
-                      "Extraction supports the big-endian F-Zero X US rev0 or JP rev0 (.z64) cartridge.\n",
-                      romSha1.c_str(), usProfile.expectedSha1.c_str(), jpProfile.expectedSha1.c_str());
+                      "  supported: US rev0  %s -> fzerox.o2r\n"
+                      "             JP rev0  %s -> fzerox-jp.o2r\n"
+                      "             PAL rev0 %s -> fzerox-pal.o2r\n"
+                      "Extraction supports the big-endian F-Zero X US rev0, JP rev0, or PAL rev0 (.z64) cartridge.\n",
+                      romSha1.c_str(), usProfile.expectedSha1.c_str(), jpProfile.expectedSha1.c_str(),
+                      palProfile.expectedSha1.c_str());
         gdxAsyncPublishError("This ROM matches neither supported dump. Extraction supports the F-Zero X "
-                             "US rev0 or JP rev0 (.z64) cartridge.");
+                             "US rev0, JP rev0, or PAL rev0 (.z64) cartridge.");
         return failRawQuarantine();
     }
     gdx_port_logf("[extract] ROM matched profile %s -> %s%s.\n", matched->key, matched->archiveName,
@@ -2296,7 +2350,14 @@ std::string GdxExtractRecordedCartArchiveSha256(const char* dataDirC) {
     if (dataDirC == nullptr || dataDirC[0] == '\0') {
         return {};
     }
-    return loadSidecar(fs::path(dataDirC)).archiveSha256; // fzerox.o2r container SHA-256 (key archive_sha256)
+    return loadSidecar(fs::path(dataDirC)).archiveSha256; // cart archive container SHA-256 (key archive_sha256)
+}
+
+std::string GdxExtractRecordedCartProfile(const char* dataDirC) {
+    if (dataDirC == nullptr || dataDirC[0] == '\0') {
+        return {};
+    }
+    return loadSidecar(fs::path(dataDirC)).profile; // "us/rev0" / "jp/rev0" / "pal/rev0" (key profile)
 }
 
 std::string GdxExtractRecordedIplArchiveSha256(const char* dataDirC) {
@@ -2314,7 +2375,8 @@ bool GdxExtractQuarantineArchive(const char* dataDirC, const char* archiveNameC)
     // cross-TU API called with a caller-supplied name, so without the gate a bug or a future caller
     // could pass an arbitrary path component and rename a file the port never generated.
     const std::string requested(archiveNameC);
-    if (requested != kArchiveName && requested != kIplArchiveName && requested != kDiskArchiveName) {
+    if (requested != kArchiveName && requested != kArchiveNameJp && requested != kArchiveNamePal &&
+        requested != kIplArchiveName && requested != kDiskArchiveName) {
         gdx_port_logf("[extract] ERROR: refusing to quarantine '%s' -- not a recognized port-generated "
                       "archive name.\n", archiveNameC);
         return false;

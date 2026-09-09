@@ -52,6 +52,7 @@
 #include "fast/backends/gfx_slang_translator.h"
 
 #include "gdx_palette.h" // F2 palette editor: override table + persistence (extern "C" API)
+#include "gdx_machine_stats.h" // F2b machine stat editor: body/boost/grip/weight overrides
 #include "gdx_custom_grid.h" // F3 custom grid: roster string CVar parse/format (extern "C" API)
 #include "gdx_achievements.h" // F10 playtime tracker + local achievements
 
@@ -188,6 +189,114 @@ void DrawMachinePaletteEditor() {
         GdxPalette_GetFilePath(sPalettePath, sizeof(sPalettePath));
     }
     ImGui::TextDisabled("Saved to %s", sPalettePath);
+}
+
+// F2b machine stat editor: per-machine body/boost/grip/weight overrides. Grade labels map 1:1 to
+// the game's machineStats[] storage (0=A .. 4=E); weight uses the same s16 kg units as the decomp.
+static const char* kStatGradeLabels[] = { "A", "B", "C", "D", "E" };
+
+void DrawMachineStatsEditor() {
+    ImGui::PushID("MachineStatEditor");
+
+    static int sStatsMachine = 0;
+    static struct {
+        int enabled;
+        int body;
+        int boost;
+        int grip;
+        int weight;
+    } sStatsState = {};
+    static int sStatsLastMachine = -1;
+
+    ImGui::SetNextItemWidth(240.0f);
+    if (ImGui::Combo("Machine##stats", &sStatsMachine, kMachineNames, GDX_MACHINE_STATS_MACHINE_COUNT)) {
+        sStatsLastMachine = -1; // force refresh
+    }
+
+    int stockBody, stockBoost, stockGrip, stockWeight;
+    GdxMachineStats_GetStock(sStatsMachine, &stockBody, &stockBoost, &stockGrip, &stockWeight);
+
+    if (sStatsMachine != sStatsLastMachine) {
+        if (GdxMachineStats_GetOverride(sStatsMachine, &sStatsState.body, &sStatsState.boost,
+                                        &sStatsState.grip, &sStatsState.weight)) {
+            sStatsState.enabled = 1;
+        } else {
+
+            sStatsState.enabled = 0;
+            sStatsState.body = stockBody;
+            sStatsState.boost = stockBoost;
+            sStatsState.grip = stockGrip;
+            sStatsState.weight = stockWeight;
+        }
+        sStatsLastMachine = sStatsMachine;
+    }
+
+    bool overrideEnabled = sStatsState.enabled != 0;
+    if (ImGui::Checkbox("Override stats for this machine", &overrideEnabled)) {
+        if (overrideEnabled) {
+            sStatsState.enabled = 1;
+            // Initialize from stock on first enable so the user starts from parity.
+            sStatsState.body = stockBody;
+            sStatsState.boost = stockBoost;
+            sStatsState.grip = stockGrip;
+            sStatsState.weight = stockWeight;
+            GdxMachineStats_SetOverride(sStatsMachine, sStatsState.body, sStatsState.boost,
+                                        sStatsState.grip, sStatsState.weight);
+        } else {
+            sStatsState.enabled = 0;
+            GdxMachineStats_ClearMachine(sStatsMachine);
+        }
+        sStatsLastMachine = -1; // refresh from file on next frame
+    }
+
+    if (!sStatsState.enabled) {
+        ImGui::BeginDisabled();
+    }
+
+    ImGui::SetNextItemWidth(120.0f);
+    if (ImGui::Combo("Body", &sStatsState.body, kStatGradeLabels, 5)) {
+        GdxMachineStats_SetOverride(sStatsMachine, sStatsState.body, sStatsState.boost,
+                                    sStatsState.grip, sStatsState.weight);
+    }
+    ImGui::SetNextItemWidth(120.0f);
+    if (ImGui::Combo("Boost", &sStatsState.boost, kStatGradeLabels, 5)) {
+        GdxMachineStats_SetOverride(sStatsMachine, sStatsState.body, sStatsState.boost,
+                                    sStatsState.grip, sStatsState.weight);
+    }
+    ImGui::SetNextItemWidth(120.0f);
+    if (ImGui::Combo("Grip", &sStatsState.grip, kStatGradeLabels, 5)) {
+        GdxMachineStats_SetOverride(sStatsMachine, sStatsState.body, sStatsState.boost,
+                                    sStatsState.grip, sStatsState.weight);
+    }
+
+    // Weight slider covers the observed stock range (780..2340 kg); hand-edits outside this range
+    // can still be loaded from machine_stats.txt.
+    ImGui::SetNextItemWidth(240.0f);
+    if (ImGui::SliderInt("Weight (kg)", &sStatsState.weight, 780, 2340)) {
+        GdxMachineStats_SetOverride(sStatsMachine, sStatsState.body, sStatsState.boost,
+                                    sStatsState.grip, sStatsState.weight);
+    }
+
+    if (!sStatsState.enabled) {
+        ImGui::EndDisabled();
+    }
+
+    if (ImGui::Button("Reset this machine to stock")) {
+        GdxMachineStats_ClearMachine(sStatsMachine);
+        sStatsLastMachine = -1;
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Removes the stat override for %s, restoring the stock stats.",
+                          kMachineNames[sStatsMachine]);
+    }
+
+    static char sStatsPath[1024] = { 0 };
+    if (sStatsPath[0] == '\0') {
+        GdxMachineStats_GetFilePath(sStatsPath, sizeof(sStatsPath));
+    }
+    ImGui::TextDisabled("Saved to %s", sStatsPath);
+
+    ImGui::PopID();
 }
 
 // F3 custom grid: skin dropdown labels; index 0 = random, 1-4 = the machine's stock colors.
@@ -388,6 +497,13 @@ void GdxMenu::RegisterDisableReasons() {
     mDisabledInfo[GdxUI::DISABLE_FOR_RACE_IN_PROGRESS] = {
         [](GdxUI::DisabledInfo&) { return gdx_input_in_gameplay() != 0; },
         "A race is in progress. Ghost state must not be changed alongside the running game."
+    };
+
+    mDisabledInfo[GdxUI::DISABLE_FOR_COURSE_EDIT_MOUSE_OFF] = {
+        [](GdxUI::DisabledInfo&) {
+            return CVarGetInteger("gEnhancements.Input.CourseEditMouse", 0) == 0;
+        },
+        "Course Edit mouse control is off. Turn it on above to use these settings."
     };
 }
 
@@ -1517,11 +1633,12 @@ void GdxMenu::RegisterMenu() {
     AddWidget("Enhancements", "Visuals", SECTION_COLUMN_1,
               WidgetInfo{ .name = "Ultrawide (21:9+)", .cVar = "gEnhancements.Graphics.UltrawideMode",
                           .type = GdxUI::WIDGET_CVAR_CHECKBOX }
-                  .Options(UIWidgets::CheckboxOptions().DefaultValue(false).Tooltip(
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(true).Tooltip(
                       "Stops track pieces, machines, fireworks and background stars from\n"
                       "popping in and out at the edges of ultrawide (21:9 and wider) windows.\n"
-                      "The 3D view itself already extends to any aspect; leave this off on\n"
-                      "16:9 displays. The HUD anchors to the true corners, like at 16:9.\n"
+                      "The 3D view itself already extends to any aspect; this option\n"
+                      "auto-engages only when the window aspect is wider than 16:9.\n"
+                      "The HUD anchors to the true corners, like at 16:9.\n"
                       "Requires Widescreen."))
                   .ModifiedMarker()
                   .DisableWhen({ GdxUI::DISABLE_FOR_WIDESCREEN_OFF })
@@ -1772,6 +1889,17 @@ void GdxMenu::RegisterMenu() {
                   .CustomFunction([this](WidgetInfo&) { DrawXCupSeed(); })
                   .SearchTerms("x cup seed code share random generated track daily"));
 
+    // Lava strips are an Expansion Kit course-editor effect; the port exposes the existing
+    // LavaNoKill CVar so players can opt out of the kill while keeping the energy drain.
+    AddWidget("Enhancements", "Gameplay", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Lava strips never kill", .cVar = "gEnhancements.Gameplay.LavaNoKill",
+                          .type = GdxUI::WIDGET_CVAR_CHECKBOX }
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(false).Tooltip(
+                      "Lava strips drain energy but leave you at 0.1 energy.\n"
+                      "Off = 0 energy on lava kills, same as any damage source."))
+                  .ModifiedMarker()
+                  .SearchTerms("lava strip damage kill energy drain course editor"));
+
     // ═════════════════════════════════════════════════════════════════════════════════════════
     // ENHANCEMENTS -> Mouse
     // ═════════════════════════════════════════════════════════════════════════════════════════
@@ -1792,6 +1920,143 @@ void GdxMenu::RegisterMenu() {
                       "(Z) keeps stock stick behavior. LMB/RMB act as A/B."))
                   .ModifiedMarker()
                   .SearchTerms("course edit create machine mouse cursor pointer absolute track editor"));
+
+    // Per-feature toggles for the Course Edit mouse controls. All default ON so existing editor-mouse
+    // behavior is preserved once CourseEditMouse is enabled, but they grey out while the master is off
+    // so they do not appear to work when they are actually inert.
+    AddWidget("Enhancements", "Mouse", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Editor camera gestures",
+                          .cVar = "gEnhancements.Input.EditorMouseCameraGestures",
+                          .type = GdxUI::WIDGET_CVAR_CHECKBOX }
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(true).Tooltip(
+                      "Lets the gesture button orbit (no Shift) or pan (Shift) the camera\n"
+                      "while the editor mouse drive is active. Off disables gesture start."))
+                  .ModifiedMarker()
+                  .SearchTerms("course edit editor mouse camera gesture orbit pan toggle")
+                  .DisableWhen({ GdxUI::DISABLE_FOR_COURSE_EDIT_MOUSE_OFF }));
+    AddWidget("Enhancements", "Mouse", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Editor wheel zoom",
+                          .cVar = "gEnhancements.Input.EditorMouseWheelZoom",
+                          .type = GdxUI::WIDGET_CVAR_CHECKBOX }
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(true).Tooltip(
+                      "Scroll the mouse wheel to dolly the camera in Course Edit.\n"
+                      "List and dropdown scrolling are unaffected by this toggle."))
+                  .ModifiedMarker()
+                  .SearchTerms("course edit editor mouse wheel zoom dolly toggle")
+                  .DisableWhen({ GdxUI::DISABLE_FOR_COURSE_EDIT_MOUSE_OFF }));
+    AddWidget("Enhancements", "Mouse", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Editor number-key shortcuts",
+                          .cVar = "gEnhancements.Input.EditorMouseKeybinds",
+                          .type = GdxUI::WIDGET_CVAR_CHECKBOX }
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(true).Tooltip(
+                      "Enables the 1-9 number-key tool shortcuts in Course Edit.\n"
+                      "Off leaves them to normal keyboard input."))
+                  .ModifiedMarker()
+                  .SearchTerms("course edit editor mouse number key shortcut keybind toggle")
+                  .DisableWhen({ GdxUI::DISABLE_FOR_COURSE_EDIT_MOUSE_OFF }));
+    AddWidget("Enhancements", "Mouse", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Editor point dragging",
+                          .cVar = "gEnhancements.Input.EditorMouseDrag",
+                          .type = GdxUI::WIDGET_CVAR_CHECKBOX }
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(true).Tooltip(
+                      "Click and drag control points directly in Course Edit point mode.\n"
+                      "An in-progress drag is cancelled cleanly when this is turned off."))
+                  .ModifiedMarker()
+                  .SearchTerms("course edit editor mouse point drag dragging toggle")
+                  .DisableWhen({ GdxUI::DISABLE_FOR_COURSE_EDIT_MOUSE_OFF }));
+
+    // Sensitivity sliders for the Course Edit mouse controls. Default 100 = stock behavior.
+    AddWidget("Enhancements", "Mouse", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Editor orbit sensitivity (%)",
+                          .cVar = "gEnhancements.Input.EditorMouseOrbitSensitivity",
+                          .type = GdxUI::WIDGET_CVAR_SLIDER_INT }
+                  .Options(UIWidgets::IntSliderOptions()
+                               .Min(10)
+                               .Max(400)
+                               .DefaultValue(100)
+                               .ShowButtons(false)
+                               .LabelPosition(UIWidgets::LabelPositions::Near)
+                               .Tooltip("Scales the camera orbit speed while the gesture\n"
+                                        "button is held. 100 = stock speed."))
+                  .ModifiedMarker()
+                  .SearchTerms("course edit editor mouse orbit sensitivity percent")
+                  .DisableWhen({ GdxUI::DISABLE_FOR_COURSE_EDIT_MOUSE_OFF }));
+    AddWidget("Enhancements", "Mouse", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Editor pan sensitivity (%)",
+                          .cVar = "gEnhancements.Input.EditorMousePanSensitivity",
+                          .type = GdxUI::WIDGET_CVAR_SLIDER_INT }
+                  .Options(UIWidgets::IntSliderOptions()
+                               .Min(10)
+                               .Max(400)
+                               .DefaultValue(100)
+                               .ShowButtons(false)
+                               .LabelPosition(UIWidgets::LabelPositions::Near)
+                               .Tooltip("Scales the camera pan speed while Shift + the gesture\n"
+                                        "button is held. 100 = stock speed."))
+                  .ModifiedMarker()
+                  .SearchTerms("course edit editor mouse pan sensitivity percent")
+                  .DisableWhen({ GdxUI::DISABLE_FOR_COURSE_EDIT_MOUSE_OFF }));
+    AddWidget("Enhancements", "Mouse", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Editor zoom sensitivity (%)",
+                          .cVar = "gEnhancements.Input.EditorMouseZoomSensitivity",
+                          .type = GdxUI::WIDGET_CVAR_SLIDER_INT }
+                  .Options(UIWidgets::IntSliderOptions()
+                               .Min(10)
+                               .Max(400)
+                               .DefaultValue(100)
+                               .ShowButtons(false)
+                               .LabelPosition(UIWidgets::LabelPositions::Near)
+                               .Tooltip("Scales how much the wheel dolly moves per detent.\n"
+                                        "100 = stock zoom speed."))
+                  .ModifiedMarker()
+                  .SearchTerms("course edit editor mouse zoom sensitivity percent")
+                  .DisableWhen({ GdxUI::DISABLE_FOR_COURSE_EDIT_MOUSE_OFF }));
+    AddWidget("Enhancements", "Mouse", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Editor drag sensitivity (%)",
+                          .cVar = "gEnhancements.Input.EditorMouseDragSensitivity",
+                          .type = GdxUI::WIDGET_CVAR_SLIDER_INT }
+                  .Options(UIWidgets::IntSliderOptions()
+                               .Min(10)
+                               .Max(400)
+                               .DefaultValue(100)
+                               .ShowButtons(false)
+                               .LabelPosition(UIWidgets::LabelPositions::Near)
+                               .Tooltip("Scales how fast a dragged control point follows the\n"
+                                        "cursor in Course Edit point mode. 100 = stock speed."))
+                  .ModifiedMarker()
+                  .SearchTerms("course edit editor mouse drag sensitivity percent")
+                  .DisableWhen({ GdxUI::DISABLE_FOR_COURSE_EDIT_MOUSE_OFF }));
+
+    // Gesture button dropdown: middle mouse, X1, or X2.
+    AddWidget("Enhancements", "Mouse", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Editor gesture button",
+                          .cVar = "gEnhancements.Input.EditorCameraGestureButton",
+                          .type = GdxUI::WIDGET_CVAR_COMBOBOX }
+                  .ComboItems({
+                      "Middle mouse button",
+                      "X1 (side back button)",
+                      "X2 (side forward button)",
+                  })
+                  .Options(UIWidgets::ComboboxOptions()
+                               .DefaultIndex(0)
+                               .LabelPosition(UIWidgets::LabelPositions::Near)
+                               .Tooltip("Mouse button that orbits/pans the Course Edit camera.\n"
+                                        "X1 and X2 are the side buttons on many gaming mice."))
+                  .ModifiedMarker()
+                  .SearchTerms("course edit editor mouse gesture button middle x1 x2 side")
+                  .DisableWhen({ GdxUI::DISABLE_FOR_COURSE_EDIT_MOUSE_OFF }));
+
+    // Rebindable tool keys. The custom block draws a collapsing header so the nine rows do not
+    // overwhelm the Mouse page.
+    AddWidget("Enhancements", "Mouse", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Course Edit tool keys",
+                          .type = GdxUI::WIDGET_CUSTOM }
+                  .CustomFunction([this](WidgetInfo& widget) { DrawCourseEditKeybinds(widget); })
+                  .Options(UIWidgets::WidgetOptions().Tooltip(
+                      "Rebind the 1-9 number keys used as Course Edit tool shortcuts while the\n"
+                      "editor mouse drive is active."))
+                  .SearchTerms("course edit editor mouse tool key keybind rebind shortcut 1 2 3 4 5 6 7 8 9")
+                  .DisableWhen({ GdxUI::DISABLE_FOR_COURSE_EDIT_MOUSE_OFF }));
 
     // Issue #18. Absolute position steering (cursor X inside the game view maps to stick
     // deflection), a separate mechanism from the editor absolute drive above; gated on race
@@ -1868,7 +2133,7 @@ void GdxMenu::RegisterMenu() {
               WidgetInfo{ .name = "Extended course height (experimental)",
                           .cVar = "gEnhancements.CourseEdit.ExtendedHeight",
                           .type = GdxUI::WIDGET_CVAR_CHECKBOX }
-                  .Options(UIWidgets::CheckboxOptions().DefaultValue(false).Tooltip(
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(true).Tooltip(
                       "Raises the Course Edit height ceiling from 5,000 to 30,000.\n"
                       "Tracks above 5,000 will not load on real hardware or in other\n"
                       "Expansion Kit tools. Experimental: extreme-height camera,\n"
@@ -1982,6 +2247,16 @@ void GdxMenu::RegisterMenu() {
               WidgetInfo{ .name = "Machine colors", .type = GdxUI::WIDGET_CUSTOM }
                   .CustomFunction([](WidgetInfo&) { DrawMachinePaletteEditor(); })
                   .SearchTerms("machine color palette editor paint rgb custom skin blue falcon"));
+
+    // Community request F2b: per-machine stat overrides (body/boost/grip/weight). Persistence is
+    // machine_stats.txt next to the exe; the same func_8008D33C hook applies the table on every
+    // machine-table rebuild, so custom machines and super copies into roster slots are covered.
+    AddWidget("Enhancements", "Cosmetics", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Machine stat editor", .type = GdxUI::WIDGET_SEPARATOR_TEXT });
+    AddWidget("Enhancements", "Cosmetics", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Machine stats", .type = GdxUI::WIDGET_CUSTOM }
+                  .CustomFunction([](WidgetInfo&) { DrawMachineStatsEditor(); })
+                  .SearchTerms("machine stat editor body boost grip weight physics custom tuning"));
 
     // ═════════════════════════════════════════════════════════════════════════════════════════
     // ENHANCEMENTS -> Practice

@@ -11,6 +11,7 @@
 
 #include "gdx_content_import.h"
 #include "gdx_course_bounds.h"
+#include "port_log.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -225,10 +226,44 @@ static uint32_t gdx_import_course_checksum(const GdxImportCourseData* courseData
     return checksum;
 }
 
-static void gdx_import_validate_track(const uint8_t* payload, uint32_t* errors) {
+#define GDX_IMPORT_PIT_MIN -1
+#define GDX_IMPORT_PIT_MAX 7 /* PIT_MAX - 1; PIT_MAX == 8 in fzx_course.h */
+
+/* Sanitize out-of-range pit values in-place. The game's editor tables index by pit+1 with a
+ * size-9 array, so values below -1 or above 7 can read past the end. Clamp to PIT_NONE (-1),
+ * recompute the checksum over the sanitized data (mirrors Course_CalculateChecksum), and log. */
+static int gdx_import_sanitize_course_pit(uint8_t* payload) {
+    GdxImportCourseData* courseData = (GdxImportCourseData*) payload;
+    int clamped = 0;
+    int i;
+    int geometryError;
+    uint32_t checksum;
+
+    for (i = 0; i < courseData->controlPointCount; i++) {
+        if (courseData->pit[i] < GDX_IMPORT_PIT_MIN || courseData->pit[i] > GDX_IMPORT_PIT_MAX) {
+            gdx_port_logf("[import] clamping out-of-range pit[%d]=%d to PIT_NONE\n", i, courseData->pit[i]);
+            courseData->pit[i] = -1;
+            clamped++;
+        }
+    }
+
+    if (clamped != 0) {
+        checksum = gdx_import_course_checksum(courseData, &geometryError);
+        if (geometryError == 0) {
+            courseData->checksum = checksum;
+        }
+    }
+
+    return clamped;
+}
+
+static void gdx_import_validate_track(uint8_t* payload, uint32_t* errors) {
     GdxImportCourseData courseData;
     uint32_t computed;
     int geometryError;
+
+    /* Clamp first so the checksum covers the sanitized data, matching Course_CalculateChecksum. */
+    gdx_import_sanitize_course_pit(payload);
 
     /* Work on a stack copy so the (unused) masked-trackSegmentInfo semantics can never leak back
      * into the payload that gets installed. */
@@ -752,7 +787,7 @@ static uint32_t gdx_import_validate_bundle_container(const char* path, GdxConten
             }
         }
         if (entSize == GDX_CONTENT_TRACK_PAYLOAD_SIZE) {
-            gdx_import_validate_track(entPayload, &errors);
+            gdx_import_validate_track((uint8_t*) entPayload, &errors);
         }
         if (trackCount < GDX_CONTENT_BUNDLE_MAX_TRACKS) {
             memcpy(outNames[trackCount], name, sizeof(outNames[trackCount]));
@@ -1179,7 +1214,7 @@ int32_t gdx_content_import_bundle_failed_index(void) {
  * ------------------------------------------------------------------------------- */
 
 static uint32_t gdx_import_validate_direct(const char* name, const char* extension, int32_t contentType,
-                                           const uint8_t* payload, int32_t payloadSize, GdxContentImportEntry* entry,
+                                           uint8_t* payload, int32_t payloadSize, GdxContentImportEntry* entry,
                                            uint32_t* warnings) {
     uint32_t errors = 0;
     int32_t expectedSize;
@@ -1232,6 +1267,7 @@ static uint32_t gdx_import_validate_direct(const char* name, const char* extensi
 void gdx_content_import_validate_payload(const char* name, const char* extension, int32_t contentType,
                                          const uint8_t* payload, int32_t payloadSize, GdxContentImportEntry* outEntry) {
     uint32_t warnings = 0;
+    uint8_t* payloadCopy;
 
     if (outEntry == NULL) {
         return;
@@ -1251,9 +1287,16 @@ void gdx_content_import_validate_payload(const char* name, const char* extension
         outEntry->errors = GDX_IMPORT_ERR_BAD_SIZE | GDX_IMPORT_ERR_STATE_UNKNOWN;
         return;
     }
+    payloadCopy = (uint8_t*) malloc(payloadSize);
+    if (payloadCopy == NULL) {
+        outEntry->errors = GDX_IMPORT_ERR_IO | GDX_IMPORT_ERR_STATE_UNKNOWN;
+        return;
+    }
+    memcpy(payloadCopy, payload, payloadSize);
     outEntry->errors =
-        gdx_import_validate_direct(name, extension, contentType, payload, payloadSize, outEntry, &warnings);
+        gdx_import_validate_direct(name, extension, contentType, payloadCopy, payloadSize, outEntry, &warnings);
     outEntry->warnings = warnings;
+    free(payloadCopy);
 }
 
 int gdx_content_import_begin_payload(const char* name, const char* extension, int32_t contentType,
@@ -1276,11 +1319,16 @@ int gdx_content_import_begin_payload(const char* name, const char* extension, in
     }
 
     /* Re-validate what was handed in: never trust the menu's earlier snapshot. The payload then
-     * stages straight into the buffer the disk thread installs. */
+     * stages straight into the buffer the disk thread installs. Copy first so the validator can
+     * sanitize the staged bytes in-place (pit clamp + checksum rewrite). */
+    sImportPayloadSize = (uint32_t) gdx_import_expected_payload_size(contentType);
+    memcpy(sImportPayload, payload, payloadSize);
+
     memset(&entry, 0, sizeof(entry));
     entry.classFileCount = -1;
     entry.bundleTrackCount = -1;
-    entry.errors = gdx_import_validate_direct(name, extension, contentType, payload, payloadSize, &entry, &warnings);
+    entry.errors =
+        gdx_import_validate_direct(name, extension, contentType, sImportPayload, payloadSize, &entry, &warnings);
     if (entry.errors != 0) {
         return GDX_CONTENT_IMPORT_ERR_VALIDATION;
     }
@@ -1288,8 +1336,6 @@ int gdx_content_import_begin_payload(const char* name, const char* extension, in
     memcpy(sImportName, entry.name, sizeof(sImportName));
     memcpy(sImportExtension, entry.extension, sizeof(sImportExtension));
     sImportContentType = entry.contentType;
-    sImportPayloadSize = (uint32_t) gdx_import_expected_payload_size(entry.contentType);
-    memcpy(sImportPayload, payload, sImportPayloadSize);
     sImportRc = 0;
     sImportMfsError = 0;
     sImportCupCleared = 0;

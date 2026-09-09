@@ -82,6 +82,9 @@ enum DisableOption {
     // Game state
     DISABLE_FOR_RACE_IN_PROGRESS, // mutating ghost state must not race the game fiber
 
+    // Input
+    DISABLE_FOR_COURSE_EDIT_MOUSE_OFF, // Course Edit mouse sub-controls are inert while the master is off
+
     DISABLE_OPTION_COUNT
 };
 

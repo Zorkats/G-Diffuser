@@ -145,10 +145,134 @@ jobs:
           VERSION: ${{ steps.version.outputs.value }}
         run: |
           export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
-          bash tools/package_linux.sh build "$VERSION" dist
+          bash tools/package_linux.sh build "$VERSION" dist linux-x64
 
       - uses: actions/upload-artifact@v4
         with:
           name: G-Diffuser-v${{ steps.version.outputs.value }}-linux-x64
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  linux-arm64:
+    runs-on: ubuntu-24.04-arm
+    # Same pinned environment as the x86-64 job, but on an ARM64 runner. The 22.04 container
+    # has an arm64 manifest and keeps the glibc floor identical across architectures.
+    container: ubuntu:22.04
+
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      CC: gcc-12
+      CXX: g++-12
+      # Pinned so a rebuild of the same commit produces the same dependencies, instead of
+      # whatever the base image happens to carry that month.
+      CMAKE_VERSION: '3.31.6'
+      SDL2_VERSION: '2.30.9'
+      TINYXML2_VERSION: '10.0.0'
+      SPDLOG_VERSION: '1.14.1'
+      LIBZIP_VERSION: '1.10.1'
+
+    steps:
+      - name: Install build tools
+        # git has to exist before actions/checkout runs, or checkout falls back to a source
+        # download that cannot fetch the four submodules.
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential gcc-12 g++-12 ninja-build pkg-config \
+            git ca-certificates wget \
+            python3 python3-yaml python3-pil \
+            zlib1g-dev libbz2-dev nlohmann-json3-dev libpng-dev \
+            libgl1-mesa-dev libopengl-dev libegl1-mesa-dev libglew-dev \
+            libasound2-dev libpulse-dev libudev-dev libdbus-1-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev \
+            libxinerama-dev libxss-dev libxkbcommon-dev \
+            libwayland-dev wayland-protocols libdrm-dev libgbm-dev
+          git config --global --add safe.directory '*'
+
+      - name: Install CMake
+        # Jammy ships 3.22 and libultraship requires 3.24.
+        run: |
+          set -eux
+          wget -q "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-aarch64.tar.gz"
+          mkdir -p /opt/cmake
+          tar -xzf "cmake-${CMAKE_VERSION}-linux-aarch64.tar.gz" -C /opt/cmake --strip-components=1
+          echo /opt/cmake/bin >> "$GITHUB_PATH"
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build pinned dependencies
+        # 22.04's own packages are too old for libultraship, and distribution packages would
+        # decide our runtime dependencies for us either way. Everything here is linked
+        # statically so it cannot become a missing .so on a user's machine. SDL2 is the
+        # exception: it stays shared because it negotiates with the host's audio and windowing
+        # backends, so it travels in lib/ instead.
+        run: |
+          set -eux
+          cd /tmp
+          wget -q "https://www.libsdl.org/release/SDL2-${SDL2_VERSION}.tar.gz"
+          tar -xzf "SDL2-${SDL2_VERSION}.tar.gz"
+          cmake -S "SDL2-${SDL2_VERSION}" -B build-sdl2 -GNinja -DCMAKE_BUILD_TYPE=Release \
+            -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TEST=OFF
+          cmake --build build-sdl2 --target install
+
+          wget -q -O tinyxml2.tar.gz "https://github.com/leethomason/tinyxml2/archive/refs/tags/${TINYXML2_VERSION}.tar.gz"
+          tar -xzf tinyxml2.tar.gz
+          cmake -S "tinyxml2-${TINYXML2_VERSION}" -B build-tinyxml2 -GNinja \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -Dtinyxml2_BUILD_TESTING=OFF
+          cmake --build build-tinyxml2 --target install
+
+          # Bundled fmt rather than an external one: nothing in the tree includes fmt directly,
+          # and a shared libfmt was one of the dependencies v1.0.0 failed to ship.
+          wget -q -O spdlog.tar.gz "https://github.com/gabime/spdlog/archive/refs/tags/v${SPDLOG_VERSION}.tar.gz"
+          tar -xzf spdlog.tar.gz
+          cmake -S "spdlog-${SPDLOG_VERSION}" -B build-spdlog -GNinja \
+            -DCMAKE_BUILD_TYPE=Release -DSPDLOG_BUILD_SHARED=OFF \
+            -DSPDLOG_FMT_EXTERNAL=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DSPDLOG_BUILD_EXAMPLE=OFF -DSPDLOG_BUILD_TESTS=OFF
+          cmake --build build-spdlog --target install
+
+          wget -q -O libzip.tar.gz "https://github.com/nih-at/libzip/archive/refs/tags/v${LIBZIP_VERSION}.tar.gz"
+          tar -xzf libzip.tar.gz
+          cmake -S "libzip-${LIBZIP_VERSION}" -B build-libzip -GNinja \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DENABLE_BZIP2=OFF -DENABLE_LZMA=OFF -DENABLE_ZSTD=OFF -DENABLE_OPENSSL=OFF \
+            -DBUILD_TOOLS=OFF -DBUILD_REGRESS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_DOC=OFF
+          cmake --build build-libzip --target install
+          ldconfig
+
+      - name: Build
+        run: |
+          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --target G-Diffuser
+
+      - name: Resolve version
+        id: version
+        # Through the environment rather than inline, so the dispatch input cannot be read as
+        # shell syntax.
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$REQUESTED_VERSION" ]; then
+            echo "value=$REQUESTED_VERSION" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Package and verify portability
+        # package_linux.sh runs check_linux_abi.py before it writes the tarball, so a binary
+        # that would fail to start on a supported distribution fails the build here instead.
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
+          bash tools/package_linux.sh build "$VERSION" dist linux-arm64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: G-Diffuser-v${{ steps.version.outputs.value }}-linux-arm64
           path: dist/*.tar.gz
           if-no-files-found: error
