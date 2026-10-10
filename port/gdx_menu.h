@@ -72,6 +72,7 @@ class GdxMenu final : public Ship::GuiWindow {
     void DrawInterpStats();
     void DrawToolWindowPage(const char* name, const char* description);
     void DrawAboutMenu();
+    void DrawCourseEditKeybinds(GdxUI::WidgetInfo& widget);
 
     // ── Section / sidebar selection ─────────────────────────────────────────────────────────
     // Both are addressed BY NAME and persisted as strings, so reordering pages cannot make a

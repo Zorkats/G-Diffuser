@@ -45,6 +45,12 @@ if(ANDROID)
     set(ENABLE_SCRIPTING OFF CACHE BOOL "" FORCE)
     set(DISABLE_DLL_LOADER ON CACHE BOOL "" FORCE)
 endif()
+# Fused multiply-add contraction changes rounding in physics code and silently diverges
+# from the decomp baseline; MSVC already defaults to no-contraction unless /fp:fast is set.
+add_compile_options(
+    $<$<OR:$<C_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:GNU>>:-ffp-contract=off>
+    $<$<OR:$<C_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:Clang>,$<C_COMPILER_ID:AppleClang>,$<CXX_COMPILER_ID:AppleClang>>:-ffp-contract=off>
+)
 
 # --- Components ---------------------------------------------------------------
 add_subdirectory(libultraship)     # runtime + Fast3D renderer

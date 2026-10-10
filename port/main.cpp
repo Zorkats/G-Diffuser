@@ -85,9 +85,11 @@ extern "C" int  GdxSegmentSourcePreload(uint32_t romBase);
 extern "C" int  GdxSegmentSourcePayload(uint32_t romBase, void** outPayload, uint32_t* outSize);
 extern "C" void gdx_boot_warm_asset_segments(void);
 extern "C" int  gdx_vi_divider(void);               // 1 = 60Hz, 3 = Course Edit cursor mode (~20Hz)
-extern "C" void gdx_course_edit_mouse_cursor_tick(void); // port/gdx_course_edit_mouse.cpp
-extern "C" void gdx_course_edit_mouse_grab_tick(void);   // port/gdx_course_edit_mouse.cpp
-extern "C" void gdx_hide_os_cursor_tick(void);           // port/gdx_course_edit_mouse.cpp
+extern "C" void gdx_course_edit_mouse_cursor_tick(void);  // port/gdx_course_edit_mouse.cpp
+extern "C" void gdx_course_edit_mouse_camera_tick(void);  // port/gdx_course_edit_mouse.cpp
+extern "C" void gdx_course_edit_mouse_grab_tick(void);    // port/gdx_course_edit_mouse.cpp
+extern "C" void gdx_course_edit_mouse_drag_tick(void);    // port/gdx_course_edit_mouse.cpp
+extern "C" void gdx_hide_os_cursor_tick(void);            // port/gdx_course_edit_mouse.cpp
 
 static void logStep(const char* s) {
     gdx_port_logf("[G-Diffuser] %s\n", s);
@@ -673,7 +675,7 @@ static std::vector<std::string> findArchivePaths(const char* argv0) {
     // disk image so the raw source files become deletable after setup; both unversioned and
     // tolerated-absent (their loaders fall back to the raw files).
     for (const auto& nameGroup : { std::vector<const char*>{ "gdiffuser.o2r", "f3d.o2r" },
-                                   std::vector<const char*>{ "fzerox.o2r", "generic.o2r" },
+                                   std::vector<const char*>{ "fzerox.o2r", "fzerox-jp.o2r", "fzerox-pal.o2r", "generic.o2r" },
                                    std::vector<const char*>{ "n64ddipl.o2r" },
                                    std::vector<const char*>{ "fzerox-disk.o2r" } }) {
         bool found = false;
@@ -696,6 +698,30 @@ static std::vector<std::string> findArchivePaths(const char* argv0) {
     if (archives.empty()) {
         archives.push_back("gdiffuser.o2r");
         archives.push_back("fzerox.o2r");
+    }
+
+    // The Workshop and ROM-hack scans below only look at roots that already have a mods folder,
+    // so on a fresh install neither feature existed until the user created the folders by hand.
+    // Create the canonical pair beside the executable instead; when an earlier root already ships
+    // a mods folder it keeps priority and only its missing ~romhacks subfolder is filled in.
+    {
+        std::filesystem::path modsDir;
+        for (const auto& root : roots) {
+            const auto candidate = root / "mods";
+            if (std::filesystem::is_directory(candidate, ec)) {
+                modsDir = candidate;
+                break;
+            }
+            ec.clear();
+        }
+        if (modsDir.empty() && argv0 != nullptr) {
+            modsDir = std::filesystem::absolute(argv0, ec).parent_path() / "mods";
+            ec.clear();
+        }
+        if (!modsDir.empty()) {
+            std::filesystem::create_directories(modsDir / GDX_HACKMODS_DIR, ec);
+            ec.clear();
+        }
     }
 
     // Append mods/*.o2r after the base archives. ArchiveManager is last-wins, so load order is
@@ -1003,6 +1029,14 @@ int main(int argc, char** argv) {
                         // content on top of it and can never stand in for it.
                         archivesValidated = true;
                     }
+                } else if (basename == "fzerox-jp.o2r" || basename == "fzerox-pal.o2r") {
+                    // EXPERIMENTAL: JP and PAL archives are stamped with version CRC 0 because their
+                    // retail ROM CRCs are not known / not validated. Accept-and-warn: the archive is
+                    // left mounted, but the no-ROM boot gate still requires the US base archive.
+                    gdx_port_logf(
+                        "[G-Diffuser] WARNING: %s is an experimental archive (version 0x%08X); "
+                        "it is accepted but not treated as the base US archive.\n",
+                        path.c_str(), got);
                 } else if (got != kGdxExpectedArchiveVersion) {
                     // WARN-ONLY for every other versioned archive.
                     gdx_port_logf(
@@ -1075,6 +1109,8 @@ int main(int argc, char** argv) {
         pgui->AddGuiWindow(std::make_shared<GdxHackModsWindow>("gEnhancements.Hacks.WindowOpen", "ROM Hacks"));
         pgui->AddGuiWindow(std::make_shared<GdxInputViewer>());
         pgui->AddGuiWindow(std::make_shared<GdxFpsOverlay>());
+        extern std::shared_ptr<Ship::GuiWindow> GdxCreateCourseEditDeleteOverlay(void);
+        pgui->AddGuiWindow(GdxCreateCourseEditDeleteOverlay());
 
         // Default OFF on all platforms: the backend vsync caps correctly and the port pacer
         // misbehaves when on (owner evidence, ROG Ally X/Linux). Must run BEFORE the GdxMenu ctor
@@ -1330,6 +1366,10 @@ int main(int argc, char** argv) {
         gdx_dev_gates_refresh();
         gdx::PerfFrameBegin();
         gdx::PerfPhaseBegin(gdx::PerfEvents);
+        // Course Edit tool keys and wheel zoom no longer pump the SDL queue here: both are fed by
+        // backend-agnostic hooks (Fast3dWindow::KeyDown/KeyUp and the wheel cases of each window
+        // backend), so they work identically under DirectX 11, where the SDL event queue never
+        // carries window input.
         // Must run every frame to drain the SDL event queue; without it click/close events pile up
         // and the window manager crashes.
         w->HandleEvents();
@@ -1496,9 +1536,15 @@ int main(int argc, char** argv) {
         // Course Edit mouse gate is fully active (CVar, mode, menu closed, cursor in the blit
         // rect; yields to F2 capture) — see port/gdx_course_edit_mouse.cpp.
         gdx_course_edit_mouse_cursor_tick();
+        // Course Edit mouse Slice 1: tracks MMB drag state for orbit/pan camera gestures. Runs
+        // after MouseStateManager::StartFrame so the button state is stable for this frame.
+        gdx_course_edit_mouse_camera_tick();
         // Course Edit / race mouse steering S3: confines the OS cursor to the window while mouse
         // steering is active. Runs after the cursor tick so the same per-frame input state is used.
         gdx_course_edit_mouse_grab_tick();
+        // Course Edit mouse S3: point-drag state machine. Runs after grab tick so the mouse button
+        // edges are stable before input_bridge reads them.
+        gdx_course_edit_mouse_drag_tick();
         // Hide-cursor-in-game option: hides the OS cursor during gameplay, re-shows it for the
         // ImGui menu. Same post-StartFrame ordering requirement as the Course Edit cursor tick.
         gdx_hide_os_cursor_tick();

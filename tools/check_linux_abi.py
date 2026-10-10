@@ -28,6 +28,7 @@ import sys
 # assume has it. That is the rule v1.0.0 broke.
 SYSTEM_LIBS = {
     "ld-linux-x86-64.so.2",
+    "ld-linux-aarch64.so.1",
     "libc.so.6",
     "libm.so.6",
     "libdl.so.2",
@@ -78,6 +79,9 @@ PROP_X86_ISA_1_NEEDED = 0xC0008002
 PROP_X86_ISA_1_USED = 0xC0010002
 ISA_LEVEL_NAMES = {0: "baseline", 1: "x86-64-v2", 2: "x86-64-v3", 3: "x86-64-v4"}
 
+EM_X86_64 = 62
+EM_AARCH64 = 183
+
 
 def parse_version(text):
     """GLIBC_2.38 -> (2, 38). Unversioned tags sort below everything."""
@@ -95,6 +99,7 @@ class ElfFile:
             self.data = handle.read()
         if self.data[:4] != b"\x7fELF" or self.data[4] != 2:
             raise ValueError(f"{path}: not a 64-bit ELF")
+        (self.e_machine,) = struct.unpack_from("<H", self.data, 18)
         (_, _, _, _, _, sh_off, _, _, _, _, sh_entsize, sh_num,
          sh_strndx) = struct.unpack_from("<HHIQQQIHHHHHH", self.data, 16)
         self.sections = []
@@ -170,6 +175,9 @@ class ElfFile:
 
     def isa_level_required(self):
         """Highest x86-64 ISA level the loader will demand, as a bit index."""
+        if self.e_machine != EM_X86_64:
+            # .note.gnu.property ISA bits are x86-64-specific; aarch64 has no equivalent check.
+            return 0
         body, offset = self.blob(".note.gnu.property"), 0
         while offset + 12 <= len(body):
             namesz, descsz, ntype = struct.unpack_from("<III", body, offset)

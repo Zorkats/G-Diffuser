@@ -40,6 +40,12 @@ extern unsigned char D_i2_80106F14[];
 /* Payload counts, four words immediately after the header. */
 #define GDX_COURSE_STRINGS_FIELDS 4u
 
+/* Decomp enum values used by the Rainbow Road guard in apply; defined locally because this file
+ * deliberately does not include decomp headers. COURSE_RAINBOW_ROAD (fzx_course.h) and
+ * BGM_SECTOR (sfx.h). */
+#define GDX_COURSE_INDEX_RAINBOW_ROAD 18u
+#define GDX_BGM_SECTOR 7u
+
 /* Storage the repointed table entries borrow for the rest of the run. */
 static char sNameStore[GDX_COURSE_STRINGS_NAME_MAX][GDX_COURSE_STRING_MAX];
 static char sSubtitleStore[GDX_COURSE_STRINGS_SUB_MAX][GDX_COURSE_STRING_MAX];
@@ -247,6 +253,15 @@ void gdx_course_strings_apply(void) {
         memcpy(sSubtitleStore[i], sDecoded.subtitles[i], GDX_COURSE_STRING_MAX);
         sTrackSubtitles[i] = sSubtitleStore[i];
         subtitles++;
+
+        /* The recipe extracts from the BASE-game ROM, whose course 18 (Rainbow Road) entry is
+         * BGM_SECTOR; the Expansion Kit's compiled-in tables deliberately changed exactly this
+         * one slot to BGM_RAINBOW_ROAD. Treat the base-game default at this slot as "no opinion"
+         * so the vanilla extraction cannot clobber the EK song back to the base-game one. A hack
+         * that genuinely wants Sector there is the cost of not having provenance tagging. */
+        if ((i == GDX_COURSE_INDEX_RAINBOW_ROAD) && (sDecoded.bgm[i] == GDX_BGM_SECTOR)) {
+            continue;
+        }
 
         D_800CF4D8[i] = sDecoded.bgm[i];
         D_i2_80106F14[i] = sDecoded.bgm[i];

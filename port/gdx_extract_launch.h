@@ -183,11 +183,17 @@ std::string GdxExtractRecordedDiskSha256(const char* dataDir);
 // against this before accepting it as the disk input once the raw .ndd and managed copy are gone.
 std::string GdxExtractRecordedDiskArchiveSha256(const char* dataDir);
 
-// Lowercase-hex SHA-256 of the cart archive container (fzerox.o2r) as recorded in the completion
-// sidecar (key `archive_sha256`, authored by ensureCartArchive/runExtraction). Empty if the sidecar is
-// missing or the key is unset. First-boot checks an installed fzerox.o2r against this before
-// accepting it as the ROM input once the original .z64 is gone. Mirrors the disk-archive helper above.
+// Lowercase-hex SHA-256 of the cart archive container (fzerox.o2r / fzerox-jp.o2r / fzerox-pal.o2r)
+// as recorded in the completion sidecar (key `archive_sha256`, authored by ensureCartArchive/
+// runExtraction). Empty if the sidecar is missing or the key is unset. First-boot checks an installed
+// cart archive against this before accepting it as the ROM input once the original .z64 is gone.
+// Mirrors the disk-archive helper above.
 std::string GdxExtractRecordedCartArchiveSha256(const char* dataDir);
+
+// ROM profile recorded in the completion sidecar (key `profile`, authored by ensureCartArchive/
+// runExtraction). Empty if the sidecar is missing or the key is unset. Returns "us/rev0", "jp/rev0",
+// or "pal/rev0" when set; first-boot uses this to choose the expected cart archive name.
+std::string GdxExtractRecordedCartProfile(const char* dataDir);
 
 // Lowercase-hex SHA-256 of the IPL archive container (n64ddipl.o2r) as recorded in the completion
 // sidecar (key `ipl_archive_sha256`, authored by ensureIplArchive). Empty if the sidecar is missing or
@@ -200,9 +206,9 @@ std::string GdxExtractRecordedIplArchiveSha256(const char* dataDir);
 // generated .o2r is touched; user media (ROM/disk/IPL) is never affected. True when a file was
 // quarantined, false when there was nothing to quarantine or the rename failed.
 //
-// `archiveName` MUST be one of the three port-generated names (fzerox.o2r, n64ddipl.o2r,
-// fzerox-disk.o2r); anything else is refused and logged. This must never become a way to rename an
-// arbitrary user file.
+// `archiveName` MUST be one of the port-generated cart archive names (fzerox.o2r, fzerox-jp.o2r,
+// fzerox-pal.o2r), n64ddipl.o2r, or fzerox-disk.o2r; anything else is refused and logged. This must
+// never become a way to rename an arbitrary user file.
 bool GdxExtractQuarantineArchive(const char* dataDir, const char* archiveName);
 
 // ── Per-boot archive validation latch ────────────────────────────────────────────────────────────
