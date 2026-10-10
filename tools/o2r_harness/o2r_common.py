@@ -33,6 +33,11 @@ VERSION_ENTRY_LEN = 5                  # 1 endianness byte + 4 CRC bytes
 # 4240-records / 664-duplicates / 3576-unique split described the pre-2026-07-18 archive (Windows
 # double-emit bug) and no longer applies after the Torch parity fix.
 #
+# 3611 = 3610 prior census + 1 course_strings record (2026-08-29). FZX:COURSE_STRINGS extracts
+# the per-course track names, subtitles and BGM assignment, which are compiled C data no other
+# recipe reaches, so a ROM hack could not carry its own. Strictly additive: one record added,
+# none removed, no existing payload altered. See decomp/assets/yaml/us/rev0/course_strings.yaml.
+#
 # 3610 = 3608 prior census + 2 rsp_blob families (aspmain_text, aspmain_data; 2026-08-08). The
 # RSP microcode moved out of the source tree (it is Nintendo-copyrighted) into the
 # locally-generated archive; strictly additive, no existing payload touched.
@@ -52,7 +57,7 @@ VERSION_ENTRY_LEN = 5                  # 1 endianness byte + 4 CRC bytes
 # segment offsets. Blessed only after checking the shape of the change: the new archive is a
 # strict SUPERSET of the old one -- 4 records added, 0 removed, 0 payloads altered, each new
 # record a real 656-byte texture rather than the blank a half-populated family would produce.
-EXPECTED_ENTRY_COUNT = 3610
+EXPECTED_ENTRY_COUNT = 3611
 
 # Macro names are a frozen code-level contract with agent 1-B (C3).
 MACRO_SHA256 = "GDX_O2R_EXPECTED_SHA256"
@@ -147,6 +152,36 @@ def read_records(path):
                 )
             )
     return records
+
+
+def content_digest(path):
+    """SHA-256 over the archive's CONTENTS, independent of the order they are stored in.
+
+    The archive SHA-256 is the strongest gate there is, but it only holds where the
+    extractor was built the same way. Torch writes some entries by iterating an
+    unordered_map (Companion::gCompanionFiles), whose traversal order is
+    implementation-defined, so a future standard-library/toolchain combination may
+    lay the same assets down in a different order. Current desktop and pinned Android
+    builds are both byte-reproducible and use the stronger container SHA-256 gate.
+
+    This is the order-independent equivalent: one record per central-directory entry,
+    carrying the name, the CRC-32 the zip already stores, and the uncompressed size,
+    sorted so the storage order cannot matter. It proves the same thing the byte gate
+    proved about CONTENT and completeness -- every expected asset is present and its
+    bytes hash to the expected value -- and drops only the claim about container layout,
+    which is the part that legitimately varies.
+
+    Dup-inclusive, like record_count: sorting a list of formatted records keeps
+    duplicates rather than collapsing them.
+    """
+    lines = sorted(
+        ("%s\n%08x\n%d\n" % (e.name, e.crc, e.size)).encode("utf-8")
+        for e in read_records(path)
+    )
+    h = hashlib.sha256()
+    for line in lines:
+        h.update(line)
+    return h.hexdigest()
 
 
 def record_count(path):

@@ -68,6 +68,7 @@
 #include <unordered_set>
 #include <vector>
 
+
 using namespace gdxmenu;
 
 // From port/input_bridge.c: nonzero while an on-track race is live. Declared here rather than
@@ -901,6 +902,8 @@ void GdxMenu::RegisterMenu() {
                     "workshop tools asset dump dd save 64dd sidecar");
     AddSidebarEntry("Workshop", "Content Library", 1,
                     "workshop content library export import gdxc track ghosts");
+    AddSidebarEntry("Workshop", "ROM Hacks", 1,
+                    "workshop rom hacks romhacks hack mods o2r patched archive save isolation");
 
     AddSidebarEntry("Online", "Overview", 1,
                     "online discord rich presence status privacy leaderboard ghost upload download netplay spectator");
@@ -1861,6 +1864,18 @@ void GdxMenu::RegisterMenu() {
                   .ModifiedMarker()
                   .SearchTerms("strobe epilepsy photosensitive blink editor accessibility"));
 
+    AddWidget("Enhancements", "Course Edit & Machine", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Extended course height (experimental)",
+                          .cVar = "gEnhancements.CourseEdit.ExtendedHeight",
+                          .type = GdxUI::WIDGET_CVAR_CHECKBOX }
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(false).Tooltip(
+                      "Raises the Course Edit height ceiling from 5,000 to 30,000.\n"
+                      "Tracks above 5,000 will not load on real hardware or in other\n"
+                      "Expansion Kit tools. Experimental: extreme-height camera,\n"
+                      "collision, fog, and chunk-budget behavior still needs validation."))
+                  .ModifiedMarker()
+                  .SearchTerms("course edit extended height altitude experimental limit 30000"));
+
     // Gates the PORT branch in course_edit/19C470.c func_xk2_800EB3B4: B inside the
     // OFFICIAL course list reopens the parent picker instead of closing the File menu.
     AddWidget("Enhancements", "Course Edit & Machine", SECTION_COLUMN_1,
@@ -2180,6 +2195,24 @@ void GdxMenu::RegisterMenu() {
                                          "Cup, and export/import the whole cup as one bundle.");
                   })
                   .SearchTerms("content library export gdxc track machine course share"));
+
+    // ═════════════════════════════════════════════════════════════════════════════════════════
+    // WORKSHOP -> ROM Hacks
+    // GdxHackModsWindow is registered in main.cpp at boot under the name "ROM Hacks"; this page
+    // embeds it, or pops it out. Deliberately its own page rather than a row inside Mods: a hack
+    // replaces the game's content, a texture pack layers over it, and mixing the two in one list
+    // invites exactly the mistake the single-selection design exists to prevent.
+    // ═════════════════════════════════════════════════════════════════════════════════════════
+    AddWidget("Workshop", "ROM Hacks", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "ROM Hacks", .type = GdxUI::WIDGET_CUSTOM }
+                  .CustomFunction([this](WidgetInfo&) {
+                      DrawToolWindowPage("ROM Hacks",
+                                         "Run a ROM hack packaged as an .o2r archive from "
+                                         "mods/~romhacks/. One hack at a time, and it gets its own "
+                                         "save file, so stock progress is never touched. A change "
+                                         "here takes effect on the next launch.");
+                  })
+                  .SearchTerms("rom hack romhacks o2r archive mod save isolation stock restart"));
 
     // ═════════════════════════════════════════════════════════════════════════════════════════
     // ONLINE -> Overview
