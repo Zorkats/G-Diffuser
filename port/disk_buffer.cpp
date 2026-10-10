@@ -4,6 +4,11 @@
 #include "rom_buffer.h"
 #include "gdx_extract_launch.h"
 #include "gen/EkTranslatedOverrides.h"
+
+#ifdef __ANDROID__
+#include "android/gdx_android_paths.h"
+#endif
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -283,6 +288,21 @@ static void gdx_exe_dir(char* outDir, size_t outSize) {
     }
     slash[1] = L'\0';
     WideCharToMultiByte(CP_UTF8, 0, exePath, -1, outDir, static_cast<int>(outSize), nullptr, nullptr);
+#elif defined(__ANDROID__)
+    // /proc/self/exe names the zygote here, not this library. The app's files directory is where
+    // the launcher installed the disk image. See port/android/gdx_android_paths.h.
+    //
+    // Written straight into outDir, trailing separator included, like both other branches leave
+    // it. snprintf truncates rather than overruns, and a truncated directory would send the
+    // loader looking somewhere real but wrong, so a path that does not fit leaves outDir alone —
+    // the same "found nothing" the POSIX branch's early returns produce.
+    {
+        const int written = std::snprintf(outDir, outSize, "%s/", gdx_android_files_dir());
+        if (written < 0 || static_cast<size_t>(written) >= outSize) {
+            outDir[0] = '\0';
+            return;
+        }
+    }
 #else
     char exePath[4096];
 #ifdef __APPLE__

@@ -156,6 +156,10 @@ static bool gdx_sram_path(char* outPath, size_t outCap) {
     // Older POSIX builds wrote exe-relative <exedir>/saves/fzerox.sav. Migrate that in, but
     // ONLY when no CWD-relative save exists yet, so an already-migrated (or freshly written)
     // save is never clobbered.
+    // Android never had that layout -- the port arrived there after the CWD-relative saves/ folder
+    // was already the only one -- so there is nothing to migrate, and /proc/self/exe would name
+    // the zygote rather than anything of ours.
+#ifndef __ANDROID__
     if (access(outPath, F_OK) != 0) {
         char exePath[4096];
         bool haveExePath = false;
@@ -196,9 +200,10 @@ static bool gdx_sram_path(char* outPath, size_t outCap) {
             }
         }
     }
+#endif
     return true;
 }
-#endif
+#endif // _WIN32 / POSIX gdx_sram_path
 
 void gdx_sram_init(void) {
     if (s_initialized) {

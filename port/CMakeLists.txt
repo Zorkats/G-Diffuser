@@ -188,9 +188,19 @@ if(GDX_EXPANSION_KIT)
 endif()
 
 # Fiber backend for the scheduler (n64_sched.c -> gdx_fiber.h): Win32 fibers on Windows,
-# POSIX ucontext elsewhere.
+# POSIX ucontext on desktop UNIX, and a hand-written context switch on Android.
+#
+# Android is not a third flavour of taste: bionic ships <ucontext.h> as an alias for the
+# mcontext TYPES only and implements none of getcontext/makecontext/swapcontext, so the POSIX
+# backend does not link there at all. gdx_fiber_asm.c is the ucontext backend with the one
+# missing primitive supplied by gdx_fiber_switch.S; everything above it is the same.
 if(WIN32)
     target_sources(gdiffuser_game PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/gdx_fiber_win32.c")
+elseif(ANDROID)
+    enable_language(ASM)
+    target_sources(gdiffuser_game PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/gdx_fiber_asm.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/gdx_fiber_switch.S")
 else()
     target_sources(gdiffuser_game PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/gdx_fiber_ucontext.c")
 endif()
@@ -241,6 +251,18 @@ else()
         -Wno-error=implicit-function-declaration)
 endif()
 
+if(ANDROID)
+    # The NDK compiles everything with -D_FORTIFY_SOURCE=2, and Bionic's fortified bcopy/bzero
+    # are __overloadable functions rather than plain declarations. That turns the decomp's habit
+    # of handing them a raw N64 address -- an integer where a pointer is expected -- from the
+    # warning it is under glibc into "no matching function", which no -Wno-error can reach,
+    # because overload resolution failing is not a warning.
+    #
+    # Only the decompiled game is compiled this way. The port's own C++ keeps the hardening; it
+    # is modern code that never had the habit.
+    target_compile_options(gdiffuser_game PRIVATE -U_FORTIFY_SOURCE)
+endif()
+
 # cxd4 RSP interpreter (LLE audio), vendored under rsp/cxd4 (CC0). Static lib so its C89 sources
 # get isolated quiet flags and its module-level globals stay out of the game TUs. Driven by
 # gdx_audio_lle.c via gdx_rsp_driver.h. gdx_rsp_boot_tests compiles its own copy, so this lib
@@ -280,10 +302,25 @@ add_subdirectory(third_party/lua EXCLUDE_FROM_ALL)
 # Ogg Vorbis, FLAC and WAV decoders for the streamed BGM replacement (gdx_music_stream.cpp).
 add_subdirectory(third_party/music_decoders EXCLUDE_FROM_ALL)
 
-# gdx-update, the self-update helper both game executables ship beside them.
-add_subdirectory(updater)
+# The standalone updater is shipped beside desktop game executables, not in the Android APK.
+if(NOT ANDROID)
+    add_subdirectory(updater)
+endif()
 
-add_executable(G-Diffuser
+# On Android there is no executable: SDLActivity dlopens the game as a shared library, and
+# "main" is the name its Java glue looks for by default (getLibraries() in MainActivity.kt).
+# SDL's own <SDL_main.h> then renames our main() to SDL_main(), which is what libSDL2.so calls
+# once it has a window -- so the entry point in main.cpp needs no Android branch of its own.
+macro(gdx_add_main_target name)
+    if(ANDROID)
+        add_library(${name} SHARED ${ARGN})
+        set_target_properties(${name} PROPERTIES OUTPUT_NAME "main")
+    else()
+        add_executable(${name} ${ARGN})
+    endif()
+endmacro()
+
+gdx_add_main_target(G-Diffuser
     main.cpp
     gdx_discord.cpp
     gdx_gui.cpp
@@ -428,6 +465,14 @@ if(WIN32)
         target_link_options(G-Diffuser PRIVATE "/MAP")
     endif()
 endif()
+
+# ── Desktop-only deployment + the standalone extractor ───────────────────────────────────────────
+# Everything from here to the include directories below stages files NEXT TO THE EXECUTABLE, which
+# is not a place that exists on Android: the APK has no writable install directory, and Gradle
+# assembles the same set into the app's own external files directory instead
+# (android/app/build.gradle.kts, unpacked on first run by GameAssets.kt). The gdx-extract child
+# process goes with it -- see the Android extraction note further down.
+if(NOT ANDROID)
 
 # Scrubs a game-derived icon that older build trees still carry; harmless on a clean tree.
 add_custom_command(TARGET G-Diffuser POST_BUILD
@@ -586,6 +631,52 @@ add_custom_command(TARGET G-Diffuser POST_BUILD
             --ek-yaml-dir "${CMAKE_SOURCE_DIR}/fzerox-expansion-kit/assets/yaml/jp"
     VERBATIM)
 
+else()
+    # ── Android: the extractor is linked in, not spawned from disk ───────────────────────────────
+    # An APK cannot ship a second executable: native code is loaded from the app's library
+    # directory as shared objects, and W^X has blocked exec() out of app-writable storage since
+    # API 29. Torch is therefore compiled INTO libmain.so and reached through the entry point in
+    # port/android/gdx_extract_entry.cpp.
+    #
+    # The launcher in port/gdx_extract_launch.cpp still forks for it. That is deliberate: the
+    # fork keeps the exit code, the stdout pipe the progress parser reads, and -- the reason it
+    # matters on a phone -- the peak. Extraction holds the ROM and every decoded asset at once,
+    # and a child that _exit()s hands all of it straight back instead of leaving the allocator
+    # sitting on the arena for the rest of the session. What it drops is the exec(), and with it
+    # the need for a file anyone can run.
+    #
+    # USE_STANDALONE=OFF builds Torch as a static library and makes it resolve spdlog through
+    # find_package, which lands on the copy libultraship already fetched -- so the ODR/version
+    # clash that put the desktop extractor out-of-tree does not arise here.
+    set(USE_STANDALONE OFF CACHE BOOL "" FORCE)
+    set(BUILD_STORMLIB OFF CACHE BOOL "" FORCE)
+    # Byte-identical archives for an identical ROM + recipes, matching the desktop extractor:
+    # the version-CRC gate in main.cpp compares against the same golden.
+    set(GDX_DETERMINISTIC ON CACHE BOOL "" FORCE)
+    add_subdirectory("${CMAKE_SOURCE_DIR}/torch" "${CMAKE_BINARY_DIR}/torch" EXCLUDE_FROM_ALL)
+    target_link_libraries(G-Diffuser PRIVATE torch)
+
+    # Torch's deterministic archive contract was recorded by the desktop extractor. Two otherwise
+    # legal ARM/Clang choices change the bytes of its FZX:COURSE exporter:
+    #
+    #   * AArch64 defaults plain `char` to unsigned, while the exporter passes filename chars to an
+    #     overloaded BinaryWriter and the desktop ABI sign-extends bytes >= 0x80.
+    #   * Clang contracts the checksum's multiply/add expression on ARM, producing a one-unit
+    #     rounding difference from the reference calculation for many stock courses.
+    #
+    # The affected course_data family is currently inert, but it is part of the golden content
+    # digest and silently exempting it would weaken the complete-archive gate. Make the linked
+    # extractor reproduce the established format instead. Keep these options on Torch only: the
+    # game has its own floating-point matching contract and must not inherit extractor flags.
+    target_compile_options(torch PRIVATE -fsigned-char -ffp-contract=off)
+
+    target_sources(G-Diffuser PRIVATE
+        android/gdx_extract_entry.cpp
+        android/AndroidBridge.cpp      # JNI: on-screen pad, menu state, document picker, setup
+        android/gdx_android_paths.cpp) # the app's files directory, for the /proc/self/exe callers
+    target_include_directories(G-Diffuser PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/android")
+endif()
+
 target_include_directories(G-Diffuser PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"   # for "resource/ResourceFactories.h"
     "${DECOMP}/include"
@@ -594,13 +685,15 @@ target_include_directories(G-Diffuser PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/third_party/discord-rpc/thirdparty"  # rapidjson for gdx_update.cpp
 )
 
-# Ship gdx-update beside the game; the release workflows build only the G-Diffuser target.
-add_dependencies(G-Diffuser gdx-update)
-add_custom_command(TARGET G-Diffuser POST_BUILD
-    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-            "$<TARGET_FILE:gdx-update>"
-            "$<TARGET_FILE_DIR:G-Diffuser>/gdx-update${CMAKE_EXECUTABLE_SUFFIX}"
-    VERBATIM)
+# Ship gdx-update beside desktop builds; Android has no install directory or helper executable.
+if(NOT ANDROID)
+    add_dependencies(G-Diffuser gdx-update)
+    add_custom_command(TARGET G-Diffuser POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "$<TARGET_FILE:gdx-update>"
+                "$<TARGET_FILE_DIR:G-Diffuser>/gdx-update${CMAKE_EXECUTABLE_SUFFIX}"
+        VERBATIM)
+endif()
 
 target_link_libraries(G-Diffuser PRIVATE cxd4_rsp)
 target_link_libraries(G-Diffuser PRIVATE discord-rpc)
@@ -611,6 +704,31 @@ if(WIN32)
     # user32: MessageBox; Comdlg32: ROM picker; Comctl32: extraction progress marquee;
     # winhttp: the update check and download.
     target_link_libraries(G-Diffuser PRIVATE user32 Comdlg32 Comctl32 winhttp)
+elseif(ANDROID)
+    include(FetchContent)
+    # Ogg/Vorbis resolve to the copies fetched in cmake/dependencies/android.cmake; the rest are
+    # NDK system libraries. No Threads:: here — pthreads is inside Bionic's libc, and there is no
+    # separate libdl to link either.
+    find_package(Ogg REQUIRED)
+    find_package(Vorbis REQUIRED)
+    target_link_libraries(G-Diffuser PRIVATE
+        Ogg::ogg
+        Vorbis::vorbis
+        Vorbis::vorbisenc
+        Vorbis::vorbisfile
+        GLESv3
+        EGL
+        android    # SDL_AndroidGetActivity / the JNI attach helpers
+        log)       # __android_log_print, which is where port logging surfaces on a device
+
+    # libultraship links libzip PRIVATE, so its include directories stop there — but
+    # O2rArchive.h includes <zip.h> and the port includes that header, so it needs them too.
+    # Every other platform picks zip.h up from a system include path and never notices.
+    # zipconf.h is generated, hence the binary dir.
+    FetchContent_GetProperties(libzip)
+    if(libzip_SOURCE_DIR)
+        target_include_directories(G-Diffuser PRIVATE ${libzip_SOURCE_DIR}/lib ${libzip_BINARY_DIR})
+    endif()
 else()
     # pthread for the fiber backend + audio thread; dl for dladdr in n64_gfx_bridge.cpp
     # (needed on older glibc, harmless on newer).
@@ -666,6 +784,12 @@ if(TARGET libultraship)
         "${CMAKE_SOURCE_DIR}/libultraship/include"
     )
 endif()
+
+# ── Unit tests (host platforms only) ─────────────────────────────────────────────────────────────
+# Every target below is an executable meant to be RUN by whoever built it. Cross-compiled for a
+# phone they would build fine and could never be executed, so Android skips them: `ctest` there is
+# a host concern, and the APK has no use for them.
+if(NOT ANDROID)
 
 # DSP unit-test harness: compiles n64_audio_hle.c UNMODIFIED and drives it black-box through
 # gdx_audio_hle_run (design rationale in dsp_tests.c's header). Stand-ins for the two
@@ -954,7 +1078,6 @@ if(MSVC)
 elseif(GDX_PORT_WARN_FLAGS)
     target_compile_options(gdx_background_skyline_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
 endif()
-
 # Course-strings test: compiles gdx_course_strings.c UNMODIFIED and drives both halves. The
 # test TU supplies the four decomp tables and the archive reader as stubs, so apply() is
 # exercised end to end against synthesized payloads with no archive and no ROM in sight.
@@ -1042,6 +1165,8 @@ else()
     target_compile_options(gdx_rsp_boot_tests PRIVATE -w)
 endif()
 
+endif() # NOT ANDROID (unit tests)
+
 # EXPERIMENTAL second binary — G-Diffuser-JP (VERSION_JP profile).
 # The port is US-only in three compile-time layers (binding tables, golden constants, VERSION_JP
 # decomp branches), so US+JP cannot share one executable; the frozen decision
@@ -1051,7 +1176,9 @@ endif()
 # are US-EK placeholders, and gen/LinkStubs.jp.c needs regenerating from a JP link log.
 option(GDX_BUILD_JP "Build the EXPERIMENTAL second binary G-Diffuser-JP (VERSION_JP profile)" OFF)
 
-if(GDX_BUILD_JP)
+# NOT ANDROID: the second binary is a desktop experiment, and its deployment steps stage the
+# extractor and recipes next to an executable that does not exist there.
+if(GDX_BUILD_JP AND NOT ANDROID)
     message(STATUS "G-Diffuser: GDX_BUILD_JP=ON — configuring EXPERIMENTAL VERSION_JP target G-Diffuser-JP.")
 
     # Mirror of gdiffuser_game with the JP profile: only the defines and the generated

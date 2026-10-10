@@ -3,6 +3,9 @@
 #ifdef __APPLE__
 #include "gdx_macos_ui.h"
 #endif
+#ifdef __ANDROID__
+#include "android/gdx_android_paths.h"
+#endif
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -187,7 +190,16 @@ static void load_rom_next_to_exe(void) {
     // The native file picker is Windows-only (macOS adds NSOpenPanel below), so POSIX leans
     // harder on this probe; the CLI arg and FZEROX_ROM fallbacks in gdx_init_rom are already portable.
     char exePath[4096];
-#ifdef __APPLE__
+#ifdef __ANDROID__
+    // /proc/self/exe names the zygote here (the game is a loaded library, not the program the
+    // kernel started), so the probe would look for the ROM inside /system/bin. The app's files
+    // directory is where the launcher put it. See port/android/gdx_android_paths.h.
+    const char* filesDir = gdx_android_files_dir();
+    if (filesDir == nullptr || filesDir[0] == '\0') {
+        return;
+    }
+    std::snprintf(exePath, sizeof(exePath), "%s/", filesDir);
+#elif defined(__APPLE__)
     {
         uint32_t bufSize = sizeof(exePath);
         if (_NSGetExecutablePath(exePath, &bufSize) != 0) {
@@ -210,6 +222,7 @@ static void load_rom_next_to_exe(void) {
         return;
     }
     slash[1] = '\0'; // keep trailing separator
+#endif
 
     const char* candidates[] = {
         "baserom.us.rev0.z64",

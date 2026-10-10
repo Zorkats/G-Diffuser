@@ -1,0 +1,317 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The on-screen N64 pad, laid out for F-Zero X.
+
+    A racer does not use the controller evenly, and the layout follows that rather than
+    reproducing the pad's own geometry. Four inputs are held or hit constantly — accelerate,
+    brake, boost, and the two side attacks — so those get the large targets in the corners the
+    thumbs already rest in. The C diamond only changes the camera and the d-pad only moves
+    through menus and the Course Edit cursor, so both are small and out of the way of the
+    others: a mis-hit there costs a race.
+
+    Layout, left to right:
+      left edge    L (top), d-pad, and the analog stick under the left thumb
+      centre       Menu (top), Start beside it, Mods when the in-game menu is open
+      right edge   R (top), Z under it, the C diamond inboard, B and A in the thumb corner
+
+    Every cluster hangs off a single anchored member rather than constraining its members to
+    each other in a ring: a ring has no absolute position and gives ConstraintLayout a circular
+    dependency it cannot resolve, which collapses the whole group against the parent's left edge.
+
+    Everything drives a virtual SDL pad through MainActivity; see ControllerButtons.kt for which
+    SDL input each id ends up on.
+-->
+<androidx.constraintlayout.widget.ConstraintLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@android:color/transparent"
+    android:fitsSystemWindows="true">
+
+    <!-- Everything the Hide button collapses; the toggle itself stays outside. -->
+    <androidx.constraintlayout.widget.ConstraintLayout
+        android:id="@+id/button_group"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent">
+
+        <!-- ============================ left ============================ -->
+
+        <!-- Left side attack. Wide, because it is held mid-corner alongside steering. -->
+        <Button
+            android:id="@+id/buttonL"
+            android:layout_width="110dp"
+            android:layout_height="52dp"
+            android:layout_marginStart="16dp"
+            android:layout_marginTop="16dp"
+            android:background="@drawable/ic_trigger_button_left"
+            android:text="L"
+            android:textColor="#25FFFFFF"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toTopOf="parent" />
+
+        <!--
+            Menus and the Course Edit cursor only, so it sits above the stick where a stray
+            thumb will not reach it mid-race. dpadCross is the artwork; the four buttons are
+            transparent targets laid over it.
+        -->
+        <ImageView
+            android:id="@+id/dpadCross"
+            android:layout_width="132dp"
+            android:layout_height="132dp"
+            android:layout_marginStart="24dp"
+            android:layout_marginTop="12dp"
+            android:contentDescription="@string/dpad_description"
+            android:src="@drawable/ic_cross"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@id/buttonL" />
+
+        <Button
+            android:id="@+id/buttonDpadUp"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:background="@android:color/transparent"
+            app:layout_constraintEnd_toEndOf="@id/dpadCross"
+            app:layout_constraintStart_toStartOf="@id/dpadCross"
+            app:layout_constraintTop_toTopOf="@id/dpadCross" />
+
+        <Button
+            android:id="@+id/buttonDpadDown"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:background="@android:color/transparent"
+            app:layout_constraintBottom_toBottomOf="@id/dpadCross"
+            app:layout_constraintEnd_toEndOf="@id/dpadCross"
+            app:layout_constraintStart_toStartOf="@id/dpadCross" />
+
+        <Button
+            android:id="@+id/buttonDpadLeft"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:background="@android:color/transparent"
+            app:layout_constraintBottom_toBottomOf="@id/dpadCross"
+            app:layout_constraintStart_toStartOf="@id/dpadCross"
+            app:layout_constraintTop_toTopOf="@id/dpadCross" />
+
+        <Button
+            android:id="@+id/buttonDpadRight"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:background="@android:color/transparent"
+            app:layout_constraintBottom_toBottomOf="@id/dpadCross"
+            app:layout_constraintEnd_toEndOf="@id/dpadCross"
+            app:layout_constraintTop_toTopOf="@id/dpadCross" />
+
+        <!--
+            Steering, and the only control that is never let go of. Bottom-left corner, and the
+            largest target on screen: F-Zero X asks for small sustained corrections rather than
+            flicks, and a small stick turns those into overshoot.
+        -->
+        <FrameLayout
+            android:id="@+id/left_joystick"
+            android:layout_width="180dp"
+            android:layout_height="180dp"
+            android:layout_marginStart="20dp"
+            android:layout_marginBottom="20dp"
+            android:background="@drawable/ic_stick"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintStart_toStartOf="parent">
+
+            <ImageView
+                android:id="@+id/left_joystick_knob"
+                android:layout_width="72dp"
+                android:layout_height="72dp"
+                android:layout_gravity="center"
+                android:contentDescription="@string/stick_description"
+                android:src="@drawable/ic_button" />
+        </FrameLayout>
+
+        <!-- =========================== centre =========================== -->
+
+        <!--
+            Constrained to this group's own parent, not to the Menu button it sits under. Menu
+            lives in the OUTER layout so it survives the pad being hidden, and ConstraintLayout
+            only resolves constraints between siblings — pointing at it from in here leaves this
+            button unpositioned, which collapses it against the left edge.
+
+            The top margin is what clears the Menu row above it.
+        -->
+        <Button
+            android:id="@+id/buttonStart"
+            android:layout_width="70dp"
+            android:layout_height="35dp"
+            android:layout_marginTop="64dp"
+            android:background="@drawable/ic_rectangular_button"
+            android:text="@string/start_button"
+            android:textColor="#25FFFFFF"
+            android:textSize="12sp"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toTopOf="parent" />
+
+        <!-- ============================ right ============================ -->
+
+        <!-- Right side attack, mirroring L. -->
+        <Button
+            android:id="@+id/buttonR"
+            android:layout_width="110dp"
+            android:layout_height="52dp"
+            android:layout_marginTop="16dp"
+            android:layout_marginEnd="16dp"
+            android:background="@drawable/ic_trigger_button_right"
+            android:text="R"
+            android:textColor="#25FFFFFF"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintTop_toTopOf="parent" />
+
+        <!--
+            Boost. Under R rather than beside A: it is tapped once a lap at a moment chosen in
+            advance, so it wants a target the thumb travels to deliberately, well clear of the
+            accelerate button it must never be mistaken for.
+        -->
+        <Button
+            android:id="@+id/buttonZ"
+            android:layout_width="110dp"
+            android:layout_height="52dp"
+            android:layout_marginTop="12dp"
+            android:layout_marginEnd="16dp"
+            android:background="@drawable/ic_trigger_button_right"
+            android:text="Z"
+            android:textColor="#25FFFFFF"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintTop_toBottomOf="@id/buttonR" />
+
+        <!--
+            Accelerate: held for the whole race, so it takes the bottom-right corner where the
+            thumb rests without reaching.
+        -->
+        <Button
+            android:id="@+id/buttonA"
+            android:layout_width="96dp"
+            android:layout_height="96dp"
+            android:layout_marginEnd="24dp"
+            android:layout_marginBottom="24dp"
+            android:background="@drawable/ic_button"
+            android:text="A"
+            android:textColor="#25FFFFFF"
+            android:textSize="20sp"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintEnd_toEndOf="parent" />
+
+        <!-- Brake, inboard of A so the same thumb can roll onto it without lifting. -->
+        <Button
+            android:id="@+id/buttonB"
+            android:layout_width="76dp"
+            android:layout_height="76dp"
+            android:layout_marginEnd="12dp"
+            android:background="@drawable/ic_button"
+            android:text="B"
+            android:textColor="#25FFFFFF"
+            android:textSize="18sp"
+            app:layout_constraintBottom_toBottomOf="@id/buttonA"
+            app:layout_constraintEnd_toStartOf="@id/buttonA" />
+
+        <!--
+            Camera views. Small and above the driving buttons: useful between races and in
+            replays, never mid-corner. CDown is the anchor the rest of the diamond hangs off.
+        -->
+        <Button
+            android:id="@+id/buttonCDown"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_marginEnd="44dp"
+            android:layout_marginBottom="24dp"
+            android:background="@drawable/ic_button"
+            android:text="@string/c_button"
+            android:textColor="#25FFFFFF"
+            android:textSize="10sp"
+            app:layout_constraintBottom_toTopOf="@id/buttonB"
+            app:layout_constraintEnd_toStartOf="@id/buttonB" />
+
+        <Button
+            android:id="@+id/buttonCUp"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_marginBottom="40dp"
+            android:background="@drawable/ic_button"
+            android:text="@string/c_button"
+            android:textColor="#25FFFFFF"
+            android:textSize="10sp"
+            app:layout_constraintBottom_toTopOf="@id/buttonCDown"
+            app:layout_constraintEnd_toEndOf="@id/buttonCDown"
+            app:layout_constraintStart_toStartOf="@id/buttonCDown" />
+
+        <Button
+            android:id="@+id/buttonCLeft"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:background="@drawable/ic_button"
+            android:text="@string/c_button"
+            android:textColor="#25FFFFFF"
+            android:textSize="10sp"
+            app:layout_constraintBottom_toTopOf="@id/buttonCDown"
+            app:layout_constraintEnd_toStartOf="@id/buttonCDown"
+            app:layout_constraintTop_toBottomOf="@id/buttonCUp" />
+
+        <Button
+            android:id="@+id/buttonCRight"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:background="@drawable/ic_button"
+            android:text="@string/c_button"
+            android:textColor="#25FFFFFF"
+            android:textSize="10sp"
+            app:layout_constraintBottom_toTopOf="@id/buttonCDown"
+            app:layout_constraintStart_toEndOf="@id/buttonCDown"
+            app:layout_constraintTop_toBottomOf="@id/buttonCUp" />
+    </androidx.constraintlayout.widget.ConstraintLayout>
+
+    <!--
+        Opens libultraship's menu. Outside button_group, because the pad is hidden while the
+        menu is up and this is what closes it again.
+    -->
+    <Button
+        android:id="@+id/buttonMenu"
+        android:layout_width="60dp"
+        android:layout_height="35dp"
+        android:layout_marginTop="20dp"
+        android:layout_marginEnd="4dp"
+        android:background="@drawable/ic_rectangular_button"
+        android:text="@string/menu_button"
+        android:textColor="#25FFFFFF"
+        android:textSize="12sp"
+        app:layout_constraintEnd_toStartOf="@id/buttonMods"
+        app:layout_constraintHorizontal_chainStyle="packed"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <!-- Only while the in-game menu is open; MainActivity flips its visibility. -->
+    <Button
+        android:id="@+id/buttonMods"
+        android:layout_width="60dp"
+        android:layout_height="35dp"
+        android:background="@drawable/ic_rectangular_button"
+        android:text="@string/mods_button"
+        android:textColor="#25FFFFFF"
+        android:textSize="12sp"
+        android:visibility="gone"
+        app:layout_constraintBottom_toBottomOf="@id/buttonMenu"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toEndOf="@id/buttonMenu"
+        app:layout_constraintTop_toTopOf="@id/buttonMenu" />
+
+    <!--
+        Outside button_group so it survives hiding the controls. Left of centre, clear of both
+        trigger buttons and of the Menu/Start row.
+    -->
+    <Button
+        android:id="@+id/buttonToggle"
+        android:layout_width="30dp"
+        android:layout_height="30dp"
+        android:layout_marginStart="140dp"
+        android:layout_marginTop="22dp"
+        android:background="@drawable/ic_show"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
+</androidx.constraintlayout.widget.ConstraintLayout>

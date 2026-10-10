@@ -2556,7 +2556,6 @@ void GdxMenu::RegisterMenu() {
                       "Ctrl+Y redoes with or without the panel."))
                   .ModifiedMarker()
                   .SearchTerms("course edit undo redo history backlog"));
-
     // Gates the PORT branch in course_edit/19C470.c func_xk2_800EB3B4: B inside the
     // OFFICIAL course list reopens the parent picker instead of closing the File menu.
     AddWidget("Enhancements", "Course Edit & Machine", SECTION_COLUMN_1,
