@@ -1,12 +1,12 @@
 [submodule "libultraship"]
 	path = libultraship
-	url = https://github.com/Zorkats/libultraship.git
+	url = https://github.com/izzy2lost/libultraship.git
 [submodule "torch"]
 	path = torch
 	url = https://github.com/Zorkats/Torch.git
 [submodule "decomp"]
 	path = decomp
-	url = https://github.com/Zorkats/fzerox.git
+	url = https://github.com/izzy2lost/fzerox.git
 [submodule "fzerox-expansion-kit"]
 	path = fzerox-expansion-kit
 	url = https://github.com/Zorkats/fzerox-expansion-kit.git

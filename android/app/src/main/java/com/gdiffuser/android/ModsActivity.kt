@@ -31,6 +31,7 @@ class ModsActivity : ComponentActivity() {
 
     private lateinit var listContainer: LinearLayout
     private lateinit var emptyLabel: TextView
+    private lateinit var texturePackNotice: TextView
     private var dirty = false
 
     private val importArchives =
@@ -55,6 +56,11 @@ class ModsActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         buildUi()
+    }
+
+    /** Also the first fill. Coming back from the game, the switch may have been flipped in the Workshop menu. */
+    override fun onResume() {
+        super.onResume()
         refresh()
     }
 
@@ -74,7 +80,7 @@ class ModsActivity : ComponentActivity() {
         })
 
         root.addView(TextView(this).apply {
-            text = "Import, export and delete pack files here.\n" +
+            text = "Texture packs and other mods are .o2r files. Import, export and delete them here.\n" +
                 "Turn packs on or off, and set their load order, in the game's own Workshop menu — " +
                 "it owns both, and applies them on restart."
             setTextColor(SUBTLE)
@@ -82,8 +88,20 @@ class ModsActivity : ComponentActivity() {
             setPadding(0, dp(4), 0, dp(8))
         })
 
+        // The master switch is off by default and gates every pack, so without this an import
+        // looks like it worked and then changes nothing in game.
+        texturePackNotice = TextView(this).apply {
+            text = "Texture packs are switched OFF, so no pack will load.\n" +
+                "Turn them on in game: Menu → Workshop → Mods → Enable texture packs, then restart."
+            setTextColor(WARNING)
+            setBackgroundColor(WARNING_BACKGROUND)
+            textSize = 13f
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+        }
+        root.addView(texturePackNotice)
+
         emptyLabel = TextView(this).apply {
-            text = "No packs yet.\n\nImport an .o2r — or copy one straight into\n" +
+            text = "No packs yet.\n\nImport an .o2r texture pack — or copy one straight into\n" +
                 "${GameAssets.modsDir(this@ModsActivity)}"
             setTextColor(SUBTLE)
             gravity = Gravity.CENTER
@@ -117,6 +135,7 @@ class ModsActivity : ComponentActivity() {
         val mods = ModStore.list(this)
         listContainer.removeAllViews()
         emptyLabel.visibility = if (mods.isEmpty()) View.VISIBLE else View.GONE
+        texturePackNotice.visibility = if (ModStore.texturePacksEnabled(this)) View.GONE else View.VISIBLE
 
         mods.forEachIndexed { index, mod -> listContainer.addView(row(mod, index)) }
     }
@@ -239,5 +258,7 @@ class ModsActivity : ComponentActivity() {
         val SUBTLE = Color.rgb(150, 160, 175)
         val ROW_EVEN = Color.argb(24, 255, 255, 255)
         val ROW_ODD = Color.TRANSPARENT
+        val WARNING = Color.rgb(255, 205, 110)
+        val WARNING_BACKGROUND = Color.argb(48, 255, 170, 0)
     }
 }

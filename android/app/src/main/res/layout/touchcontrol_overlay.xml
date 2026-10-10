@@ -10,9 +10,9 @@
     others: a mis-hit there costs a race.
 
     Layout, left to right:
-      left edge    L (top), d-pad, and the analog stick under the left thumb
-      centre       Menu (top), Start beside it, Mods when the in-game menu is open
-      right edge   R (top), Z under it, the C diamond inboard, B and A in the thumb corner
+      left edge    L and the d-pad beside it along the top, the analog stick under the left thumb
+      centre       Menu (top) and Mods when the in-game menu is open; Start at the bottom
+      right edge   R (top), Z under it, the C diamond above A, B and A in the thumb corner
 
     Every cluster hangs off a single anchored member rather than constraining its members to
     each other in a ring: a ring has no absolute position and gives ConstraintLayout a circular
@@ -37,13 +37,16 @@
 
         <!-- ============================ left ============================ -->
 
-        <!-- Left side attack. Wide, because it is held mid-corner alongside steering. -->
+        <!--
+            Left side attack. Wide, because it is held mid-corner alongside steering. The top
+            margin leaves the corner above it to the Hide toggle.
+        -->
         <Button
             android:id="@+id/buttonL"
             android:layout_width="110dp"
             android:layout_height="52dp"
             android:layout_marginStart="16dp"
-            android:layout_marginTop="16dp"
+            android:layout_marginTop="50dp"
             android:background="@drawable/ic_trigger_button_left"
             android:text="L"
             android:textColor="#25FFFFFF"
@@ -51,20 +54,22 @@
             app:layout_constraintTop_toTopOf="parent" />
 
         <!--
-            Menus and the Course Edit cursor only, so it sits above the stick where a stray
-            thumb will not reach it mid-race. dpadCross is the artwork; the four buttons are
-            transparent targets laid over it.
+            Menus and the Course Edit cursor only, so it sits along the top, inboard of L, where
+            a stray thumb will not reach it mid-race. Not stacked above the stick: L, the d-pad
+            and the stick together are taller than a landscape phone, so the d-pad ended up
+            overlapping the stick. dpadCross is the artwork; the four buttons are transparent
+            targets laid over it.
         -->
         <ImageView
             android:id="@+id/dpadCross"
-            android:layout_width="132dp"
-            android:layout_height="132dp"
-            android:layout_marginStart="24dp"
+            android:layout_width="120dp"
+            android:layout_height="120dp"
+            android:layout_marginStart="16dp"
             android:layout_marginTop="12dp"
             android:contentDescription="@string/dpad_description"
             android:src="@drawable/ic_cross"
-            app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintTop_toBottomOf="@id/buttonL" />
+            app:layout_constraintStart_toEndOf="@id/buttonL"
+            app:layout_constraintTop_toTopOf="parent" />
 
         <Button
             android:id="@+id/buttonDpadUp"
@@ -129,25 +134,21 @@
         <!-- =========================== centre =========================== -->
 
         <!--
-            Constrained to this group's own parent, not to the Menu button it sits under. Menu
-            lives in the OUTER layout so it survives the pad being hidden, and ConstraintLayout
-            only resolves constraints between siblings — pointing at it from in here leaves this
-            button unpositioned, which collapses it against the left edge.
-
-            The top margin is what clears the Menu row above it.
+            Bottom centre, between the two thumbs, where Start sits on the pad itself: one short
+            reach from either side to pause or confirm, and clear of the stick and the A/B pair.
         -->
         <Button
             android:id="@+id/buttonStart"
-            android:layout_width="70dp"
-            android:layout_height="35dp"
-            android:layout_marginTop="64dp"
+            android:layout_width="76dp"
+            android:layout_height="38dp"
+            android:layout_marginBottom="24dp"
             android:background="@drawable/ic_rectangular_button"
             android:text="@string/start_button"
             android:textColor="#25FFFFFF"
             android:textSize="12sp"
+            app:layout_constraintBottom_toBottomOf="parent"
             app:layout_constraintEnd_toEndOf="parent"
-            app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintTop_toTopOf="parent" />
+            app:layout_constraintStart_toStartOf="parent" />
 
         <!-- ============================ right ============================ -->
 
@@ -212,21 +213,24 @@
             app:layout_constraintEnd_toStartOf="@id/buttonA" />
 
         <!--
-            Camera views. Small and above the driving buttons: useful between races and in
-            replays, never mid-corner. CDown is the anchor the rest of the diamond hangs off.
+            Camera views. Small, and stacked in the right-hand column between Z and A rather
+            than inboard of B: useful between races and in replays, never mid-corner, so they
+            stay at the edge and leave the middle of the screen clear. Centred on A, the 120dp
+            diamond fits under Z on a ~400dp-tall landscape screen. CDown is the anchor the rest
+            of the diamond hangs off.
         -->
         <Button
             android:id="@+id/buttonCDown"
             android:layout_width="40dp"
             android:layout_height="40dp"
-            android:layout_marginEnd="44dp"
-            android:layout_marginBottom="24dp"
+            android:layout_marginBottom="8dp"
             android:background="@drawable/ic_button"
             android:text="@string/c_button"
             android:textColor="#25FFFFFF"
             android:textSize="10sp"
-            app:layout_constraintBottom_toTopOf="@id/buttonB"
-            app:layout_constraintEnd_toStartOf="@id/buttonB" />
+            app:layout_constraintBottom_toTopOf="@id/buttonA"
+            app:layout_constraintEnd_toEndOf="@id/buttonA"
+            app:layout_constraintStart_toStartOf="@id/buttonA" />
 
         <Button
             android:id="@+id/buttonCUp"
@@ -301,15 +305,16 @@
         app:layout_constraintTop_toTopOf="@id/buttonMenu" />
 
     <!--
-        Outside button_group so it survives hiding the controls. Left of centre, clear of both
-        trigger buttons and of the Menu/Start row.
+        Outside button_group so it survives hiding the controls. In the top-left corner, above
+        L, where nothing is pressed mid-race. A fixed position rather than a constraint on L,
+        since L is inside button_group and not a sibling of this button.
     -->
     <Button
         android:id="@+id/buttonToggle"
         android:layout_width="30dp"
         android:layout_height="30dp"
-        android:layout_marginStart="140dp"
-        android:layout_marginTop="22dp"
+        android:layout_marginStart="16dp"
+        android:layout_marginTop="12dp"
         android:background="@drawable/ic_show"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />

@@ -80,6 +80,16 @@ object ModStore {
     }
 
     /**
+     * The Workshop "Enable texture packs" master switch (`gEnhancements.Workshop.TexturePacks`).
+     * Off by default, and with it off main.cpp's archive scan mounts no pack at all, so an
+     * imported pack silently does nothing until it is turned on. Read here only to say so; it is
+     * left to the in-game menu to change, because the running engine owns the config file and
+     * would write its own value back over an edit made from here.
+     */
+    fun texturePacksEnabled(context: Context): Boolean =
+        readWorkshop(context)?.optInt("TexturePacks", 0)?.let { it != 0 } ?: false
+
+    /**
      * The disable list is dual-key: a pack matches by its manifest id or by its filename, either
      * with or without the extension. Only the filename is knowable from here, so both spellings
      * of it are checked and an id-keyed entry is left to the in-game menu to reflect.
@@ -88,22 +98,26 @@ object ModStore {
         name.lowercase() in disabled || name.substringBeforeLast('.').lowercase() in disabled
 
     /** Reads a comma-separated Workshop cvar out of the engine's config file. */
-    private fun readCVarList(context: Context, key: String): List<String> {
+    private fun readCVarList(context: Context, key: String): List<String> =
+        readWorkshop(context)
+            ?.optString(key)
+            .orEmpty()
+            .split(SEPARATOR)
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+
+    /** The `gEnhancements.Workshop` cvar object out of the engine's config file, if there is one. */
+    private fun readWorkshop(context: Context): JSONObject? {
         val config = File(GameAssets.gameDir(context), CONFIG_NAME)
-        if (!config.isFile) return emptyList()
+        if (!config.isFile) return null
         return try {
             JSONObject(config.readText())
                 .optJSONObject("CVars")
                 ?.optJSONObject("gEnhancements")
                 ?.optJSONObject("Workshop")
-                ?.optString(key)
-                .orEmpty()
-                .split(SEPARATOR)
-                .map { it.trim() }
-                .filter { it.isNotEmpty() }
         } catch (error: Exception) {
-            Log.w(TAG, "Could not read $key from $CONFIG_NAME", error)
-            emptyList()
+            Log.w(TAG, "Could not read $CONFIG_NAME", error)
+            null
         }
     }
 

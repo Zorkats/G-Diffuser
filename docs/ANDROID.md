@@ -104,8 +104,26 @@ The APK lands in `android/app/build/outputs/apk/debug/`.
 
 Release signing reads `android/key.properties` if it exists, and the environment
 (`KEYSTORE_FILE`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`) otherwise. With neither, a
-release build falls back to the debug key so a fresh clone still produces an installable APK.
-See `android/key.properties.example`.
+release build falls back to the debug key so a fresh clone still produces an installable APK,
+and the build prints a warning saying so: never publish that APK. See
+`android/key.properties.example`.
+
+### Making a signed release in Android Studio
+
+1. Open the `android/` folder (not the repository root) in Android Studio and let it sync.
+2. **Build → Generate Signed App Bundle or APK… → APK**.
+3. On the key screen, **Create new…** makes the keystore. Keep the `.jks` outside the
+   repository (it is gitignored either way) and back it up together with both passwords. Every
+   future update has to be signed with this same key, or it will not install over the old one.
+4. Pick the **release** variant and finish. The APK lands in `android/app/release/`.
+
+To make later command-line builds (`./gradlew assembleRelease`) use the same key, copy
+`android/key.properties.example` to `android/key.properties` and fill in the keystore path,
+alias and passwords.
+
+Before each release, raise `versionCode` (by at least 1) and set `versionName` in
+`android/app/build.gradle.kts`. Android refuses an update whose `versionCode` is not higher
+than the installed one.
 
 `.github/workflows/android.yml` builds the same debug APK on CI and checks that it really
 carries its game data before publishing the artifact.

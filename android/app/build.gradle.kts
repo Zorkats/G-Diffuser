@@ -34,6 +34,22 @@ val keystoreProperties = Properties().apply {
 val hasReleaseKeystore =
     keystoreProperties.getProperty("storeFile") != null || System.getenv("KEYSTORE_FILE") != null
 
+// Android Studio's "Generate Signed App Bundle or APK" wizard passes its key as injected
+// properties, which override the signingConfig chosen below, so that path is signed properly
+// even with no key.properties. Only a release built any other way lands on the debug key.
+val hasInjectedSigning = project.hasProperty("android.injected.signing.store.file")
+
+gradle.taskGraph.whenReady {
+    val buildsRelease = allTasks.any { it.project == project && it.name.contains("Release") }
+    if (buildsRelease && !hasReleaseKeystore && !hasInjectedSigning) {
+        logger.warn(
+            "WARNING: no release keystore (android/key.properties or KEYSTORE_FILE), so this " +
+                "release build is signed with the DEBUG key. Do not distribute it: an update " +
+                "signed with a different key cannot install over it."
+        )
+    }
+}
+
 /**
  * Bundles everything the game reads off the filesystem into one zip inside the APK.
  *
@@ -273,7 +289,7 @@ android {
         minSdk = 24
         targetSdk = 36
         versionCode = 1
-        versionName = projectVersion
+        versionName = "1.0.0"
 
         ndk {
             // arm64 only, and not merely for size. The port maps the N64's 32-bit address space
