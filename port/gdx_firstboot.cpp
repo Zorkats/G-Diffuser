@@ -25,6 +25,10 @@
 #else
 #include <cstdlib>    // getenv
 #include <unistd.h>   // readlink
+#ifdef __APPLE__
+#include <mach-o/dyld.h>   // _NSGetExecutablePath
+#include <limits.h>        // PATH_MAX
+#endif
 #endif
 
 namespace fs = std::filesystem;
@@ -148,6 +152,18 @@ fs::path executableDir(const char* argv0) {
     if (n > 0 && n < MAX_PATH) {
         fs::path p(buf);
         return p.parent_path();
+    }
+#elif defined(__APPLE__)
+    {
+        char buf[PATH_MAX];
+        uint32_t bufSize = sizeof(buf);
+        if (_NSGetExecutablePath(buf, &bufSize) == 0) {
+            char resolved[PATH_MAX];
+            if (realpath(buf, resolved) != nullptr) {
+                return fs::path(resolved).parent_path();
+            }
+            return fs::path(buf).parent_path();
+        }
     }
 #else
     char buf[4096];

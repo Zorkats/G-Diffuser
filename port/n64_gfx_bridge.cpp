@@ -17,6 +17,13 @@
 #include <atomic>
 #include <dlfcn.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>      // _NSGetExecutablePath, _dyld_get_image_header
+#include <mach-o/loader.h>    // mach_header_64, segment_command_64, LC_SEGMENT_64
+#include <mach/mach.h>        // mach_vm_region, VM_REGION_BASIC_INFO_64
+#include <mach/mach_vm.h>
+#include <limits.h>           // PATH_MAX
+#endif
 #endif
 
 #include "ship/Context.h"
@@ -1924,8 +1931,36 @@ struct MapsRegion {
 static std::vector<MapsRegion> sMaps;               // sorted by begin, readable runs coalesced
 static std::atomic<uint32_t>   sMapsGeneration{0};
 
-static void ParseProcMaps() {
+static void ParseMemoryRegions() {
     std::vector<MapsRegion> parsed;
+
+#ifdef __APPLE__
+    // macOS: enumerate VM regions via mach_vm_region (the Mach kernel equivalent of /proc/self/maps).
+    mach_port_t task = mach_task_self();
+    mach_vm_address_t address = 0;
+    mach_vm_size_t size = 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t infoCount;
+    mach_port_t objectName;
+
+    while (true) {
+        infoCount = VM_REGION_BASIC_INFO_COUNT_64;
+        kern_return_t kr = mach_vm_region(task, &address, &size,
+                                          VM_REGION_BASIC_INFO_64,
+                                          reinterpret_cast<vm_region_info_t>(&info),
+                                          &infoCount, &objectName);
+        if (kr != KERN_SUCCESS) {
+            break;
+        }
+        MapsRegion r;
+        r.begin = static_cast<uintptr_t>(address);
+        r.end   = static_cast<uintptr_t>(address + size);
+        r.readable = (info.protection & VM_PROT_READ) != 0;
+        parsed.push_back(r);
+        address += size;
+    }
+#else
+    // Linux: parse /proc/self/maps.
     FILE* f = std::fopen("/proc/self/maps", "r");
     if (f != nullptr) {
         char line[512];
@@ -1943,6 +1978,7 @@ static void ParseProcMaps() {
         }
         std::fclose(f);
     }
+#endif
 
     std::sort(parsed.begin(), parsed.end(),
               [](const MapsRegion& a, const MapsRegion& b) { return a.begin < b.begin; });
@@ -1981,11 +2017,11 @@ static const MapsRegion* FindMapsRegion(uintptr_t addr) {
 // Copies the region out by value: a subsequent probe can re-parse and reallocate sMaps.
 static bool PosixRegionFor(uintptr_t addr, MapsRegion& out) {
     if (sMaps.empty()) {
-        ParseProcMaps();
+        ParseMemoryRegions();
     }
     const MapsRegion* r = FindMapsRegion(addr);
     if (r == nullptr) {
-        ParseProcMaps(); // one re-parse then re-query
+        ParseMemoryRegions(); // one re-parse then re-query
         r = FindMapsRegion(addr);
     }
     if (r == nullptr) {
@@ -2029,18 +2065,69 @@ void GetMainModuleRange(uintptr_t& moduleBegin, uintptr_t& moduleEnd) {
     const bool haveDl = dladdr(reinterpret_cast<void*>(&GetMainModuleRange), &info) != 0;
 
     char exePath[4096];
-    ssize_t n = readlink("/proc/self/exe", exePath, sizeof(exePath) - 1);
     const char* wantPath = nullptr;
-    if (n > 0) {
-        exePath[n] = '\0';
-        wantPath = exePath;
-    } else if (haveDl && info.dli_fname != nullptr && info.dli_fname[0] != '\0') {
+#ifdef __APPLE__
+    {
+        uint32_t bufSize = sizeof(exePath);
+        if (_NSGetExecutablePath(exePath, &bufSize) == 0) {
+            char resolved[PATH_MAX];
+            if (realpath(exePath, resolved) != nullptr && strlen(resolved) < sizeof(exePath)) {
+                strcpy(exePath, resolved);
+            }
+            wantPath = exePath;
+        }
+    }
+#else
+    {
+        ssize_t n = readlink("/proc/self/exe", exePath, sizeof(exePath) - 1);
+        if (n > 0) {
+            exePath[n] = '\0';
+            wantPath = exePath;
+        }
+    }
+#endif
+    if (wantPath == nullptr && haveDl && info.dli_fname != nullptr && info.dli_fname[0] != '\0') {
         wantPath = info.dli_fname;
     }
     if (wantPath == nullptr) {
         return;
     }
 
+#ifdef __APPLE__
+    // macOS: walk the Mach-O load commands to find the extent of the main executable image.
+    // _dyld_get_image_header(0) is always the main executable.
+    (void)wantPath; // exe path not needed; dyld gives us the image directly.
+    {
+        const struct mach_header_64* header =
+            reinterpret_cast<const struct mach_header_64*>(_dyld_get_image_header(0));
+        if (header != nullptr) {
+            uintptr_t slide = static_cast<uintptr_t>(_dyld_get_image_vmaddr_slide(0));
+            const uint8_t* ptr =
+                reinterpret_cast<const uint8_t*>(header) + sizeof(struct mach_header_64);
+            uintptr_t lo = UINTPTR_MAX, hi = 0;
+            for (uint32_t i = 0; i < header->ncmds; ++i) {
+                const struct load_command* cmd =
+                    reinterpret_cast<const struct load_command*>(ptr);
+                if (cmd->cmd == LC_SEGMENT_64) {
+                    const struct segment_command_64* seg =
+                        reinterpret_cast<const struct segment_command_64*>(ptr);
+                    if (seg->vmsize > 0) {
+                        uintptr_t segBegin = static_cast<uintptr_t>(seg->vmaddr) + slide;
+                        uintptr_t segEnd   = segBegin + static_cast<uintptr_t>(seg->vmsize);
+                        if (segBegin < lo) lo = segBegin;
+                        if (segEnd   > hi) hi = segEnd;
+                    }
+                }
+                ptr += cmd->cmdsize;
+            }
+            if (lo < hi) {
+                moduleBegin = lo;
+                moduleEnd   = hi;
+            }
+        }
+    }
+    if (moduleBegin == 0 && haveDl && info.dli_fbase != nullptr) {
+#else
     FILE* f = std::fopen("/proc/self/maps", "r");
     if (f == nullptr) {
         return;
@@ -2075,6 +2162,7 @@ void GetMainModuleRange(uintptr_t& moduleBegin, uintptr_t& moduleEnd) {
         moduleBegin = lo;
         moduleEnd = hi;
     } else if (haveDl && info.dli_fbase != nullptr) {
+#endif
         // Pathname match failed (unusual): fall back to the dladdr load base alone. Without an end
         // we cannot bound the module, so leave moduleEnd at 0 -- callers treat {base,0} the same
         // as {0,0} (an empty range), i.e. no worse than the Windows failure path.

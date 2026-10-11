@@ -16,6 +16,10 @@
 #else
 #include <fcntl.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>   /* _NSGetExecutablePath */
+#include <limits.h>         /* PATH_MAX */
+#endif
 #endif
 
 /* The per-frame trace breadcrumbs sprinkled through the decomp sources (gdx_ck(), gdx_seg_log(),
@@ -65,6 +69,24 @@ static inline const char* gdx_exe_relative_path(char* outPath, size_t outCap, co
                     strcat(outPath, fileName);
                     return outPath;
                 }
+            }
+        }
+    }
+#elif defined(__APPLE__)
+    {
+        uint32_t bufSize = (uint32_t)outCap;
+        if (_NSGetExecutablePath(outPath, &bufSize) == 0) {
+            /* Resolve symlinks so the dirname is the real app location */
+            char resolved[PATH_MAX];
+            if (realpath(outPath, resolved) != NULL &&
+                strlen(resolved) < outCap) {
+                strcpy(outPath, resolved);
+            }
+            char* slash = strrchr(outPath, '/');
+            if (slash != NULL &&
+                (size_t)(slash - outPath) + 1 + strlen(fileName) < outCap) {
+                strcpy(slash + 1, fileName);
+                return outPath;
             }
         }
     }
