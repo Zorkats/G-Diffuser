@@ -21,6 +21,15 @@
  */
 #include "gdx_fiber.h"
 
+/* ucontext.h functions (getcontext, makecontext, swapcontext) are deprecated on macOS but remain
+   functional and are the only portable POSIX coroutine API. Suppress the deprecation warnings. */
+#ifdef __APPLE__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+/* macOS requires _XOPEN_SOURCE to expose the (deprecated) ucontext API. */
+#define _XOPEN_SOURCE
+#endif
+
 #include <stdlib.h>
 #include <stdint.h>
 #include <ucontext.h>
@@ -148,3 +157,7 @@ unsigned long gdx_fiber_current_thread_id(void) {
     return (unsigned long) (uintptr_t) pthread_self();
 #endif
 }
+
+#ifdef __APPLE__
+#pragma clang diagnostic pop
+#endif
