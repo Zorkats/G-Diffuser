@@ -26,6 +26,8 @@
 #ifdef __APPLE__
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+/* macOS requires _XOPEN_SOURCE to expose the (deprecated) ucontext API. */
+#define _XOPEN_SOURCE
 #endif
 
 #include <stdlib.h>
