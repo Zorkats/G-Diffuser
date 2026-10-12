@@ -256,6 +256,26 @@ static void gdx_frame_pacer_init_posix(void) {
 }
 
 static void gdx_sleep_until_ns(int64_t deadlineNs) {
+#ifdef __APPLE__
+    /* macOS lacks clock_nanosleep; compute remaining time and use nanosleep,
+       retrying on EINTR to match the Linux path's guarantee. */
+    for (;;) {
+        int64_t now = gdx_monotonic_now_ns();
+        int64_t remaining = deadlineNs - now;
+        if (remaining <= 0) {
+            return;
+        }
+        struct timespec req;
+        req.tv_sec = (time_t)(remaining / GDX_PACER_NS_PER_SEC);
+        req.tv_nsec = (long)(remaining % GDX_PACER_NS_PER_SEC);
+        if (nanosleep(&req, NULL) == 0) {
+            return;
+        }
+        if (errno != EINTR) {
+            return;
+        }
+    }
+#else
     struct timespec abs;
     abs.tv_sec = (time_t)(deadlineNs / GDX_PACER_NS_PER_SEC);
     abs.tv_nsec = (long)(deadlineNs % GDX_PACER_NS_PER_SEC);
@@ -270,6 +290,7 @@ static void gdx_sleep_until_ns(int64_t deadlineNs) {
             return; // unexpected error: give up waiting rather than spin
         }
     }
+#endif
 }
 
 void gdx_frame_pacer_tick(void) {

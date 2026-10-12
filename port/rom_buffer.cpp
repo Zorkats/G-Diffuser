@@ -1,5 +1,8 @@
 #include "rom_buffer.h"
 #include "port_log.h"
+#ifdef __APPLE__
+#include "gdx_macos_ui.h"
+#endif
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -14,6 +17,10 @@
 #else
 #include <strings.h> // strcasecmp
 #include <unistd.h>   // readlink
+#ifdef __APPLE__
+#include <mach-o/dyld.h>   // _NSGetExecutablePath
+#include <limits.h>        // PATH_MAX
+#endif
 #define _stricmp strcasecmp
 #endif
 
@@ -177,14 +184,27 @@ static void load_rom_next_to_exe(void) {
         }
     }
 #else
-    // The native file picker is Windows-only, so POSIX leans harder on this probe; the CLI arg
-    // and FZEROX_ROM fallbacks in gdx_init_rom are already portable.
+    // The native file picker is Windows-only (macOS adds NSOpenPanel below), so POSIX leans
+    // harder on this probe; the CLI arg and FZEROX_ROM fallbacks in gdx_init_rom are already portable.
     char exePath[4096];
+#ifdef __APPLE__
+    {
+        uint32_t bufSize = sizeof(exePath);
+        if (_NSGetExecutablePath(exePath, &bufSize) != 0) {
+            return;
+        }
+        char resolved[PATH_MAX];
+        if (realpath(exePath, resolved) != nullptr && strlen(resolved) < sizeof(exePath)) {
+            strcpy(exePath, resolved);
+        }
+    }
+#else
     ssize_t n = readlink("/proc/self/exe", exePath, sizeof(exePath) - 1);
     if (n <= 0) {
         return;
     }
     exePath[n] = '\0';
+#endif
     char* slash = strrchr(exePath, '/');
     if (slash == nullptr) {
         return;
@@ -227,12 +247,28 @@ void gdx_init_rom(int argc, char** argv, int archivesValidated) {
     // archives skip the picker entirely: archive-only is a supported install state (the
     // originals are deletable), so a missing ROM must not cost a dialog every boot.
     bool pickerCancelled = false;
-#ifdef _WIN32
+#if defined(_WIN32)
     if (!archivesValidated) {
         gdx_port_logf("[rom] no ROM argument provided; opening picker.\n");
         pick_rom_with_dialog();
         if (gdx_rom_buffer) return;
         pickerCancelled = true;
+    } else {
+        gdx_port_logf("[rom] no ROM argument provided; picker skipped (validated archives "
+                       "present, archive-only boot is available).\n");
+    }
+#elif defined(__APPLE__)
+    if (!archivesValidated) {
+        gdx_port_logf("[rom] no ROM argument provided; opening picker.\n");
+        char* picked = gdx_macos_pick_rom();
+        if (picked != nullptr) {
+            load_rom(picked);
+            free(picked);
+            if (gdx_rom_buffer) return;
+        } else {
+            gdx_port_logf("[rom] ROM picker cancelled.\n");
+            pickerCancelled = true;
+        }
     } else {
         gdx_port_logf("[rom] no ROM argument provided; picker skipped (validated archives "
                        "present, archive-only boot is available).\n");
@@ -291,12 +327,17 @@ void gdx_init_rom(int argc, char** argv, int archivesValidated) {
         gdx_port_logf("[rom] FATAL: the only ROM(s) found are the Japanese release of F-Zero X, and "
                        "Japanese-region support is not enabled in this build. Supply the North "
                        "American (US rev0) cartridge dump.\n");
-#ifdef _WIN32
+#if defined(_WIN32)
         MessageBoxW(nullptr,
                     L"This build of G-Diffuser does not support the Japanese release of F-Zero X.\n\n"
                     L"Japanese-region support is planned for a later release. To play now, supply "
                     L"the North American (US rev0) F-Zero X ROM.",
                     L"G-Diffuser - Japanese ROM not supported", MB_OK | MB_ICONINFORMATION);
+#elif defined(__APPLE__)
+        gdx_macos_alert("G-Diffuser - Japanese ROM not supported",
+                        "This build of G-Diffuser does not support the Japanese release of F-Zero X.\n\n"
+                        "Japanese-region support is planned for a later release. To play now, supply "
+                        "the North American (US rev0) F-Zero X ROM.", 0);
 #endif
         exit(1);
     }
@@ -309,7 +350,7 @@ void gdx_init_rom(int argc, char** argv, int archivesValidated) {
                        "Set FZEROX_ROM env var, pass ROM path as argument, select it in the "
                        "picker, or complete first-boot setup to install fzerox.o2r.\n");
     }
-#ifdef _WIN32
+#if defined(_WIN32)
     MessageBoxW(nullptr,
                 L"G-Diffuser needs an F-Zero X (U) ROM to run.\n\n"
                 L"Select the ROM in the file picker, pass its path on the command line, "
@@ -317,6 +358,13 @@ void gdx_init_rom(int argc, char** argv, int archivesValidated) {
                 L"validated fzerox.o2r archive is installed (which also allows booting without "
                 L"the ROM present).",
                 L"G-Diffuser - ROM required", MB_OK | MB_ICONERROR);
+#elif defined(__APPLE__)
+    gdx_macos_alert("G-Diffuser - ROM required",
+                    "G-Diffuser needs an F-Zero X (U) ROM to run.\n\n"
+                    "Select the ROM in the file picker, pass its path on the command line, "
+                    "set the FZEROX_ROM environment variable, or complete first-boot setup so a "
+                    "validated fzerox.o2r archive is installed (which also allows booting without "
+                    "the ROM present).", 1);
 #endif
     exit(1);
 }

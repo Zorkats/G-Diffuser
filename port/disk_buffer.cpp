@@ -16,6 +16,10 @@
 #include <windows.h>
 #else
 #include <unistd.h> // readlink
+#ifdef __APPLE__
+#include <mach-o/dyld.h>   // _NSGetExecutablePath
+#include <limits.h>        // PATH_MAX
+#endif
 #endif
 
 extern "C" {
@@ -281,11 +285,24 @@ static void gdx_exe_dir(char* outDir, size_t outSize) {
     WideCharToMultiByte(CP_UTF8, 0, exePath, -1, outDir, static_cast<int>(outSize), nullptr, nullptr);
 #else
     char exePath[4096];
+#ifdef __APPLE__
+    {
+        uint32_t bufSize = sizeof(exePath);
+        if (_NSGetExecutablePath(exePath, &bufSize) != 0) {
+            return;
+        }
+        char resolved[PATH_MAX];
+        if (realpath(exePath, resolved) != nullptr && strlen(resolved) < sizeof(exePath)) {
+            strcpy(exePath, resolved);
+        }
+    }
+#else
     ssize_t n = readlink("/proc/self/exe", exePath, sizeof(exePath) - 1);
     if (n <= 0) {
         return;
     }
     exePath[n] = '\0';
+#endif
     char* slash = strrchr(exePath, '/');
     if (slash == nullptr) {
         return;

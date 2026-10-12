@@ -354,6 +354,14 @@ target_compile_definitions(G-Diffuser PRIVATE
     ${GDX_JP_INPUT_DEFS}
     GDX_VERSION_STRING="${GDX_DISPLAY_VERSION}")
 
+if(APPLE)
+    # Objective-C++ source for macOS-native UI (NSOpenPanel file picker, NSAlert dialogs).
+    # The top-level project() only declares C CXX, so we must enable OBJCXX explicitly
+    # before CMake will compile .mm files.
+    enable_language(OBJCXX)
+    target_sources(G-Diffuser PRIVATE gdx_macos_ui.mm)
+endif()
+
 if(WIN32)
     set_target_properties(G-Diffuser PROPERTIES WIN32_EXECUTABLE TRUE)
     # Application icon; Linux desktop entries carry theirs separately.
@@ -539,13 +547,23 @@ else()
     # (needed on older glibc, harmless on newer).
     find_package(Threads REQUIRED)
     target_link_libraries(G-Diffuser PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
-    # Release tarballs carry the dependencies no distribution can be relied on to provide in
-    # lib/ beside the executable (tools/package_linux.sh). $ORIGIN resolves them at load time,
-    # which beats a wrapper script because the binary stays directly runnable. No effect on a
-    # local build, where lib/ does not exist and the loader falls through to the system paths.
-    set_target_properties(G-Diffuser PROPERTIES
-        BUILD_WITH_INSTALL_RPATH TRUE
-        INSTALL_RPATH "$ORIGIN/lib")
+    if(APPLE)
+        # macOS: Mach VM API for the memory-probe backend (n64_gfx_bridge.cpp), AppKit for native
+        # file pickers / alert dialogs, and @executable_path RPATH for bundled dylibs.
+        target_link_libraries(G-Diffuser PRIVATE "-framework AppKit")
+        target_link_libraries(G-Diffuser PRIVATE "-framework UniformTypeIdentifiers")
+        set_target_properties(G-Diffuser PROPERTIES
+            BUILD_WITH_INSTALL_RPATH TRUE
+            INSTALL_RPATH "@executable_path/lib")
+    else()
+        # Release tarballs carry the dependencies no distribution can be relied on to provide in
+        # lib/ beside the executable (tools/package_linux.sh). $ORIGIN resolves them at load time,
+        # which beats a wrapper script because the binary stays directly runnable. No effect on a
+        # local build, where lib/ does not exist and the loader falls through to the system paths.
+        set_target_properties(G-Diffuser PROPERTIES
+            BUILD_WITH_INSTALL_RPATH TRUE
+            INSTALL_RPATH "$ORIGIN/lib")
+    endif()
 endif()
 
 if(GDX_PORT_WARN_FLAGS)
@@ -555,11 +573,22 @@ endif()
 # host pointers and resolves host ranges by bit-pattern — all strict-aliasing-sensitive.
 if(NOT MSVC)
     target_compile_options(G-Diffuser PRIVATE -fno-strict-aliasing -fwrapv)
-    # Linux audio fix: the decomp's sinf/cosf were exported from .dynsym and interposed the ones
-    # libSDL3's resampler imports -> silent/garbled audio. The version script localizes them so
-    # libSDL3 gets glibc's. Full writeup in port/gdx_hide_libm.map.
-    target_link_options(G-Diffuser PRIVATE
-        "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/gdx_hide_libm.map")
+    if(APPLE)
+        # macOS equivalent of the Linux version-script sinf/cosf fix: -unexported_symbol keeps the
+        # decomp's N64 libm out of the dynamic export table so that SDL and system frameworks resolve
+        # to the real libm. Apple ld does not support --version-script.
+        target_link_options(G-Diffuser PRIVATE
+            "-Wl,-unexported_symbol,_sinf"
+            "-Wl,-unexported_symbol,_cosf"
+            "-Wl,-unexported_symbol,___sinf"
+            "-Wl,-unexported_symbol,___cosf")
+    else()
+        # Linux audio fix: the decomp's sinf/cosf were exported from .dynsym and interposed the ones
+        # libSDL3's resampler imports -> silent/garbled audio. The version script localizes them so
+        # libSDL3 gets glibc's. Full writeup in port/gdx_hide_libm.map.
+        target_link_options(G-Diffuser PRIVATE
+            "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/gdx_hide_libm.map")
+    endif()
 endif()
 if(TARGET libultraship)
     target_link_libraries(G-Diffuser PRIVATE libultraship)
@@ -929,6 +958,10 @@ if(GDX_BUILD_JP)
         target_compile_definitions(G-Diffuser-JP PRIVATE EXPANSION_KIT=1)
     endif()
 
+    if(APPLE)
+        target_sources(G-Diffuser-JP PRIVATE gdx_macos_ui.mm)
+    endif()
+
     if(WIN32)
         set_target_properties(G-Diffuser-JP PROPERTIES WIN32_EXECUTABLE TRUE)
         target_sources(G-Diffuser-JP PRIVATE gdiffuser.rc)
@@ -954,6 +987,13 @@ if(GDX_BUILD_JP)
     else()
         find_package(Threads REQUIRED)
         target_link_libraries(G-Diffuser-JP PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+        if(APPLE)
+        target_link_libraries(G-Diffuser-JP PRIVATE "-framework UniformTypeIdentifiers")
+            target_link_libraries(G-Diffuser-JP PRIVATE "-framework AppKit")
+            set_target_properties(G-Diffuser-JP PROPERTIES
+                BUILD_WITH_INSTALL_RPATH TRUE
+                INSTALL_RPATH "@executable_path/lib")
+        endif()
     endif()
 
     if(GDX_PORT_WARN_FLAGS)
@@ -961,8 +1001,16 @@ if(GDX_BUILD_JP)
     endif()
     if(NOT MSVC)
         target_compile_options(G-Diffuser-JP PRIVATE -fno-strict-aliasing -fwrapv)
-        target_link_options(G-Diffuser-JP PRIVATE
-            "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/gdx_hide_libm.map")
+        if(APPLE)
+            target_link_options(G-Diffuser-JP PRIVATE
+                "-Wl,-unexported_symbol,_sinf"
+                "-Wl,-unexported_symbol,_cosf"
+                "-Wl,-unexported_symbol,___sinf"
+                "-Wl,-unexported_symbol,___cosf")
+        else()
+            target_link_options(G-Diffuser-JP PRIVATE
+                "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/gdx_hide_libm.map")
+        endif()
     endif()
     if(TARGET libultraship)
         target_link_libraries(G-Diffuser-JP PRIVATE libultraship)
