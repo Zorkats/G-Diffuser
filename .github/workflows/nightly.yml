@@ -1,0 +1,166 @@
+name: Nightly
+
+# Publishes the tip of the default branch as a rolling prerelease under the `nightly` tag, so
+# players get fixes and content between tagged releases without a GitHub account: workflow
+# artifacts need a login to download and expire, release assets do not.
+#
+# The builds are the release workflows themselves, called rather than copied, so a nightly passes
+# the same dependency and portability checks as a tagged release and cannot drift from them.
+# Nothing is published unless every platform built; the previous nightly stays up until then.
+
+on:
+  schedule:
+    # 06:00 UTC, after the evening's pushes in the Americas and before Europe's morning.
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Rebuild even if the default branch has not moved since the last nightly'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # Queued, not cancelled: a cancelled publish could leave the release half-updated.
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
+      version: ${{ steps.decide.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history and tags: the version is derived from the latest release tag, and the
+          # current `nightly` tag tells us whether anything changed.
+          fetch-depth: 0
+
+      - name: Decide whether to build
+        id: decide
+        # Through the environment rather than inline, so the inputs cannot be read as shell
+        # syntax.
+        env:
+          EVENT: ${{ github.event_name }}
+          FORCE: ${{ inputs.force }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+
+          # A scheduled run is always on the default branch; a manual one can be started from any
+          # branch, and a nightly built from a feature branch would replace the one players use.
+          # The release workflows' own manual run is the way to test a branch build.
+          if [ "$EVENT" = workflow_dispatch ] && [ "$GITHUB_REF_NAME" != "$DEFAULT_BRANCH" ]; then
+            echo "::error::Nightlies are published from $DEFAULT_BRANCH only, not $GITHUB_REF_NAME."
+            exit 1
+          fi
+
+          previous="$(git rev-parse -q --verify 'refs/tags/nightly^{commit}' || true)"
+          if [ "$previous" = "$GITHUB_SHA" ] && [ "$FORCE" != true ]; then
+            echo "::notice::The nightly already points at ${GITHUB_SHA::7}; nothing to build."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Release candidates are excluded so a nightly after v1.2.0-rc1 still reads as a build
+          # on top of the last real release. The date is the commit's, not the run's, so a rerun of
+          # the same commit produces the same file names.
+          base="$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude '*-rc*' 2>/dev/null || echo v0.0.0)"
+          date="$(TZ=UTC0 git log -1 --date=format-local:%Y%m%d --format=%cd)"
+          short="$(git rev-parse --short=7 HEAD)"
+          echo "build=true" >> "$GITHUB_OUTPUT"
+          echo "version=${base#v}-nightly.${date}.${short}" >> "$GITHUB_OUTPUT"
+
+  windows:
+    needs: gate
+    if: needs.gate.outputs.build == 'true'
+    uses: ./.github/workflows/release-windows.yml
+    with:
+      version: ${{ needs.gate.outputs.version }}
+
+  linux:
+    needs: gate
+    if: needs.gate.outputs.build == 'true'
+    uses: ./.github/workflows/release-linux.yml
+    with:
+      version: ${{ needs.gate.outputs.version }}
+
+  publish:
+    needs: [gate, windows, linux]
+    runs-on: ubuntu-latest
+    # The only job that can write: it moves the `nightly` tag and replaces the release assets.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # History for the changelog between the previous nightly and this one.
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: G-Diffuser-v${{ needs.gate.outputs.version }}-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish the rolling nightly release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          assets=(dist/*.zip dist/*.tar.gz)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "::error::No packages were downloaded for $VERSION."
+            exit 1
+          fi
+
+          previous="$(git rev-parse -q --verify 'refs/tags/nightly^{commit}' || true)"
+          {
+            echo "Automated build of \`${GITHUB_SHA::7}\` from the default branch, version \`$VERSION\`."
+            echo
+            echo "Nightlies get no manual testing. If something breaks, the latest tagged release is the stable build."
+            if [ -n "$previous" ] && [ "$previous" != "$GITHUB_SHA" ]; then
+              echo
+              echo "## Changes since the previous nightly"
+              echo
+              git log --no-merges --max-count=100 --format='- %s (%h)' "$previous..$GITHUB_SHA"
+            fi
+          } > notes.md
+
+          # The tag moves through the API rather than git push. GitHub refuses a token-driven ref
+          # update whose commit carries workflow files that differ from the default branch; the
+          # gate only builds the default branch, so the commit tagged here always matches it.
+          if [ -n "$previous" ]; then
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/nightly" \
+              -f sha="$GITHUB_SHA" -F force=true > /dev/null
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref=refs/tags/nightly -f sha="$GITHUB_SHA" > /dev/null
+          fi
+
+          title="Nightly $VERSION"
+          if gh release view nightly > /dev/null 2>&1; then
+            # New assets go up before old ones come down, so the release is never empty for
+            # someone downloading mid-publish.
+            gh release upload nightly "${assets[@]}" --clobber
+            gh release edit nightly --title "$title" --notes-file notes.md --prerelease
+            current=()
+            for asset in "${assets[@]}"; do
+              current+=("$(basename "$asset")")
+            done
+            gh release view nightly --json assets --jq '.assets[].name' | while read -r name; do
+              if ! printf '%s\n' "${current[@]}" | grep -qxF "$name"; then
+                gh release delete-asset nightly "$name" --yes
+              fi
+            done
+          else
+            gh release create nightly "${assets[@]}" --verify-tag --prerelease --latest=false \
+              --title "$title" --notes-file notes.md
+          fi
