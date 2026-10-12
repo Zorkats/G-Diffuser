@@ -458,6 +458,15 @@ add_custom_command(TARGET G-Diffuser POST_BUILD
 # Torch's /MT runtime take effect so the exe needs no VC++ redist.
 include(ExternalProject)
 
+# Disable floating-point contraction (fused multiply-add) in the extractor. Clang on ARM64 (Apple
+# Silicon) fuses `a + b * c` into a single FMA instruction by default, which rounds once instead of
+# twice. FZX::CourseData::CalculateChecksum truncates float expressions to int, so the fused result
+# drifted by a few units on 20 of 26 courses, the archive missed the golden SHA-256, and first boot
+# fell back to the raw ROM on every launch (wrong course textures, garbled HUD). x86-64 GCC and MSVC
+# don't contract by default, and neither did the N64's FPU, so this restores parity with the golden.
+# The root CMakeLists.txt already applies -ffp-contract=off to the game, but ExternalProject builds
+# don't inherit add_compile_options, and torch/CMakeLists.txt overwrites CMAKE_CXX_FLAGS, so the
+# flag is injected through CMAKE_PROJECT_INCLUDE (see gdx_extract_fp.cmake).
 set(GDX_EXTRACT_SRC_DIR "${CMAKE_SOURCE_DIR}/torch")
 set(GDX_EXTRACT_PREFIX  "${CMAKE_BINARY_DIR}/gdx-extract")
 set(GDX_EXTRACT_INSTALL "${GDX_EXTRACT_PREFIX}/install")
@@ -475,6 +484,7 @@ ExternalProject_Add(gdx_extract_ext
         -DCMAKE_INSTALL_PREFIX:PATH=<INSTALL_DIR>
         -DCMAKE_BUILD_TYPE:STRING=${CMAKE_BUILD_TYPE}
         -DCMAKE_POLICY_DEFAULT_CMP0091:STRING=NEW
+        -DCMAKE_PROJECT_INCLUDE:FILEPATH=${CMAKE_CURRENT_SOURCE_DIR}/gdx_extract_fp.cmake
     BUILD_COMMAND   "${CMAKE_COMMAND}" --build   <BINARY_DIR> --config $<CONFIG>
     INSTALL_COMMAND "${CMAKE_COMMAND}" --install <BINARY_DIR> --config $<CONFIG>
     # BUILD_ALWAYS ON: ExternalProject stamps do not track torch/ source changes, so OFF served a
