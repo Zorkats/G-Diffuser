@@ -356,7 +356,9 @@ target_compile_definitions(G-Diffuser PRIVATE
 
 if(APPLE)
     # Objective-C++ source for macOS-native UI (NSOpenPanel file picker, NSAlert dialogs).
-    # enable_language(OBJCXX) is already called by libultraship's top-level CMakeLists.txt.
+    # The top-level project() only declares C CXX, so we must enable OBJCXX explicitly
+    # before CMake will compile .mm files.
+    enable_language(OBJCXX)
     target_sources(G-Diffuser PRIVATE gdx_macos_ui.mm)
 endif()
 
@@ -549,6 +551,7 @@ else()
         # macOS: Mach VM API for the memory-probe backend (n64_gfx_bridge.cpp), AppKit for native
         # file pickers / alert dialogs, and @executable_path RPATH for bundled dylibs.
         target_link_libraries(G-Diffuser PRIVATE "-framework AppKit")
+        target_link_libraries(G-Diffuser PRIVATE "-framework UniformTypeIdentifiers")
         set_target_properties(G-Diffuser PROPERTIES
             BUILD_WITH_INSTALL_RPATH TRUE
             INSTALL_RPATH "@executable_path/lib")
@@ -985,6 +988,7 @@ if(GDX_BUILD_JP)
         find_package(Threads REQUIRED)
         target_link_libraries(G-Diffuser-JP PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
         if(APPLE)
+        target_link_libraries(G-Diffuser-JP PRIVATE "-framework UniformTypeIdentifiers")
             target_link_libraries(G-Diffuser-JP PRIVATE "-framework AppKit")
             set_target_properties(G-Diffuser-JP PROPERTIES
                 BUILD_WITH_INSTALL_RPATH TRUE

@@ -2111,7 +2111,15 @@ void GetMainModuleRange(uintptr_t& moduleBegin, uintptr_t& moduleEnd) {
                 if (cmd->cmd == LC_SEGMENT_64) {
                     const struct segment_command_64* seg =
                         reinterpret_cast<const struct segment_command_64*>(ptr);
-                    if (seg->vmsize > 0) {
+                    // Skip __PAGEZERO — it is a 4 GB guard region (vmaddr=0,
+                    // vmsize=0x100000000 on ARM64) that is never mapped as
+                    // readable memory.  Including it pulls moduleBegin down to
+                    // the ASLR slide value (~0x244000), which lets N64 virtual
+                    // addresses in the 0x00–0x10000000 range pass the
+                    // module-range check and get returned as host pointers
+                    // that land inside the guard page → instant SIGSEGV.
+                    if (seg->vmsize > 0 &&
+                        std::strncmp(seg->segname, "__PAGEZERO", 16) != 0) {
                         uintptr_t segBegin = static_cast<uintptr_t>(seg->vmaddr) + slide;
                         uintptr_t segEnd   = segBegin + static_cast<uintptr_t>(seg->vmsize);
                         if (segBegin < lo) lo = segBegin;
@@ -7632,7 +7640,17 @@ extern "C" void gdx_vi_present_fallback(void) {
     // requires, and every exit below must satisfy it -- including the ones that
     // return before any of this function's own work happens. See
     // GdxBindWindowFramebuffer above for the full chain.
-    GdxBindWindowFramebuffer();
+    //
+    // METAL ENQUEUE-ORDER FIX: GdxBindWindowFramebuffer() used to be called here,
+    // unconditionally creating fb 0's command buffer before anything else. On
+    // Metal, command buffers execute in ENQUEUE order (not commit order). When the
+    // vi-scanout path below later created mGameFb's command buffer, it was
+    // enqueued SECOND -- but fb 0 reads mGameFb's texture (via ImGui composite),
+    // so fb 0 ran before mGameFb had rendered, reading stale/black content and
+    // causing the intro cinematic to flicker. Fix: defer fb 0 creation to each
+    // path that needs it, so the vi-scanout path creates mGameFb FIRST and fb 0
+    // SECOND (correct dependency order). The gHostFrameGfxTaskRan path needs no
+    // call because Run() already created both in correct order.
 
     // A real GFX task already produced this host frame: nothing to do. Clear the
     // flag for the next frame. This is the hot path once gameplay is rendering.
@@ -7646,6 +7664,7 @@ extern "C" void gdx_vi_present_fallback(void) {
     if (fbAddr == 0) {
         // Traced: this was the one exit with no telemetry at all, which made it
         // invisible in a present-path soak (every other exit reports a path).
+        GdxBindWindowFramebuffer(); // fb 0 needed for ImGui composite
         GdxPresentPathTrace("no-vi-fb");
         return; // No framebuffer has been presented yet.
     }
@@ -7656,6 +7675,7 @@ extern "C" void gdx_vi_present_fallback(void) {
     if (sFallbackWindow == nullptr) {
         auto ctx = Ship::Context::GetInstance();
         if (ctx == nullptr) {
+            GdxBindWindowFramebuffer();
             return;
         }
         auto wnd = ctx->GetWindow();
@@ -7663,14 +7683,17 @@ extern "C" void gdx_vi_present_fallback(void) {
     }
     Fast::Fast3dWindow* fw = sFallbackWindow;
     if (fw == nullptr) {
+        GdxBindWindowFramebuffer();
         return;
     }
     auto interp = fw->GetInterpreterWeak().lock();
     if (!interp) {
+        GdxBindWindowFramebuffer();
         return;
     }
     Fast::GfxRenderingAPI* rapi = interp->GetCurrentRenderingAPI();
     if (rapi == nullptr) {
+        GdxBindWindowFramebuffer();
         return;
     }
 
