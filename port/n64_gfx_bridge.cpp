@@ -7675,7 +7675,12 @@ extern "C" void gdx_vi_present_fallback(void) {
     // A real GFX task already produced this host frame: nothing to do. Clear the
     // flag for the next frame. This is the hot path once gameplay is rendering.
     if (gHostFrameGfxTaskRan) {
+#ifndef __APPLE__
+        // Not on macOS: this runs after the frame's EndFrame there, so binding fb 0 opens a screen
+        // command buffer on the previous drawable. The next frame then composites onto a stale
+        // drawable that is never cleared, and every frame smears into the next (heavy ghosting).
         GdxBindWindowFramebuffer();
+#endif
         gHostFrameGfxTaskRan = false;
         GdxPresentPathTrace("task-render");
         return;
