@@ -998,8 +998,8 @@ if(GDX_BUILD_JP)
         find_package(Threads REQUIRED)
         target_link_libraries(G-Diffuser-JP PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
         if(APPLE)
-        target_link_libraries(G-Diffuser-JP PRIVATE "-framework UniformTypeIdentifiers")
             target_link_libraries(G-Diffuser-JP PRIVATE "-framework AppKit")
+            target_link_libraries(G-Diffuser-JP PRIVATE "-framework UniformTypeIdentifiers")
             set_target_properties(G-Diffuser-JP PROPERTIES
                 BUILD_WITH_INSTALL_RPATH TRUE
                 INSTALL_RPATH "@executable_path/lib")

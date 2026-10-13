@@ -4,8 +4,8 @@
 
 **A native PC port of F-Zero X (N64), including 64DD Expansion Kit support.**
 
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-blue)](#platforms)
-[![Renderer](https://img.shields.io/badge/renderer-D3D11%20%7C%20OpenGL-8A2BE2)](#platforms)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-blue)](#platforms)
+[![Renderer](https://img.shields.io/badge/renderer-D3D11%20%7C%20OpenGL%20%7C%20Metal-8A2BE2)](#platforms)
 [![Built on](https://img.shields.io/badge/built%20on-libultraship-informational)](https://github.com/Kenix3/libultraship)
 [![Decomp](https://img.shields.io/badge/decomp-inspectredc%2Ffzerox-brightgreen)](https://github.com/inspectredc/fzerox)
 [![Discord](https://img.shields.io/badge/Discord-https%3A%2F%2Fdiscord.gg%2FgpaM8qK9NK-informational?style=flat)](https://discord.gg/gpaM8qK9NK)
@@ -129,13 +129,17 @@ controller-navigation toggle.
 | --- | --- |
 | **Windows** | Direct3D 11 |
 | **Linux** | OpenGL (SDL2) |
+| **macOS** (Apple Silicon) | Metal |
 
-Both targets are driven by libultraship's Fast3D renderer.
+All three targets are driven by libultraship's Fast3D renderer.
 
 **Linux requirements:** glibc 2.35 or newer — Ubuntu 22.04+, Debian 12+, Fedora 36+, SteamOS 3,
 or any rolling distribution. No CPU features beyond the x86-64 baseline are needed, so anything
 64-bit will do. Libraries that distributions do not reliably ship travel in `lib/` beside the
 executable, so nothing has to be installed first.
+
+**macOS:** built and tested on Apple Silicon (M1). Intel Macs are untested. There is no
+prebuilt release yet; build from source (see [Building](#macos)).
 
 ## Custom Assets
 
@@ -215,6 +219,21 @@ cmake -S . -B build/x64-linux -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build/x64-linux --target G-Diffuser
 ```
 
+### macOS
+
+Install Xcode's Command Line Tools (compiler and Metal SDK), then the toolchain and dependencies
+with [Homebrew](https://brew.sh) (native Apple Silicon Homebrew in `/opt/homebrew`), then build
+with Ninja:
+
+```sh
+xcode-select --install
+brew install cmake ninja sdl2 glew libzip nlohmann-json spdlog fmt tinyxml2
+cmake -S . -B build/macos -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build/macos --target G-Diffuser -j$(sysctl -n hw.ncpu)
+```
+
+The game renders through Metal. The executable lands in `build/macos/port/`.
+
 ### Expansion Kit build
 
 Expansion Kit support is **on by default** (`GDX_EXPANSION_KIT=ON`) and is the supported
@@ -279,13 +298,13 @@ Generate a log first:
 # Windows (PowerShell)
 $env:GDX_LOG="1"; $env:GDX_TRACE="1"; .\G-Diffuser.exe
 
-# Linux
+# Linux / macOS
 GDX_LOG=1 GDX_TRACE=1 ./G-Diffuser
 ```
 
 Then reproduce the problem, quit, and include:
 
-- [ ] **Platform and renderer** — Windows/D3D11 or Linux/OpenGL
+- [ ] **Platform and renderer** — Windows/D3D11, Linux/OpenGL or macOS/Metal
 - [ ] **Which build** — release version, or the commit you built
 - [ ] **ROM region and dump** — F-Zero X US rev0, plus whether the Expansion Kit disk is the
       translated or the Japanese image
