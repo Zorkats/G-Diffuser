@@ -63,6 +63,14 @@ Linux builds clean and runs on handheld hardware. The bring-up closed four separ
 0-byte `stb_image.h` download, MSVC-only functions in `port/gdx_input_script.c`, a stale CMake glob,
 and missing post-link sync paths.
 
+macOS builds clean on Apple Silicon and runs on Metal (tested on an M1 by the macOS contributor; Intel Macs untested).
+The bring-up replaced the Linux-only `/proc/self` probes with Mach-O and `mach_vm_region`
+equivalents, added a native ROM picker and alerts (`port/gdx_macos_ui.mm`), fixed two Metal frame
+ordering bugs, and disabled FMA contraction in `gdx-extract`, without which the extracted archive
+missed the golden SHA-256 and every boot fell back to the raw ROM. Known gaps on Metal: the
+post-shader chain and `ClearDepthRegion` use the backend defaults, and framebuffer formats other
+than 8-bit are not honoured yet.
+
 ---
 
 ## Shipped but not working

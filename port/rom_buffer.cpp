@@ -247,7 +247,7 @@ void gdx_init_rom(int argc, char** argv, int archivesValidated) {
     // archives skip the picker entirely: archive-only is a supported install state (the
     // originals are deletable), so a missing ROM must not cost a dialog every boot.
     bool pickerCancelled = false;
-#if defined(_WIN32)
+#ifdef _WIN32
     if (!archivesValidated) {
         gdx_port_logf("[rom] no ROM argument provided; opening picker.\n");
         pick_rom_with_dialog();
@@ -327,7 +327,7 @@ void gdx_init_rom(int argc, char** argv, int archivesValidated) {
         gdx_port_logf("[rom] FATAL: the only ROM(s) found are the Japanese release of F-Zero X, and "
                        "Japanese-region support is not enabled in this build. Supply the North "
                        "American (US rev0) cartridge dump.\n");
-#if defined(_WIN32)
+#ifdef _WIN32
         MessageBoxW(nullptr,
                     L"This build of G-Diffuser does not support the Japanese release of F-Zero X.\n\n"
                     L"Japanese-region support is planned for a later release. To play now, supply "
@@ -350,7 +350,7 @@ void gdx_init_rom(int argc, char** argv, int archivesValidated) {
                        "Set FZEROX_ROM env var, pass ROM path as argument, select it in the "
                        "picker, or complete first-boot setup to install fzerox.o2r.\n");
     }
-#if defined(_WIN32)
+#ifdef _WIN32
     MessageBoxW(nullptr,
                 L"G-Diffuser needs an F-Zero X (U) ROM to run.\n\n"
                 L"Select the ROM in the file picker, pass its path on the command line, "

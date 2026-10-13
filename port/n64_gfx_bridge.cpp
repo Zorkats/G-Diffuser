@@ -7649,12 +7649,15 @@ extern "C" void gdx_vi_present_fallback(void) {
     // so fb 0 ran before mGameFb had rendered, reading stale/black content and
     // causing the intro cinematic to flicker. Fix: defer fb 0 creation to each
     // path that needs it, so the vi-scanout path creates mGameFb FIRST and fb 0
-    // SECOND (correct dependency order). The gHostFrameGfxTaskRan path needs no
-    // call because Run() already created both in correct order.
+    // SECOND (correct dependency order). The gHostFrameGfxTaskRan fast path still
+    // binds fb 0 first thing: Run() has already created mGameFb's command buffer
+    // by then, so binding fb 0 there cannot invert the order on Metal, and D3D11
+    // and OpenGL keep the exact behaviour this function was written for.
 
     // A real GFX task already produced this host frame: nothing to do. Clear the
     // flag for the next frame. This is the hot path once gameplay is rendering.
     if (gHostFrameGfxTaskRan) {
+        GdxBindWindowFramebuffer();
         gHostFrameGfxTaskRan = false;
         GdxPresentPathTrace("task-render");
         return;
