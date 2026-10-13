@@ -67,9 +67,13 @@ macOS builds clean on Apple Silicon and runs on Metal (tested on an M1 by the ma
 The bring-up replaced the Linux-only `/proc/self` probes with Mach-O and `mach_vm_region`
 equivalents, added a native ROM picker and alerts (`port/gdx_macos_ui.mm`), fixed two Metal frame
 ordering bugs, and disabled FMA contraction in `gdx-extract`, without which the extracted archive
-missed the golden SHA-256 and every boot fell back to the raw ROM. Known gaps on Metal: the
-post-shader chain and `ClearDepthRegion` use the backend defaults, and framebuffer formats other
-than 8-bit are not honoured yet.
+missed the golden SHA-256 and every boot fell back to the raw ROM. Later Metal fixes: native full
+screen (a non-opaque layer avoids direct-to-display faults), CPU read-backs that no longer
+deadlock the GPU, menu transitions that capture the previous frame instead of black, and host
+address ranges ordered so the executable's ASLR window can't shadow assets (random missing HUD
+and models). Known gaps on Metal: the course editor's dialog boxes flicker, the post-shader chain
+and `ClearDepthRegion` use the backend defaults, and framebuffer formats other than 8-bit are not
+honoured yet.
 
 ---
 
