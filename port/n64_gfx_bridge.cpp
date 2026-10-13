@@ -481,6 +481,24 @@ struct N64FramebufferInfo {
 };
 
 std::vector<HostRange> gHostRanges;
+
+/* The main-executable range (gdx_register_main_module_range) is kept LAST in gHostRanges.
+ * Translation of truncated low32 pointers takes the first registered range whose low32 window
+ * matches, and the executable's window is large (~36 MB) and, on macOS, lands wherever ASLR put
+ * the image this launch. When an asset blob's low32 happened to fall inside it, the executable won
+ * the lookup: display lists resolved into machine code ([gdl-bad], so HUD pieces, boost flames and
+ * the countdown sign silently vanished) and a DMA once wrote into read-only image memory (crash in
+ * GdxSegmentSourceRead). Keeping it last means real asset ranges are always tried first, and the
+ * executable still resolves genuine pointers into its own BSS when nothing else matches. */
+static uintptr_t sGdxExeRangeBegin = 0;
+
+static void GdxAddHostRange(uintptr_t begin, size_t size) {
+    if (sGdxExeRangeBegin != 0 && !gHostRanges.empty() && gHostRanges.back().begin == sGdxExeRangeBegin) {
+        gHostRanges.insert(gHostRanges.end() - 1, HostRange{ begin, size });
+    } else {
+        gHostRanges.push_back(HostRange{ begin, size });
+    }
+}
 std::vector<HostRange> gRawN64Ranges;
 std::vector<HostRange> gHostN64CommandRanges;
 std::vector<HostRange> gHostWideCommandRanges;
@@ -1042,7 +1060,7 @@ uintptr_t EnsureAssetSegmentImage(const AssetSegmentLookup& lookup) {
     if (gSegments[lookup.segment] == 0) {
         gSegments[lookup.segment] = base;
     }
-    gHostRanges.push_back({ base, loaded.bytes.size() });
+    GdxAddHostRange(base, loaded.bytes.size());
     gRawN64Ranges.push_back({ base, loaded.bytes.size() });
     gLoadedAssetSegments.emplace_back(std::move(loaded));
     // A freshly decoded image may rebind a segment or move the targets converted lists resolved
@@ -1788,7 +1806,7 @@ uintptr_t EnsureSetupGfxSegment() {
         const uintptr_t segBase = reinterpret_cast<uintptr_t>(gSetupGfxSegment.data());
         // Registered so RegisteredHostRemaining() treats this as ROM-backed and G_MOVEWORD cannot
         // overwrite gSegments[3] with a garbage arena-buffer address.
-        gHostRanges.push_back({ segBase, gSetupGfxSegment.size() });
+        GdxAddHostRange(segBase, gSetupGfxSegment.size());
         gHostN64CommandRanges.push_back({ segBase, gSetupGfxSegment.size() });
         if (gSegments[3] == 0) {
             gSegments[3] = segBase;
@@ -6973,7 +6991,7 @@ class N64DisplayListAdapter {
 
 extern "C" void gdx_register_host_range(void* ptr, size_t size) {
     if ((ptr == nullptr) || (size == 0)) return;
-    gHostRanges.push_back({ reinterpret_cast<uintptr_t>(ptr), size });
+    GdxAddHostRange(reinterpret_cast<uintptr_t>(ptr), size);
 }
 
 extern "C" void gdx_register_host_n64_command_range(void* ptr, size_t size) {
@@ -7963,7 +7981,8 @@ extern "C" void gdx_register_main_module_range(void) {
         }
     }
 
-    gHostRanges.push_back({ moduleBegin, moduleEnd - moduleBegin });
+    gHostRanges.push_back({ moduleBegin, moduleEnd - moduleBegin }); // must stay last: see GdxAddHostRange
+    sGdxExeRangeBegin = moduleBegin;
     gdx_port_logf("[bridge-init] registered EXE module range: base=%p low32=%08X size=0x%zx\n",
                   reinterpret_cast<void*>(moduleBegin),
                   static_cast<unsigned>(moduleBegin & 0xFFFFFFFFu),
