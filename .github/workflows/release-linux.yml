@@ -6,12 +6,19 @@ name: Release (Linux)
 # inherited: see tools/check_linux_abi.py for what is enforced and why.
 #
 # The tarball is published as a workflow artifact, not attached to the release. Uploading it
-# to a release stays a manual step.
+# to a release stays a manual step. nightly.yml calls this same workflow, so nightlies pass the
+# same portability check as tagged releases.
 
 on:
   push:
     tags:
       - 'v*'
+  workflow_call:
+    inputs:
+      version:
+        description: 'Version for the tarball name, without the leading v'
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       version:

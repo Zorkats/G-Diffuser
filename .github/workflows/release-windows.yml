@@ -7,12 +7,19 @@ name: Release (Windows)
 # by hand; tools/check_windows_deps.py now reads the import table instead of trusting memory.
 #
 # Kept separate from the Linux workflow so one platform failing never blocks the other. The zip
-# is published as a workflow artifact; attaching it to a release stays a manual step.
+# is published as a workflow artifact; attaching it to a release stays a manual step. nightly.yml
+# calls this same workflow, so nightlies pass the same dependency check as tagged releases.
 
 on:
   push:
     tags:
       - 'v*'
+  workflow_call:
+    inputs:
+      version:
+        description: 'Version for the zip name, without the leading v'
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       version:
