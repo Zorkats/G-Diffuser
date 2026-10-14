@@ -37,6 +37,7 @@ HEADER_TEMPLATE = """\
  * Generator : tools/o2r_harness/gen_expected_header.py --profile {profile}
  * Source     : deterministic gdx-extract output ({source_name})
  * Source SHA : {sha256}
+ * Content    : {content_sha256}
  * Entry count: {count}
  * Version CRC: {crc_str} ({profile} rev0, P0 contract C4)
  *
@@ -50,6 +51,15 @@ HEADER_TEMPLATE = """\
 
 #define {macro_sha} "{sha256}"
 #define {macro_count} {count}
+
+/*
+ * Order-independent content digest: SHA-256 over the sorted (name, CRC-32, size)
+ * of every central-directory record. Where the archive can be reproduced
+ * byte-for-byte the SHA-256 above is the gate; on a future toolchain proven to
+ * vary only the container layout, this is what can stand in.
+ * It proves content and completeness; only container layout is left unchecked.
+ */
+#define {macro_content} "{content_sha256}"
 
 #endif /* {guard} */
 """
@@ -83,6 +93,7 @@ JP_PLACEHOLDER_TEMPLATE = """\
 
 #define {macro_sha} "{placeholder_sha}"
 #define {macro_count} 0
+#define {macro_content} "{placeholder_sha}"
 
 #endif /* GDX_O2R_EXPECTED_JP_H */
 """
@@ -100,6 +111,7 @@ def write_jp_placeholder(out):
         rom_sha1=oc.EXPECTED_ROM_SHA1_JP,
         macro_sha=macro_sha,
         macro_count=macro_count,
+        macro_content=macro_sha.replace("_SHA256", "_CONTENT_SHA256"),
         placeholder_sha=oc.PLACEHOLDER_SHA256,
     )
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
@@ -140,11 +152,13 @@ def main(argv):
         return 2
 
     macro_sha, macro_count = oc.profile_macros(profile)
+    macro_content = macro_sha.replace("_SHA256", "_CONTENT_SHA256")
     expected_count = oc.profile_expected_count(profile)
     expected_crc = oc.profile_expected_crc(profile)
 
     count = oc.record_count(args.archive)  # dup-inclusive central-directory records (C3)
     sha = oc.sha256_file(args.archive)
+    content_sha = oc.content_digest(args.archive)
     ver = oc.check_version_entry(args.archive, expected_crc)
 
     print("profile     : %s" % profile)
@@ -154,6 +168,7 @@ def main(argv):
     else:
         print("entry count : %d (no expected count for this profile — owner-run)" % count)
     print("sha256      : %s" % sha)
+    print("content     : %s" % content_sha)
     if ver.get("crc") is not None:
         print("version CRC : 0x%08X  raw=%s  (%s)" % (ver["crc"], ver["raw_hex"], ver["reason"]))
     else:
@@ -182,11 +197,13 @@ def main(argv):
         profile=profile,
         source_name=os.path.basename(args.archive),
         sha256=sha,
+        content_sha256=content_sha,
         count=count,
         crc_str=crc_str,
         guard="GDX_O2R_EXPECTED_H" if profile == "us" else "GDX_O2R_EXPECTED_{}_H".format(profile.upper()),
         macro_sha=macro_sha,
         macro_count=macro_count,
+        macro_content=macro_content,
     )
     with open(out, "w", encoding="utf-8", newline="\n") as f:
         f.write(content)

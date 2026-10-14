@@ -1,6 +1,9 @@
 #pragma once
 
 #include <stdarg.h>
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -148,8 +151,24 @@ static inline void gdx_port_write_log(const char* message) {
             fflush(sLogFile);
         }
     }
+#ifdef __ANDROID__
+    /* stderr is a black hole on Android -- nothing reads the process's standard streams, so
+     * every line this function has ever written on that platform went nowhere. logcat is where
+     * a device's diagnostics live, so that is where these go.
+     *
+     * The trailing newline is stripped because logcat delimits records itself and would
+     * otherwise show a blank line after each one. */
+    {
+        size_t len = strlen(message);
+        while (len > 0 && (message[len - 1] == '\n' || message[len - 1] == '\r')) {
+            --len;
+        }
+        __android_log_print(ANDROID_LOG_INFO, "G-Diffuser", "%.*s", (int) len, message);
+    }
+#else
     fputs(message, stderr);
     fflush(stderr);
+#endif
 #endif
 }
 

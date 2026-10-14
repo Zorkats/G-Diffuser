@@ -16,6 +16,7 @@
  * GetMainModuleRange / ReadableByteLimit / ReadableCommandLimit / IsReadableAddress. */
 #include <atomic>
 #include <dlfcn.h>
+#include <link.h>
 #include <unistd.h>
 #endif
 
@@ -1924,6 +1925,19 @@ struct MapsRegion {
 static std::vector<MapsRegion> sMaps;               // sorted by begin, readable runs coalesced
 static std::atomic<uint32_t>   sMapsGeneration{0};
 
+/* Android's arm64 allocator uses top-byte pointer tags (for example 0xB4 in
+   0xB4000076...). The CPU intentionally ignores that byte when dereferencing, but
+   /proc/self/maps reports the canonical untagged virtual address. Preserve tagged
+   pointers everywhere the game uses or dereferences them; strip only for maps lookup
+   and extent arithmetic in this memory-probe backend. */
+static inline uintptr_t PosixProbeAddress(uintptr_t address) {
+#if defined(__ANDROID__) && defined(__aarch64__)
+    return address & 0x00FFFFFFFFFFFFFFULL;
+#else
+    return address;
+#endif
+}
+
 static void ParseProcMaps() {
     std::vector<MapsRegion> parsed;
     FILE* f = std::fopen("/proc/self/maps", "r");
@@ -1980,6 +1994,7 @@ static const MapsRegion* FindMapsRegion(uintptr_t addr) {
 
 // Copies the region out by value: a subsequent probe can re-parse and reallocate sMaps.
 static bool PosixRegionFor(uintptr_t addr, MapsRegion& out) {
+    addr = PosixProbeAddress(addr);
     if (sMaps.empty()) {
         ParseProcMaps();
     }
@@ -2023,20 +2038,99 @@ void GetMainModuleRange(uintptr_t& moduleBegin, uintptr_t& moduleEnd) {
     // Mirror "module base + SizeOfImage": take the contiguous run of /proc/self/maps entries whose
     // pathname is the main executable, using begin-of-first .. end-of-last. dladdr on a local
     // function gives the load base as a cross-check; the executable path comes from readlink of
-    // /proc/self/exe (dli_fname is a fallback, since it can be a relative/short name).
+    // /proc/self/exe (dli_fname is a fallback, since it can be a relative/short name) -- except on
+    // Android, where "the main executable" is not this program at all; see below.
     Dl_info info;
     std::memset(&info, 0, sizeof(info));
     const bool haveDl = dladdr(reinterpret_cast<void*>(&GetMainModuleRange), &info) != 0;
 
+    /* Use the dynamic loader's program headers before consulting /proc/self/maps. This is both
+       more direct and required on Android when native libraries are loaded straight from an APK:
+       dladdr names the object as "base.apk!/lib/arm64-v8a/libmain.so", while every PT_LOAD row in
+       /proc/self/maps is named only "base.apk". The exact pathname comparison below therefore
+       found nothing, left moduleEnd == 0, and disabled every bounded module/BSS resolution. Most
+       of the game's generated texture/display-list symbols live in that BSS tail, so the failure
+       cascaded into missing textures, corrupt geometry, and hundreds of expensive failed probes
+       per frame.
+
+       dl_iterate_phdr describes the complete in-memory image, including the anonymous .bss tail
+       through p_memsz, without depending on how the package manager chose to map the ELF file. */
+    if (haveDl && info.dli_fbase != nullptr) {
+        struct ModulePhdrRange {
+            uintptr_t loadBase;
+            uintptr_t target;
+            uintptr_t begin;
+            uintptr_t end;
+        } range = {
+            reinterpret_cast<uintptr_t>(info.dli_fbase),
+            reinterpret_cast<uintptr_t>(&GetMainModuleRange),
+            0,
+            0,
+        };
+
+        dl_iterate_phdr(
+            [](struct dl_phdr_info* object, size_t, void* opaque) -> int {
+                auto* result = static_cast<ModulePhdrRange*>(opaque);
+                const uintptr_t loadBase = static_cast<uintptr_t>(object->dlpi_addr);
+                bool baseMatches = (loadBase == result->loadBase);
+                bool containsTarget = false;
+                uintptr_t begin = UINTPTR_MAX;
+                uintptr_t end = 0;
+
+                for (ElfW(Half) i = 0; i < object->dlpi_phnum; ++i) {
+                    const ElfW(Phdr)& header = object->dlpi_phdr[i];
+                    if (header.p_type != PT_LOAD || header.p_memsz == 0) {
+                        continue;
+                    }
+                    const uintptr_t segmentBegin = loadBase + static_cast<uintptr_t>(header.p_vaddr);
+                    if (header.p_memsz > UINTPTR_MAX - segmentBegin) {
+                        continue;
+                    }
+                    const uintptr_t segmentEnd = segmentBegin + static_cast<uintptr_t>(header.p_memsz);
+                    begin = std::min(begin, segmentBegin);
+                    end = std::max(end, segmentEnd);
+                    containsTarget |= result->target >= segmentBegin && result->target < segmentEnd;
+                }
+
+                /* dli_fbase is authoritative. The target containment fallback covers loaders
+                   whose dlpi_addr convention differs for the main executable. */
+                if ((baseMatches || containsTarget) && begin != UINTPTR_MAX && end > begin) {
+                    result->begin = begin;
+                    result->end = end;
+                    return 1;
+                }
+                return 0;
+            },
+            &range);
+
+        if (range.begin != 0 && range.end > range.begin) {
+            moduleBegin = range.begin;
+            moduleEnd = range.end;
+            return;
+        }
+    }
+
+    const char* wantPath = nullptr;
+#ifdef __ANDROID__
+    // The order is reversed here, and it is not a preference -- it is the difference between
+    // finding the game and finding the zygote. On Android the game IS a shared library the
+    // runtime dlopen'd, so /proc/self/exe resolves to /system/bin/app_process64 and would match
+    // the app_process mappings rather than libmain.so's. dladdr on a function defined right here
+    // names the object that function actually lives in, which is the one whose range the address
+    // resolver needs.
+    if (haveDl && info.dli_fname != nullptr && info.dli_fname[0] != '\0') {
+        wantPath = info.dli_fname;
+    }
+#else
     char exePath[4096];
     ssize_t n = readlink("/proc/self/exe", exePath, sizeof(exePath) - 1);
-    const char* wantPath = nullptr;
     if (n > 0) {
         exePath[n] = '\0';
         wantPath = exePath;
     } else if (haveDl && info.dli_fname != nullptr && info.dli_fname[0] != '\0') {
         wantPath = info.dli_fname;
     }
+#endif
     if (wantPath == nullptr) {
         return;
     }
@@ -2112,7 +2206,7 @@ size_t ReadableCommandLimit(const void* source, size_t stride = kN64GfxStride) {
 
     return static_cast<size_t>((region.end - address) / stride);
 #else
-    const uintptr_t addr = reinterpret_cast<uintptr_t>(source);
+    const uintptr_t addr = PosixProbeAddress(reinterpret_cast<uintptr_t>(source));
     MapsRegion r;
     if (!PosixRegionFor(addr, r) || !r.readable) {
         return 0;
@@ -2137,6 +2231,7 @@ size_t ReadableByteLimit(uintptr_t address) {
 
     return static_cast<size_t>(region.end - address);
 #else
+    address = PosixProbeAddress(address);
     MapsRegion r;
     if (!PosixRegionFor(address, r) || !r.readable) {
         return 0;
@@ -4514,8 +4609,16 @@ class N64DisplayListAdapter {
             }
         }
 
-        // Quarantined mModuleBegin high-32 reconstruction guess.
-        if (LegacyResolveEnabled() && (mModuleBegin != 0)) {
+        /* Bounded module low32 reconstruction. This is not one of the legacy readable-page
+           guesses: GetMainModuleRange now supplies the loader's exact PT_LOAD span, and an image
+           smaller than one 4 GiB low32 window contains at most one address with these low bits.
+           All authoritative N64 segment/RDRAM/asset-token interpretations have already run above,
+           so a remaining token whose unique reconstruction lies inside libmain is a truncated
+           module/BSS pointer. Android needs this path because several original 8-byte display
+           lists embed addresses of generated BSS display lists and textures; unlike game-built
+           wide packets, those operands cannot carry the upper 32 bits. */
+        if ((mModuleBegin != 0) && (mModuleEnd > mModuleBegin) &&
+            ((mModuleEnd - mModuleBegin) <= 0x100000000ULL)) {
             uintptr_t full = (mModuleBegin & 0xFFFFFFFF00000000ULL) | static_cast<uintptr_t>(raw);
             if (full < mModuleBegin) {
                 full += 0x100000000ULL;
@@ -4529,7 +4632,6 @@ class N64DisplayListAdapter {
                 (ReadableByteLimit(full) >= requiredBytes)) {
                 out.full = full;
                 out.segmented = false;
-                RecordLegacyResolveHit(LegacyResolveBranch::kModuleHigh32, raw, gLegacyResolveCurrentOp);
                 return true;
             }
         }
@@ -8034,7 +8136,15 @@ extern "C" int gdx_load_venue_texture_segment(int venue) {
         gdx_port_logf("[segment] failed to load venue=%d symbol=%08X\n", venue, symbol);
         return 0;
     }
-    if (gGdxInterpNowFn != nullptr) {
+
+    /* Segment_LoadAssets calls this on every game tick. Venue decode is cached, so timing and
+       arming the eight-frame translation watch on every cache hit only floods Android logcat and
+       adds avoidable formatting/I/O to the render hot path. Measure once when the authoritative
+       venue/base actually changes. */
+    static int sLastVenue = -1;
+    static uintptr_t sLastBase = 0;
+    const bool venueChanged = venue != sLastVenue || base != sLastBase;
+    if (venueChanged && gGdxInterpNowFn != nullptr) {
         gdx_port_logf("[venueload] venue=%d symbol=%08X load=%.2fms epoch %u->%u\n", venue, symbol,
                       (gGdxInterpNowFn() - gdxVenueT0) * 1000.0, (unsigned) gdxEpochBefore,
                       (unsigned) gConvertEpoch);
@@ -8066,15 +8176,11 @@ extern "C" int gdx_load_venue_texture_segment(int venue) {
 
     // Segment_LoadAssets calls this every frame; log only on change so Debug
     // builds don't pay a file write + flush per frame.
-    {
-        static int sLastVenue = -1;
-        static uintptr_t sLastBase = 0;
-        if (venue != sLastVenue || base != sLastBase) {
-            sLastVenue = venue;
-            sLastBase = base;
-            gdx_port_logf("[segment] loaded venue=%d segment=10 base=%p symbol=%08X offset=%08X\n",
-                          venue, reinterpret_cast<void*>(base), symbol, offset);
-        }
+    if (venueChanged) {
+        sLastVenue = venue;
+        sLastBase = base;
+        gdx_port_logf("[segment] loaded venue=%d segment=10 base=%p symbol=%08X offset=%08X\n",
+                      venue, reinterpret_cast<void*>(base), symbol, offset);
     }
     return 1;
 }
