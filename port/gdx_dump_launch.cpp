@@ -38,6 +38,10 @@
 #include <sys/select.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>   // _NSGetExecutablePath
+#include <limits.h>        // PATH_MAX
+#endif
 #endif
 
 namespace fs = std::filesystem;
@@ -79,11 +83,24 @@ fs::path exeDir() {
     }
 #else
     char buf[4096];
+#ifdef __APPLE__
+    {
+        uint32_t bufSize = sizeof(buf);
+        if (_NSGetExecutablePath(buf, &bufSize) == 0) {
+            char resolved[PATH_MAX];
+            if (realpath(buf, resolved) != nullptr) {
+                return fs::path(resolved).parent_path();
+            }
+            return fs::path(buf).parent_path();
+        }
+    }
+#else
     ssize_t rl = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
     if (rl > 0) {
         buf[rl] = '\0';
         return fs::path(buf).parent_path();
     }
+#endif
 #endif
     return fs::current_path(ec);
 }
