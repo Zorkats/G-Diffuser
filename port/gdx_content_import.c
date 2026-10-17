@@ -10,7 +10,12 @@
 #define _CRT_SECURE_NO_WARNINGS /* plain fopen/fread below; harmless on non-MSVC */
 
 #include "gdx_content_import.h"
+#include "gdx_content_pack.h"
 #include "gdx_course_bounds.h"
+#include "gdx_course_music.h"
+#include "gdx_course_registry.h"
+#include "gdx_course_state.h"
+#include "gdx_edit_cup.h"
 #include "port_log.h"
 
 #include <stdio.h>
@@ -92,8 +97,9 @@ extern uint16_t gWorkingDirectory;
 extern int32_t gMfsError;
 extern int32_t gDirectoryEntryCount;
 
-/* EK build: course_context.c:45 defines [6 * 4][9]; the edit cup occupies the first 6 slots. */
-extern char gEditCupTrackNames[24][9];
+/* EK build: course_context.c:45 defines [6 * 4][EDIT_CUP_TRACK_NAME_SIZE] (21 in the port); the edit cup
+ * occupies the first 6 slots. MFS keeps the rows over 8 characters in CRS_ENTRY.CENL (gdx_edit_cup.h). */
+extern char gEditCupTrackNames[GDX_EDIT_CUP_ROWS][GDX_EDIT_CUP_NAME_SIZE];
 
 /* machine_create_stats.c:53 -- u8 sMachineStatWeightings[3][5], body/boost/grip x E..A. */
 extern uint8_t sMachineStatWeightings[][5];
@@ -400,6 +406,11 @@ static uint32_t gdx_import_validate_container(const char* path, GdxContentImport
     if (Mfs_ValidateFileName(name) != 0) {
         errors |= GDX_IMPORT_ERR_BAD_NAME;
     }
+    /* 8A: the name field is 21 bytes and MFS allows 20 characters. A byte in the 21st place means
+     * a 21+ character name, which the 20-byte copy above would silently truncate. Refuse it. */
+    if (header[0x24] != 0) {
+        errors |= GDX_IMPORT_ERR_BAD_NAME;
+    }
 
     if ((errors & GDX_IMPORT_ERR_BAD_SIZE) == 0) {
         payload = (uint8_t*) malloc(payloadSize);
@@ -484,9 +495,9 @@ static void gdx_import_check_disk_state(GdxContentImportEntry* entry, uint32_t* 
              * so up front. */
             int i;
             for (i = 0; i < 6; i++) {
-                char slot[10];
-                memcpy(slot, gEditCupTrackNames[i], 9);
-                slot[9] = '\0';
+                char slot[GDX_EDIT_CUP_NAME_SIZE + 1];
+                memcpy(slot, gEditCupTrackNames[i], GDX_EDIT_CUP_NAME_SIZE);
+                slot[GDX_EDIT_CUP_NAME_SIZE] = '\0';
                 if (slot[0] != '\0' && strcmp(slot, entry->name) == 0) {
                     *warnings |= GDX_IMPORT_WARN_CUP_CLEAR;
                     break;
@@ -520,13 +531,15 @@ static void gdx_import_check_disk_state(GdxContentImportEntry* entry, uint32_t* 
  * all BEFORE any write: a failed entry means no disk writes at all.
  * ------------------------------------------------------------------------------- */
 
-/* Largest legal bundle payload: u16 count + 7 entry headers + CENT + 6 track payloads. */
+/* Largest legal bundle payload: u16 count + 8 entry headers + CENT + CENL + 6 track payloads. */
 #define GDX_IMPORT_BUNDLE_MAX_PAYLOAD                                                              \
-    (2 + GDX_CONTENT_BUNDLE_ENTRY_HEADER_SIZE * (1 + GDX_CONTENT_BUNDLE_MAX_TRACKS) +              \
-     GDX_CONTENT_CENT_PAYLOAD_SIZE + GDX_CONTENT_BUNDLE_MAX_TRACKS * GDX_CONTENT_TRACK_PAYLOAD_SIZE)
+    (2 + GDX_CONTENT_BUNDLE_ENTRY_HEADER_SIZE * (2 + GDX_CONTENT_BUNDLE_MAX_TRACKS) +              \
+     GDX_CONTENT_CENT_PAYLOAD_SIZE + GDX_CONTENT_CENL_PAYLOAD_SIZE +                               \
+     GDX_CONTENT_BUNDLE_MAX_TRACKS * GDX_CONTENT_TRACK_PAYLOAD_SIZE)
 
 /* Live-MFS-state bundle checks: per-track overwrite/twin/quota, dangling CENT slots, free space
- * for the NEW files only, and the cup-replace warning (risk R6). Skipped wholesale while busy. */
+ * for the NEW files only, and the cup-replace warning (risk R6). Skipped wholesale while busy.
+ * cent is the merged wide image (GDX_EDIT_CUP_WIDE_SIZE): CENT rows plus the CENL long names. */
 static void gdx_import_check_disk_state_bundle(GdxContentImportEntry* entry, const char names[][21],
                                                int32_t trackCount, const uint8_t* cent, uint32_t* errors,
                                                uint32_t* warnings) {
@@ -574,9 +587,9 @@ static void gdx_import_check_disk_state_bundle(GdxContentImportEntry* entry, con
     /* Dangling-slot check: every non-empty Edit-Cup slot in the bundled CENT must name a
      * bundled track or a file already on disk -- anything else the game would silently clear. */
     for (i = 0; i < GDX_CONTENT_CUP_SLOT_COUNT; i++) {
-        char slot[10];
-        memcpy(slot, cent + i * 9, 9);
-        slot[9] = '\0';
+        char slot[GDX_EDIT_CUP_NAME_SIZE + 1];
+        memcpy(slot, cent + i * GDX_EDIT_CUP_NAME_SIZE, GDX_EDIT_CUP_NAME_SIZE);
+        slot[GDX_EDIT_CUP_NAME_SIZE] = '\0';
         if (slot[0] == '\0') {
             continue;
         }
@@ -613,7 +626,8 @@ static void gdx_import_check_disk_state_bundle(GdxContentImportEntry* entry, con
     }
 
     freeSize = Mfs_RamGetFreeSize();
-    needed = newNames * (int32_t) GDX_CONTENT_TRACK_PAYLOAD_SIZE + GDX_CONTENT_CENT_PAYLOAD_SIZE;
+    needed = newNames * (int32_t) GDX_CONTENT_TRACK_PAYLOAD_SIZE + GDX_CONTENT_CENT_PAYLOAD_SIZE +
+             GDX_CONTENT_CENL_PAYLOAD_SIZE;
     if (freeSize >= 0 && freeSize < needed) {
         *errors |= GDX_IMPORT_ERR_DISK_SPACE;
     }
@@ -622,6 +636,10 @@ static void gdx_import_check_disk_state_bundle(GdxContentImportEntry* entry, con
 /* Header + entry-table checks. The manifest (track names + CENT image) is always filled for the
  * disk-state check and the UI; payloads are retained only when outPayloads is non-NULL (the
  * begin path stages them straight into the buffer the disk thread installs). */
+/* CRC-32 of each accepted bundle member, from its entry header (plan slice 9, D). The bundle companion is
+ * bound to these values. Written by every validation, read by gdx_import_load_bundle_companion. */
+static uint32_t sBundleMemberCrc[GDX_CONTENT_BUNDLE_MAX_TRACKS];
+
 static uint32_t gdx_import_validate_bundle_container(const char* path, GdxContentImportEntry* entry,
                                                      int32_t* outTrackCount, char outNames[][21],
                                                      uint8_t* outCent,
@@ -714,8 +732,9 @@ static uint32_t gdx_import_validate_bundle_container(const char* path, GdxConten
         return errors | GDX_IMPORT_ERR_BUNDLE_STRUCTURE;
     }
     entryCount = gdx_import_read_u16le(payload);
-    /* At least the CENT plus one track; at most one track per Edit-Cup slot. */
-    if (entryCount < 2 || entryCount > 1 + GDX_CONTENT_BUNDLE_MAX_TRACKS) {
+    /* At least the CENT plus one track; at most the CENT, the optional CENL and one track per Edit-Cup
+     * slot. The track count itself is checked as the entries are read. */
+    if (entryCount < 2 || entryCount > 2 + GDX_CONTENT_BUNDLE_MAX_TRACKS) {
         errors |= GDX_IMPORT_ERR_BUNDLE_STRUCTURE;
     }
 
@@ -735,6 +754,10 @@ static uint32_t gdx_import_validate_bundle_container(const char* path, GdxConten
         entExt = gdx_import_read_u32le(cursor);
         memcpy(name, cursor + 4, 20);
         name[20] = '\0';
+        if (cursor[24] != 0) {
+            /* 8A: a 21+ character bundled name is refused, not truncated to its first 20 bytes. */
+            errors |= GDX_IMPORT_ERR_BAD_NAME;
+        }
         entSize = gdx_import_read_u32le(cursor + 25);
         entCrc = gdx_import_read_u32le(cursor + 29);
         cursor += GDX_CONTENT_BUNDLE_ENTRY_HEADER_SIZE;
@@ -755,8 +778,21 @@ static uint32_t gdx_import_validate_bundle_container(const char* path, GdxConten
             if (gdx_content_crc32(entPayload, entSize) != entCrc) {
                 errors |= GDX_IMPORT_ERR_BAD_CRC;
             }
-            memcpy(outCent, entPayload, GDX_CONTENT_CENT_PAYLOAD_SIZE);
+            gdx_edit_cup_unpack_cent(entPayload, (char*) outCent);
             haveCent = 1;
+            continue;
+        }
+        if (i == 1 && entExt == gdx_import_fourcc("CENL")) {
+            /* Optional entry 1: the long cup names, the CRS_ENTRY.CENL image (gdx_edit_cup.h). */
+            if (strcmp(name, "CRS_ENTRY") != 0 || !haveCent ||
+                !gdx_edit_cup_cenl_valid(entPayload, (long) entSize)) {
+                errors |= GDX_IMPORT_ERR_BUNDLE_CENT;
+                continue;
+            }
+            if (gdx_content_crc32(entPayload, entSize) != entCrc) {
+                errors |= GDX_IMPORT_ERR_BAD_CRC;
+            }
+            gdx_edit_cup_merge_cenl(entPayload, (char*) outCent);
             continue;
         }
 
@@ -771,10 +807,6 @@ static uint32_t gdx_import_validate_bundle_container(const char* path, GdxConten
         }
         if (Mfs_ValidateFileName(name) != 0) {
             errors |= GDX_IMPORT_ERR_BAD_NAME;
-        }
-        /* A cup slot holds 8 chars + NUL; a longer track name can never be cup-registered. */
-        if (strlen(name) > GDX_CONTENT_CUP_NAME_MAX) {
-            errors |= GDX_IMPORT_ERR_BUNDLE_CENT;
         }
         /* The same track twice in one bundle is malformed (export dedupes by name). */
         {
@@ -791,6 +823,7 @@ static uint32_t gdx_import_validate_bundle_container(const char* path, GdxConten
         }
         if (trackCount < GDX_CONTENT_BUNDLE_MAX_TRACKS) {
             memcpy(outNames[trackCount], name, sizeof(outNames[trackCount]));
+            sBundleMemberCrc[trackCount] = entCrc;
             if (outPayloads != NULL && entSize == GDX_CONTENT_TRACK_PAYLOAD_SIZE) {
                 memcpy(outPayloads[trackCount], entPayload, GDX_CONTENT_TRACK_PAYLOAD_SIZE);
             }
@@ -807,6 +840,8 @@ static uint32_t gdx_import_validate_bundle_container(const char* path, GdxConten
                     snprintf(entry->bundleContents + used, sizeof(entry->bundleContents) - used, "%s", name);
                 }
             }
+        } else {
+            errors |= GDX_IMPORT_ERR_BUNDLE_STRUCTURE; /* more tracks than Edit-Cup slots */
         }
     }
     if (cursor != end) {
@@ -840,6 +875,8 @@ static void gdx_import_validate_bundle(const char* path, GdxContentImportEntry* 
     entry->warnings = warnings;
 }
 
+static void gdx_import_read_title(const char* gdxcPath, int32_t contentType, char* outTitle, size_t outCap);
+
 static void gdx_import_validate_all(const char* path, GdxContentImportEntry* entry, uint8_t* payloadOut) {
     uint32_t warnings = 0;
 
@@ -850,17 +887,19 @@ static void gdx_import_validate_all(const char* path, GdxContentImportEntry* ent
     entry->classFileCount = -1;
     entry->bundleTrackCount = -1;
     entry->bundleContents[0] = '\0';
+    entry->title[0] = '\0';
 
     if (gdx_import_peek_content_type(path) == GDX_CONTENT_TYPE_BUNDLE) {
         int32_t trackCount = 0;
         char names[GDX_CONTENT_BUNDLE_MAX_TRACKS][21];
-        uint8_t cent[GDX_CONTENT_CENT_PAYLOAD_SIZE];
+        uint8_t cent[GDX_EDIT_CUP_WIDE_SIZE];
         gdx_import_validate_bundle(path, entry, &trackCount, names, cent, NULL);
         entry->bundleTrackCount = trackCount;
         return;
     }
 
     entry->errors = gdx_import_validate_container(path, entry, payloadOut);
+    gdx_import_read_title(path, entry->contentType, entry->title, sizeof(entry->title));
     if ((entry->errors & (GDX_IMPORT_ERR_IO | GDX_IMPORT_ERR_BAD_TYPE | GDX_IMPORT_ERR_BAD_EXT |
                           GDX_IMPORT_ERR_TYPE_EXT_MISMATCH | GDX_IMPORT_ERR_BAD_NAME)) == 0) {
         gdx_import_check_disk_state(entry, &entry->errors, &warnings);
@@ -873,6 +912,67 @@ static void gdx_import_validate_all(const char* path, GdxContentImportEntry* ent
 /* ---------------------------------------------------------------------------------
  * exports/ enumeration (same host-directory pattern as gdx_ghost_io.c's library list).
  * ------------------------------------------------------------------------------- */
+
+static int gdx_import_has_gdxc_suffix(const char* path, size_t len);
+
+/* "<dir>/<name>" with the host separator. Returns 0 when it does not fit. */
+static int gdx_import_join_path(char* out, size_t outCap, const char* dir, const char* name) {
+#ifdef _WIN32
+    int n = snprintf(out, outCap, "%s\\%s", dir, name);
+#else
+    int n = snprintf(out, outCap, "%s/%s", dir, name);
+#endif
+    return n >= 0 && (size_t) n < outCap;
+}
+
+/* .gdxp: unpacks exports/<fileName> into exports/.gdxp-import (withAudio 0 leaves the songs out) and
+ * writes that folder into workDir and its .gdxc into innerPath. Returns GDX_CONTENT_PACK_OK, or a
+ * logged GDX_CONTENT_PACK_ERR_* code after removing the folder. */
+static int gdx_import_unpack(const char* directory, const char* fileName, int withAudio, char* workDir, size_t workCap,
+                             char* innerPath, size_t innerCap) {
+    char packPath[1600];
+    char container[GDX_CONTENT_PACK_NAME_MAX + 1];
+    int rc = GDX_CONTENT_PACK_ERR_ARGS;
+
+    if (gdx_import_join_path(packPath, sizeof(packPath), directory, fileName) &&
+        gdx_import_join_path(workDir, workCap, directory, GDX_CONTENT_PACK_IMPORT_WORK_DIR)) {
+        rc = gdx_content_pack_extract(packPath, workDir, withAudio, container, (int) sizeof(container));
+        if (rc == GDX_CONTENT_PACK_OK && !gdx_import_join_path(innerPath, innerCap, workDir, container)) {
+            rc = GDX_CONTENT_PACK_ERR_ARGS;
+        }
+        if (rc != GDX_CONTENT_PACK_OK) {
+            gdx_content_pack_clear_dir(workDir, 1);
+        }
+    }
+    if (rc != GDX_CONTENT_PACK_OK) {
+        gdx_port_logf("[import] %s: %s\n", fileName, gdx_content_pack_error_string(rc));
+    }
+    return rc;
+}
+
+/* Fills one list row for exports/<fileName>, a .gdxc or a .gdxp. */
+static void gdx_import_list_entry(const char* directory, const char* fileName, GdxContentImportEntry* entry) {
+    char path[1600];
+    char workDir[1400];
+
+    snprintf(entry->fileName, sizeof(entry->fileName), "%s", fileName);
+    if (gdx_content_pack_is_package_name(fileName)) {
+        if (gdx_import_unpack(directory, fileName, 0, workDir, sizeof(workDir), path, sizeof(path)) !=
+            GDX_CONTENT_PACK_OK) {
+            gdx_import_validate_all("", entry, NULL); /* resets the other fields of the row */
+            entry->errors = GDX_IMPORT_ERR_BAD_PACKAGE;
+            entry->warnings = 0;
+            return;
+        }
+        gdx_import_validate_all(path, entry, NULL);
+        gdx_content_pack_clear_dir(workDir, 1);
+        return;
+    }
+    if (!gdx_import_join_path(path, sizeof(path), directory, fileName)) {
+        path[0] = '\0'; /* reads as unreadable */
+    }
+    gdx_import_validate_all(path, entry, NULL);
+}
 
 int gdx_content_import_list(GdxContentImportEntry* outEntries, int capacity) {
     char directory[1200];
@@ -890,7 +990,7 @@ int gdx_content_import_list(GdxContentImportEntry* outEntries, int capacity) {
         WIN32_FIND_DATAA findData;
         HANDLE findHandle;
         char pattern[1400];
-        int n = snprintf(pattern, sizeof(pattern), "%s\\*.gdxc", directory);
+        int n = snprintf(pattern, sizeof(pattern), "%s\\*", directory);
         if (n < 0 || (size_t) n >= sizeof(pattern)) {
             return GDX_CONTENT_ERR_IO;
         }
@@ -899,16 +999,14 @@ int gdx_content_import_list(GdxContentImportEntry* outEntries, int capacity) {
             return 0;
         }
         do {
-            char path[1600];
             if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 || count >= capacity) {
                 continue;
             }
-            n = snprintf(path, sizeof(path), "%s\\%s", directory, findData.cFileName);
-            if (n < 0 || (size_t) n >= sizeof(path)) {
+            if (!gdx_import_has_gdxc_suffix(findData.cFileName, strlen(findData.cFileName)) &&
+                !gdx_content_pack_is_package_name(findData.cFileName)) {
                 continue;
             }
-            snprintf(outEntries[count].fileName, sizeof(outEntries[count].fileName), "%s", findData.cFileName);
-            gdx_import_validate_all(path, &outEntries[count], NULL);
+            gdx_import_list_entry(directory, findData.cFileName, &outEntries[count]);
             count++;
         } while (FindNextFileA(findHandle, &findData));
         FindClose(findHandle);
@@ -921,18 +1019,12 @@ int gdx_content_import_list(GdxContentImportEntry* outEntries, int capacity) {
             return errno == ENOENT ? 0 : GDX_CONTENT_ERR_IO;
         }
         while ((item = readdir(dir)) != NULL && count < capacity) {
-            char path[1600];
             size_t nameLen = strlen(item->d_name);
-            int n;
-            if (nameLen < 6 || strcmp(item->d_name + nameLen - 5, ".gdxc") != 0) {
+            int package = nameLen >= 6 && strcmp(item->d_name + nameLen - 5, GDX_CONTENT_PACK_EXT) == 0;
+            if (!package && (nameLen < 6 || strcmp(item->d_name + nameLen - 5, ".gdxc") != 0)) {
                 continue;
             }
-            n = snprintf(path, sizeof(path), "%s/%s", directory, item->d_name);
-            if (n < 0 || (size_t) n >= sizeof(path)) {
-                continue;
-            }
-            snprintf(outEntries[count].fileName, sizeof(outEntries[count].fileName), "%s", item->d_name);
-            gdx_import_validate_all(path, &outEntries[count], NULL);
+            gdx_import_list_entry(directory, item->d_name, &outEntries[count]);
             count++;
         }
         closedir(dir);
@@ -962,6 +1054,7 @@ static volatile int32_t sImportCupCleared = 0;
 
 static char sImportName[21];
 static char sImportExtension[6];
+static char sImportTitle[GDX_COURSE_TITLE_MAX + 1]; /* 8A: "" unless a .gdxt sidecar was read */
 static int32_t sImportContentType;
 static uint32_t sImportPayloadSize;
 static uint8_t sImportPayload[GDX_CONTENT_TRACK_PAYLOAD_SIZE];
@@ -992,9 +1085,9 @@ void GdxContentImport_RunOnDiskThread(void) {
          * a stale gEditCupTrackNames is never written back over the user's CENT. */
         int i;
         for (i = 0; i < 6; i++) {
-            char slot[10];
-            memcpy(slot, gEditCupTrackNames[i], 9);
-            slot[9] = '\0';
+            char slot[GDX_EDIT_CUP_NAME_SIZE + 1];
+            memcpy(slot, gEditCupTrackNames[i], GDX_EDIT_CUP_NAME_SIZE);
+            slot[GDX_EDIT_CUP_NAME_SIZE] = '\0';
             if (slot[0] != '\0' && strcmp(slot, sImportName) == 0) {
                 gEditCupTrackNames[i][0] = '\0';
                 cupCleared++;
@@ -1020,7 +1113,7 @@ void GdxContentImport_RunOnDiskThread(void) {
 
 static int32_t sBundleTrackCount;
 static char sBundleNames[GDX_CONTENT_BUNDLE_MAX_TRACKS][21];
-static uint8_t sBundleCent[GDX_CONTENT_CENT_PAYLOAD_SIZE];
+static uint8_t sBundleCent[GDX_EDIT_CUP_WIDE_SIZE]; /* merged CENT + CENL rows */
 static uint8_t sBundlePayloads[GDX_CONTENT_BUNDLE_MAX_TRACKS][GDX_CONTENT_TRACK_PAYLOAD_SIZE];
 static volatile int32_t sBundleFailedIndex = -1;
 
@@ -1046,7 +1139,7 @@ void GdxContentBundle_RunOnDiskThread(void) {
         /* Only the 6 Edit-Cup rows merge; rows 6..23 of the in-memory image hold the importer's
          * other cups and keep their state. */
         for (i = 0; i < GDX_CONTENT_CUP_SLOT_COUNT; i++) {
-            memcpy(gEditCupTrackNames[i], sBundleCent + i * 9, 9);
+            memcpy(gEditCupTrackNames[i], sBundleCent + i * GDX_EDIT_CUP_NAME_SIZE, GDX_EDIT_CUP_NAME_SIZE);
         }
         rc = Mfs_SaveFile(gWorkingDirectory, "CRS_ENTRY", "CENT", (uint8_t*) gEditCupTrackNames,
                           sizeof(gEditCupTrackNames), 0, 0xFF, 1);
@@ -1075,13 +1168,13 @@ enum {
 static volatile int32_t sCupState = GDX_CUP_IDLE;
 static volatile int32_t sCupRc = 0;
 static volatile int32_t sCupMfsError = 0;
-static char sCupSlotName[GDX_CONTENT_CUP_NAME_MAX + 1]; /* NUL-padded to the full 9-byte slot */
+static char sCupSlotName[GDX_CONTENT_CUP_NAME_MAX + 1]; /* NUL-padded to the full slot */
 static int32_t sCupSlot = 0;
 static int32_t sCupMode = 0; /* 1 = register, 0 = unregister */
 
 /* Runs on the game's disk thread, dispatched from op slot 31 in decomp/src/sys/disk/75000.c.
  * The CENT persist mirrors func_xk2_800EC110 (course_edit/19D4A0.c:176-181), minus the input
- * lock the in-editor flow needs. */
+ * lock the in-editor flow needs. MFS writes CRS_ENTRY.CENL beside it for names over 8. */
 void GdxContentCup_RunOnDiskThread(void) {
     int32_t rc;
 
@@ -1099,11 +1192,377 @@ void GdxContentCup_RunOnDiskThread(void) {
     sCupState = GDX_CUP_DONE;
 }
 
+/* ---------------------------------------------------------------------------------
+ * GXE1 extension sidecar (gdx_course_registry.h). Advisory only: it never changes the install
+ * decision. CourseData keeps the stock values, so a course whose sidecar is missing, invalid, or
+ * names unknown keys still installs, and the result is kept for the UI.
+ * ------------------------------------------------------------------------------- */
+
+static GdxContentImportExtension sImportExtInfo;
+static GdxCourseExtBlock sImportSidecarBlock;
+static unsigned char sImportSidecarBytes[GDX_COURSE_EXT_MAX_BYTES + 1];
+
+/* True when path ends in ".gdxc", in any case (the Windows directory scan is case-insensitive). */
+static int gdx_import_has_gdxc_suffix(const char* path, size_t len) {
+    static const char kSuffix[] = ".gdxc";
+    size_t i;
+
+    if (len < 5) {
+        return 0;
+    }
+    for (i = 0; i < 5; i++) {
+        char c = path[len - 5 + i];
+
+        if (c >= 'A' && c <= 'Z') {
+            c = (char) (c - 'A' + 'a');
+        }
+        if (c != kSuffix[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* "<dir>/<stem>.gdxc" becomes "<dir>/<stem>" + ext (".gdxe" or ".gdxt", five characters). Returns 0
+ * when the path does not fit or is not a .gdxc. */
+static int gdx_import_sidecar_path(const char* gdxcPath, const char* ext, char* out, size_t outCap) {
+    size_t len = strlen(gdxcPath);
+
+    if (len >= outCap || !gdx_import_has_gdxc_suffix(gdxcPath, len)) {
+        return 0;
+    }
+    memcpy(out, gdxcPath, len + 1);
+    memcpy(out + len - 5, ext, 6);
+    return 1;
+}
+
+/* 7A: makes the song of a BGM record available (gdx_course_music_adopt) and points the record at the
+ * key the song was stored under, which differs from the shared key when a different song already uses
+ * that name here. */
+static void gdx_import_adopt_music(const char* gdxcPath, GdxCourseExtRecord* rec) {
+    char key[GDX_COURSE_KEY_MAX + 1];
+
+    if (gdx_course_music_adopt(gdxcPath, rec->key, key, (int) sizeof(key)) == 1 && strcmp(key, rec->key) != 0) {
+        gdx_port_logf("[import] %s: song stored as %s\n", rec->key, key);
+        snprintf(rec->key, sizeof(rec->key), "%s", key);
+    }
+}
+
+/* Reads the sidecar of a track container into sImportExtInfo. payload is the validated track
+ * payload, and its controlPointCount byte (0x001) bounds the point-scoped records. The payload
+ * CRC-32 comes from the container header, not from the payload bytes: gdx_import_sanitize_course_pit
+ * rewrites pit values in place after the CRC check, so a recomputed CRC would not match. */
+static void gdx_import_read_extension(const char* gdxcPath, int32_t contentType, const uint8_t* payload) {
+    GdxContentImportExtension* info = &sImportExtInfo;
+    unsigned char header[GDX_CONTENT_HEADER_SIZE];
+    char sidecarPath[1600];
+    size_t length;
+    uint32_t payloadCrc;
+    FILE* f;
+    int ok;
+    int rc;
+    int i;
+
+    if (contentType != GDX_CONTENT_TYPE_TRACK) {
+        return;
+    }
+    f = fopen(gdxcPath, "rb");
+    if (f == NULL) {
+        info->status = GDX_CONTENT_EXT_IO;
+        return;
+    }
+    ok = fread(header, 1, sizeof(header), f) == sizeof(header);
+    fclose(f);
+    if (!ok) {
+        info->status = GDX_CONTENT_EXT_IO;
+        return;
+    }
+    if ((gdx_import_read_u32le(header + 0x25) & GDX_CONTENT_FLAG_EXTENSIONS) == 0) {
+        return;
+    }
+    payloadCrc = gdx_import_read_u32le(header + 0x2D);
+
+    if (!gdx_import_sidecar_path(gdxcPath, ".gdxe", sidecarPath, sizeof(sidecarPath))) {
+        info->status = GDX_CONTENT_EXT_IO;
+        return;
+    }
+    f = fopen(sidecarPath, "rb");
+    if (f == NULL) {
+        info->status = GDX_CONTENT_EXT_SIDECAR_MISSING;
+        return;
+    }
+    /* One byte past the largest legal block is read, so an oversized file is caught below. */
+    length = fread(sImportSidecarBytes, 1, sizeof(sImportSidecarBytes), f);
+    ok = ferror(f) == 0;
+    fclose(f);
+    if (!ok) {
+        info->status = GDX_CONTENT_EXT_IO;
+        return;
+    }
+    if (length > GDX_COURSE_EXT_MAX_BYTES) {
+        info->status = GDX_CONTENT_EXT_SIDECAR_INVALID;
+        info->decodeCode = GDX_COURSE_EXT_ERR_LAYOUT;
+        return;
+    }
+    rc = gdx_course_ext_decode(sImportSidecarBytes, length, payloadCrc, &sImportSidecarBlock);
+    if (rc != GDX_COURSE_OK) {
+        info->status = GDX_CONTENT_EXT_SIDECAR_INVALID;
+        info->decodeCode = rc;
+        return;
+    }
+    for (i = 0; i < sImportSidecarBlock.count; i++) {
+        int scope = sImportSidecarBlock.records[i].scope;
+
+        if (scope != GDX_COURSE_SCOPE_COURSE && scope >= (int8_t) payload[0x001]) {
+            info->status = GDX_CONTENT_EXT_SIDECAR_INVALID;
+            info->decodeCode = GDX_COURSE_ERR_SCOPE;
+            return;
+        }
+    }
+
+    info->recordCount = sImportSidecarBlock.count;
+    for (i = 0; i < sImportSidecarBlock.count; i++) {
+        GdxCourseExtRecord* rec = &sImportSidecarBlock.records[i];
+        int missing = 0;
+
+        if (rec->kind == GDX_COURSE_KIND_BGM) {
+            /* 7A: a custom track travels as a file beside the .gdxc. Adopting it can move the record to a
+             * fingerprint key when a different song already uses the name. */
+            gdx_import_adopt_music(gdxcPath, rec);
+        }
+        gdx_course_registry_resolve((GdxCourseKind) rec->kind, rec->key, &missing);
+        if (!missing) {
+            info->resolvedCount++;
+            continue;
+        }
+        info->missingCount++;
+        if (info->missingStored < GDX_CONTENT_EXT_MISSING_MAX) {
+            snprintf(info->missingKeys[info->missingStored], sizeof(info->missingKeys[0]), "%s", rec->key);
+            info->missingStored++;
+        }
+    }
+    info->status = GDX_CONTENT_EXT_OK;
+}
+
+/* 8A: reads <stem>.gdxt into outTitle when the container has flag bit 3. A sidecar that does not
+ * decode, or is bound to another payload CRC, is ignored: the course then installs under its file
+ * name, which is still a valid install. outTitle is "" in every other case. */
+static void gdx_import_read_title(const char* gdxcPath, int32_t contentType, char* outTitle, size_t outCap) {
+    unsigned char header[GDX_CONTENT_HEADER_SIZE];
+    unsigned char block[GDX_COURSE_TITLE_MAX_BYTES + 1];
+    char sidecarPath[1600];
+    size_t length;
+    FILE* f;
+
+    outTitle[0] = '\0';
+    if (contentType != GDX_CONTENT_TYPE_TRACK) {
+        return;
+    }
+    f = fopen(gdxcPath, "rb");
+    if (f == NULL) {
+        return;
+    }
+    length = fread(header, 1, sizeof(header), f);
+    fclose(f);
+    if (length != sizeof(header) || (gdx_import_read_u32le(header + 0x25) & GDX_CONTENT_FLAG_TITLE) == 0) {
+        return;
+    }
+    if (!gdx_import_sidecar_path(gdxcPath, ".gdxt", sidecarPath, sizeof(sidecarPath))) {
+        return;
+    }
+    f = fopen(sidecarPath, "rb");
+    if (f == NULL) {
+        return;
+    }
+    /* One byte past the largest legal block is read, so an oversized file is caught below. */
+    length = fread(block, 1, sizeof(block), f);
+    fclose(f);
+    if (length > GDX_COURSE_TITLE_MAX_BYTES) {
+        return;
+    }
+    if (gdx_course_title_decode(block, length, gdx_import_read_u32le(header + 0x2D), outTitle, outCap) !=
+        GDX_COURSE_OK) {
+        outTitle[0] = '\0';
+    }
+}
+
+/* ---------------------------------------------------------------------------------
+ * Plan slice 9, D: keys and titles of an import. The keys travel as a GXE1 sidecar for a single
+ * track and as a GXS1 companion (exports/<stem>.gdxs) for a bundle. Both are read in begin(), and the
+ * store is changed only in result(), after the disk thread reports success. A failed install touches
+ * neither the files nor the store.
+ * ------------------------------------------------------------------------------- */
+
+typedef struct GdxImportMemberState {
+    int recordCount;
+    GdxCourseExtRecord records[GDX_COURSE_EXT_MAX_RECORDS];
+    int hasTitle;
+    char title[GDX_COURSE_TITLE_MAX + 1];
+} GdxImportMemberState;
+
+static GdxImportMemberState sBundleMember[GDX_CONTENT_BUNDLE_MAX_TRACKS];
+static int sBundleCompanionOk = 0; /* 1 when the companion decoded and bound to every member */
+
+typedef struct GdxImportCompanionCtx {
+    int commit; /* 0 = verify only, 1 = copy into sBundleMember */
+    const char* gdxcPath;
+} GdxImportCompanionCtx;
+
+/* Index of the bundle member whose course id is courseId ("NAME.CRSD"), or -1. */
+static int gdx_import_member_index(const char* courseId) {
+    char id[GDX_COURSE_FILE_ID_MAX + 1];
+    int i;
+
+    for (i = 0; i < sBundleTrackCount; i++) {
+        snprintf(id, sizeof(id), "%s.CRSD", sBundleNames[i]);
+        if (strcmp(id, courseId) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int gdx_import_companion_visit(void* ctxPtr, const GdxCourseStateEntry* entry) {
+    GdxImportCompanionCtx* ctx = (GdxImportCompanionCtx*) ctxPtr;
+    GdxImportMemberState* state;
+    int m = gdx_import_member_index(entry->courseId);
+
+    /* An entry must belong to a member and carry that member's payload CRC, or the whole companion is
+     * refused. */
+    if (m < 0 || entry->bindCrc != sBundleMemberCrc[m]) {
+        return GDX_COURSE_STATE_ERR_ENTRY;
+    }
+    if (!ctx->commit) {
+        return GDX_COURSE_OK;
+    }
+    state = &sBundleMember[m];
+    memset(state, 0, sizeof(*state));
+    if (entry->recordCount > 0) {
+        state->recordCount = entry->recordCount;
+        memcpy(state->records, entry->records, (size_t) entry->recordCount * sizeof(GdxCourseExtRecord));
+    }
+    if (entry->hasTitle) {
+        state->hasTitle = 1;
+        snprintf(state->title, sizeof(state->title), "%s", entry->title);
+    }
+    return GDX_COURSE_OK;
+}
+
+/* Reads the companion of a bundle when the .gdxc says it has one (flag bit 2 or bit 3). Everything or nothing:
+ * a companion that fails to decode or to bind to a member is ignored in full and logged. Music of the
+ * members is adopted from the same folder, as for a single track. */
+static void gdx_import_load_bundle_companion(const char* gdxcPath) {
+    unsigned char header[GDX_CONTENT_HEADER_SIZE];
+    char sidecarPath[1600];
+    unsigned char* bytes;
+    GdxImportCompanionCtx ctx;
+    size_t length;
+    FILE* f;
+    int ioError;
+    int rc;
+    int m;
+    int r;
+
+    memset(sBundleMember, 0, sizeof(sBundleMember));
+    sBundleCompanionOk = 0;
+
+    f = fopen(gdxcPath, "rb");
+    if (f == NULL) {
+        return;
+    }
+    length = fread(header, 1, sizeof(header), f);
+    fclose(f);
+    if (length != sizeof(header) ||
+        (gdx_import_read_u32le(header + 0x25) & (GDX_CONTENT_FLAG_EXTENSIONS | GDX_CONTENT_FLAG_TITLE)) == 0) {
+        return; /* no companion: every member installs without keys or title */
+    }
+    if (!gdx_import_sidecar_path(gdxcPath, ".gdxs", sidecarPath, sizeof(sidecarPath))) {
+        return;
+    }
+    f = fopen(sidecarPath, "rb");
+    if (f == NULL) {
+        gdx_port_logf("[import] %s: bundle companion missing, keys and titles skipped\n", gdxcPath);
+        return;
+    }
+    bytes = (unsigned char*) malloc(GDX_COURSE_STATE_MAX_BYTES + 1);
+    if (bytes == NULL) {
+        fclose(f);
+        return;
+    }
+    /* One byte past the largest legal file is read, so an oversized file is caught below. */
+    length = fread(bytes, 1, GDX_COURSE_STATE_MAX_BYTES + 1, f);
+    ioError = ferror(f) != 0;
+    fclose(f);
+    if (ioError || length > GDX_COURSE_STATE_MAX_BYTES) {
+        gdx_port_logf("[import] %s: bundle companion unreadable, keys and titles skipped\n", sidecarPath);
+        free(bytes);
+        return;
+    }
+
+    ctx.commit = 0;
+    ctx.gdxcPath = gdxcPath;
+    rc = gdx_course_state_decode(bytes, length, gdx_import_companion_visit, &ctx);
+    if (rc == GDX_COURSE_OK) {
+        ctx.commit = 1;
+        rc = gdx_course_state_decode(bytes, length, gdx_import_companion_visit, &ctx);
+    }
+    free(bytes);
+    if (rc != GDX_COURSE_OK) {
+        gdx_port_logf("[import] %s: bundle companion rejected (%d), keys and titles skipped\n", sidecarPath, rc);
+        memset(sBundleMember, 0, sizeof(sBundleMember));
+        return;
+    }
+    sBundleCompanionOk = 1;
+
+    for (m = 0; m < sBundleTrackCount; m++) {
+        for (r = 0; r < sBundleMember[m].recordCount; r++) {
+            GdxCourseExtRecord* rec = &sBundleMember[m].records[r];
+
+            if (rec->kind == GDX_COURSE_KIND_BGM) {
+                gdx_import_adopt_music(gdxcPath, rec);
+            }
+        }
+    }
+}
+
+/* Replaces the keys and the title of one installed track. count 0 clears the old keys, because the
+ * installed file replaces the one that carried them. A NULL or empty title clears the old title. */
+static void gdx_import_store_track(const char* courseId, const GdxCourseExtRecord* records, int count,
+                                   const char* title) {
+    int rc = gdx_course_ext_restore(courseId, count > 0 ? records : NULL, count > 0 ? count : 0);
+
+    if (rc != GDX_COURSE_OK) {
+        gdx_port_logf("[import] %s: keys not stored (%d)\n", courseId, rc);
+    }
+    if (title != NULL && title[0] != '\0') {
+        rc = gdx_course_title_set(courseId, title);
+        if (rc != GDX_COURSE_OK) {
+            gdx_port_logf("[import] %s: title not stored (%d)\n", courseId, rc);
+        }
+    } else {
+        gdx_course_title_clear(courseId);
+    }
+}
+
+int gdx_content_import_last_extension(GdxContentImportExtension* out) {
+    if (out == NULL) {
+        return GDX_CONTENT_ERR_BAD_ARGS;
+    }
+    *out = sImportExtInfo;
+    return GDX_CONTENT_OK;
+}
+
+static int gdx_import_begin_path(const char* path);
+
 int gdx_content_import_begin(const char* fileName) {
     char directory[1200];
     char path[1600];
-    GdxContentImportEntry entry;
     int n;
+
+    memset(&sImportExtInfo, 0, sizeof(sImportExtInfo));
+    sImportTitle[0] = '\0';
+    sImportSidecarBlock.count = 0;
+    gdx_course_boot(); /* the store must be loaded before result() can replace a track's keys */
 
     if (fileName == NULL || fileName[0] == '\0' || strchr(fileName, '/') != NULL ||
         strchr(fileName, '\\') != NULL || strstr(fileName, "..") != NULL) {
@@ -1130,6 +1589,28 @@ int gdx_content_import_begin(const char* fileName) {
         return GDX_CONTENT_ERR_BAD_ARGS;
     }
 
+    if (gdx_content_pack_is_package_name(fileName)) {
+        /* Every file the steps below read (container, sidecars, songs) is read before they return; the
+         * install itself runs from the staged buffers, so the unpacked folder can go right away. */
+        char workDir[1400];
+        char innerPath[1600];
+        int rc;
+
+        if (gdx_import_unpack(directory, fileName, 1, workDir, sizeof(workDir), innerPath, sizeof(innerPath)) !=
+            GDX_CONTENT_PACK_OK) {
+            return GDX_CONTENT_IMPORT_ERR_VALIDATION;
+        }
+        rc = gdx_import_begin_path(innerPath);
+        gdx_content_pack_clear_dir(workDir, 1);
+        return rc;
+    }
+    return gdx_import_begin_path(path);
+}
+
+/* The validate, read and enqueue steps of gdx_content_import_begin for one .gdxc path. */
+static int gdx_import_begin_path(const char* path) {
+    GdxContentImportEntry entry;
+
     if (gdx_import_peek_content_type(path) == GDX_CONTENT_TYPE_BUNDLE) {
         /* Bundle: re-read and re-validate every entry from disk; validated payloads stage
          * straight into the buffers the disk thread installs. All-or-nothing: any error bit
@@ -1143,6 +1624,8 @@ int gdx_content_import_begin(const char* fileName) {
             sBundleTrackCount = 0;
             return GDX_CONTENT_IMPORT_ERR_VALIDATION;
         }
+        gdx_import_load_bundle_companion(path); /* 9D: member keys and titles, staged for result() */
+        sImportContentType = GDX_CONTENT_TYPE_BUNDLE; /* keeps result() from applying a stale single-track title */
         sImportRc = 0;
         sImportMfsError = 0;
         sImportCupCleared = 0;
@@ -1160,6 +1643,8 @@ int gdx_content_import_begin(const char* fileName) {
     if (entry.errors != 0) {
         return GDX_CONTENT_IMPORT_ERR_VALIDATION;
     }
+    gdx_import_read_extension(path, entry.contentType, sImportPayload);
+    memcpy(sImportTitle, entry.title, sizeof(sImportTitle));
 
     memcpy(sImportName, entry.name, sizeof(sImportName));
     memcpy(sImportExtension, entry.extension, sizeof(sImportExtension));
@@ -1192,6 +1677,39 @@ int gdx_content_import_result(int32_t* outMfsError) {
     rc = sImportRc;
     if (outMfsError != NULL) {
         *outMfsError = sImportMfsError;
+    }
+    if (rc == 0 && sImportContentType == GDX_CONTENT_TYPE_TRACK) {
+        /* 8A and 9D: the keys and the title follow the installed file. A track with a .gdxe or .gdxt
+         * gets them back; a track without one clears what a previous install of the same name left
+         * behind. */
+        char courseId[GDX_COURSE_FILE_ID_MAX + 1];
+        int keyed = sImportExtInfo.status == GDX_CONTENT_EXT_OK;
+
+        snprintf(courseId, sizeof(courseId), "%s.%s", sImportName, sImportExtension);
+        gdx_import_store_track(courseId, keyed ? sImportSidecarBlock.records : NULL, keyed ? sImportSidecarBlock.count : 0,
+                               sImportTitle);
+        gdx_course_state_flush();
+    }
+    if (sImportContentType == GDX_CONTENT_TYPE_BUNDLE) {
+        /* 9D: each member takes the keys and title its companion carried, as a track does. A failed
+         * install replaced the members below sBundleFailedIndex (all of them when only CENT failed);
+         * the rest keep their store entries. */
+        int limit = sBundleTrackCount;
+        int m;
+
+        if (rc != 0) {
+            limit = sBundleFailedIndex >= 0 ? (int) sBundleFailedIndex : 0;
+        }
+        for (m = 0; m < limit && m < sBundleTrackCount; m++) {
+            const GdxImportMemberState* state = &sBundleMember[m];
+            int keyed = sBundleCompanionOk;
+            char courseId[GDX_COURSE_FILE_ID_MAX + 1];
+
+            snprintf(courseId, sizeof(courseId), "%s.CRSD", sBundleNames[m]);
+            gdx_import_store_track(courseId, keyed ? state->records : NULL, keyed ? state->recordCount : 0,
+                                   keyed && state->hasTitle ? state->title : NULL);
+        }
+        gdx_course_state_flush();
     }
     sImportState = GDX_IMPORT_IDLE;
     return rc == 0 ? GDX_CONTENT_OK : GDX_CONTENT_ERR_IO;
@@ -1304,6 +1822,9 @@ int gdx_content_import_begin_payload(const char* name, const char* extension, in
     GdxContentImportEntry entry;
     uint32_t warnings = 0;
 
+    memset(&sImportExtInfo, 0, sizeof(sImportExtInfo));
+    sImportTitle[0] = '\0';
+
     if (name == NULL || name[0] == '\0' || strlen(name) > 20 || extension == NULL || payload == NULL ||
         payloadSize <= 0 || payloadSize > GDX_CONTENT_TRACK_PAYLOAD_SIZE) {
         return GDX_CONTENT_ERR_BAD_ARGS;
@@ -1366,8 +1887,8 @@ int gdx_content_cup_list(char outNames[GDX_CONTENT_CUP_SLOT_COUNT][GDX_CONTENT_C
         return GDX_CONTENT_ERR_NO_FS;
     }
     for (i = 0; i < GDX_CONTENT_CUP_SLOT_COUNT; i++) {
-        memcpy(outNames[i], gEditCupTrackNames[i], 9);
-        outNames[i][GDX_CONTENT_CUP_NAME_MAX] = '\0'; /* slot is 9 bytes; force the terminator */
+        memcpy(outNames[i], gEditCupTrackNames[i], GDX_CONTENT_CUP_NAME_MAX + 1);
+        outNames[i][GDX_CONTENT_CUP_NAME_MAX] = '\0'; /* force the terminator */
     }
     return GDX_CONTENT_OK;
 }
@@ -1403,9 +1924,8 @@ int gdx_content_cup_register_begin(const char* name, int32_t slot) {
     if (name == NULL || name[0] == '\0') {
         return GDX_CONTENT_ERR_BAD_ARGS;
     }
-    /* A cup slot is char[9]; mfsStrCpy does no truncation, and Mfs_GetFileIndex compares the
-     * full fixed-width name, so a >8-char name would write a slot that never resolves and the
-     * game silently clears (course_edit/19D4A0.c:26-32). Refuse it instead. */
+    /* A cup slot holds a whole MFS name (20 characters); MFS keeps the ones over 8 in
+     * CRS_ENTRY.CENL (gdx_edit_cup.h). Mfs_ValidateFileName below refuses anything longer. */
     nameLen = strlen(name);
     if (nameLen > GDX_CONTENT_CUP_NAME_MAX) {
         return GDX_CONTENT_CUP_ERR_NAME_TOO_LONG;
@@ -1502,7 +2022,8 @@ void gdx_content_import_format_errors(uint32_t errors, char* out, size_t outCap)
     if (errors & GDX_IMPORT_ERR_DISK_SPACE) gdx_import_append(out, outCap, "not enough free disk space");
     if (errors & GDX_IMPORT_ERR_STATE_UNKNOWN) gdx_import_append(out, outCap, "disk busy; quota and collision not checked");
     if (errors & GDX_IMPORT_ERR_BUNDLE_STRUCTURE) gdx_import_append(out, outCap, "bundle entry table malformed");
-    if (errors & GDX_IMPORT_ERR_BUNDLE_CENT) gdx_import_append(out, outCap, "bundle cup data invalid (missing CENT, dangling slot, or name over 8 chars)");
+    if (errors & GDX_IMPORT_ERR_BUNDLE_CENT) gdx_import_append(out, outCap, "bundle cup data invalid (missing CENT, bad CENL, or dangling slot)");
+    if (errors & GDX_IMPORT_ERR_BAD_PACKAGE) gdx_import_append(out, outCap, "not a valid .gdxp package (see the log)");
 }
 
 void gdx_content_import_format_warnings(uint32_t warnings, char* out, size_t outCap) {

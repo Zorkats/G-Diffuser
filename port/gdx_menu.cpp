@@ -462,7 +462,10 @@ GdxMenu::GdxMenu() : Ship::GuiWindow("gOpenMenuBar", false, "G-Diffuser Menu") {
     CVarRegisterInteger("gEnhancements.Audio.LLE", 1);
     CVarRegisterInteger("gEnhancements.Audio.LowPassHz", 15000);
     CVarRegisterInteger("gEnhancements.Audio.MasterVolume", 100);
+    CVarRegisterInteger("gEnhancements.Audio.MusicVolume", 100);
+    CVarRegisterInteger("gEnhancements.Audio.SfxVolume", 100);
     CVarRegisterInteger("gEnhancements.Audio.Reverb", 1);
+    CVarRegisterInteger("gEnhancements.Audio.StreamedMusic", 1);
     CVarRegisterInteger("gEnhancements.Audio.BufferFrames", 4096);
 
     // GRAPHICS (port-owned; distinct from the libultraship g* CVars). Every default reproduces
@@ -617,6 +620,8 @@ GdxMenu::GdxMenu() : Ship::GuiWindow("gOpenMenuBar", false, "G-Diffuser Menu") {
     CVarRegisterInteger("gEnhancements.Input.EditorMouseDragSensitivity", 100);
     // 0 = middle mouse button, 1 = X1 (side back), 2 = X2 (side forward). Drives the camera orbit/pan.
     CVarRegisterInteger("gEnhancements.Input.EditorCameraGestureButton", 0);
+    // Course Edit hint strip (port/gdx_course_edit_help.cpp): tool name and context actions on screen.
+    CVarRegisterInteger("gEnhancements.Input.EditorHintStrip", 1);
     // Rebindable number-key shortcuts for the nine Course Edit tool keys. Defaults are SDL_SCANCODE_1..9.
     CVarRegisterInteger("gEnhancements.Input.EditorKey1", SDL_SCANCODE_1);
     CVarRegisterInteger("gEnhancements.Input.EditorKey2", SDL_SCANCODE_2);
@@ -1718,12 +1723,13 @@ void GdxMenu::DrawGhostIo() {
 }
 
 // M3 X Cup seed codes (port/gdx_xcup_seed.c). A custom block rather than a CVar widget: the
-// pending seed is one-shot runtime state, not persisted config, and the input needs a parse
-// verdict plus the current code display.
+// queue is one-shot runtime state, not persisted config, and the paste box needs a parse verdict,
+// the queue list and the current code display.
 void GdxMenu::DrawXCupSeed() {
-    static char sCodeInput[64] = { 0 };
-    static char sSeedStatus[160] = { 0 };
+    static char sQueueInput[4096] = { 0 };
+    static char sSeedStatus[192] = { 0 };
     char current[GDX_XCUP_CODE_BUF_SIZE];
+    char cupCodes[256];
 
     if (gdx_xcup_current_seed_code(current, sizeof(current))) {
         ImGui::Text("Last generated X Cup course: %s", current);
@@ -1735,24 +1741,92 @@ void GdxMenu::DrawXCupSeed() {
             ImGui::SetClipboardText(current);
             snprintf(sSeedStatus, sizeof(sSeedStatus), "Copied to clipboard.");
         }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Copy this seed code to the clipboard.");
+        }
     } else {
         ImGui::TextDisabled("Race an X Cup course once to see its seed code here.");
     }
 
-    ImGui::SetNextItemWidth(280.0f);
-    ImGui::InputTextWithHint("##xcupseed", "XXXXX-XXXXX-XXXXX-XXXXX-XXXXX-X", sCodeInput, sizeof(sCodeInput));
-    ImGui::SameLine();
-    if (ImGui::Button("Use for next X Cup course")) {
-        if (gdx_xcup_set_pending_code(sCodeInput)) {
-            snprintf(sSeedStatus, sizeof(sSeedStatus), "Seed queued — the next generated X Cup course will match the code.");
-            sCodeInput[0] = '\0';
+    ImGui::Separator();
+    ImGui::TextWrapped("Paste X Cup codes, one per line. Each newly generated X Cup course takes the next code in the queue.");
+    ImGui::InputTextMultiline("##xcupqueue", sQueueInput, sizeof(sQueueInput), ImVec2(420.0f, 90.0f));
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Type or paste the codes here, one per line. Add them with Add to queue.");
+    }
+    if (ImGui::Button("Add to queue")) {
+        int added = 0;
+        int rejected = 0;
+        gdx_xcup_queue_add_text(sQueueInput, &added, &rejected);
+        if (added > 0) {
+            sQueueInput[0] = '\0';
+        }
+        if (added == 0 && rejected == 0) {
+            snprintf(sSeedStatus, sizeof(sSeedStatus), "Paste at least one code first.");
+        } else if (rejected == 0) {
+            snprintf(sSeedStatus, sizeof(sSeedStatus), "Queued %d %s.", added, added == 1 ? "code" : "codes");
+        } else if (gdx_xcup_queue_count() >= GDX_XCUP_QUEUE_CAPACITY) {
+            snprintf(sSeedStatus, sizeof(sSeedStatus), "Queued %d codes, %d not added. The queue holds %d.",
+                     added, rejected, GDX_XCUP_QUEUE_CAPACITY);
         } else {
-            snprintf(sSeedStatus, sizeof(sSeedStatus), "That is not a valid seed code.");
+            snprintf(sSeedStatus, sizeof(sSeedStatus), "Queued %d codes, %d invalid.", added, rejected);
         }
     }
-    if (gdx_xcup_has_pending_seed()) {
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(0.55f, 1.0f, 0.55f, 1.0f), "(queued)");
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("One code per line. Spaces, commas and semicolons also separate codes.");
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Clear queue")) {
+        gdx_xcup_queue_clear();
+        snprintf(sSeedStatus, sizeof(sSeedStatus), "Queue cleared.");
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Remove every code from the queue.");
+    }
+
+    const int queued = gdx_xcup_queue_count();
+    int removeIndex = -1;
+    ImGui::Separator();
+    ImGui::Text("Queue: %d of %d", queued, GDX_XCUP_QUEUE_CAPACITY);
+    if (queued == 0) {
+        ImGui::TextDisabled("Empty. Each X Cup course is random until codes are queued.");
+    } else {
+        ImGui::BeginChild("##xcupqueuelist", ImVec2(0.0f, 130.0f));
+        for (int i = 0; i < queued; i++) {
+            char code[GDX_XCUP_CODE_BUF_SIZE];
+
+            ImGui::PushID(i);
+            if (gdx_xcup_queue_code(i, code, sizeof(code))) {
+                ImGui::Text("%2d. %s", i + 1, code);
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Remove")) {
+                removeIndex = i;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Remove this code from the queue.");
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndChild();
+    }
+    if (removeIndex >= 0) {
+        gdx_xcup_queue_remove(removeIndex);
+        snprintf(sSeedStatus, sizeof(sSeedStatus), "Removed code %d from the queue.", removeIndex + 1);
+    }
+
+    ImGui::Separator();
+    if (ImGui::Button("Copy this cup's codes")) {
+        const int copied = gdx_xcup_cup_codes(cupCodes, sizeof(cupCodes));
+        if (copied > 0) {
+            ImGui::SetClipboardText(cupCodes);
+            snprintf(sSeedStatus, sizeof(sSeedStatus), "Copied %d %s for this cup.", copied, copied == 1 ? "code" : "codes");
+        } else {
+            snprintf(sSeedStatus, sizeof(sSeedStatus), "This cup has no codes yet. Race a course first.");
+        }
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("One line per course, in course order. Queue them to replay this cup.");
     }
     if (sSeedStatus[0] != '\0') {
         ImGui::TextWrapped("%s", sSeedStatus);
@@ -2485,7 +2559,8 @@ void GdxMenu::DrawCourseEditKeybinds(GdxUI::WidgetInfo& widget) {
             if (hovered && activeCapture == 0) {
                 if (i == 6) {
                     ImGui::SetTooltip("Click to rebind. In the editor, selects the point-deletion tool.\n"
-                                      "Pressing A or clicking confirms deletion of selected points.\n"
+                                      "In that tool, click a point to delete it at once.\n"
+                                      "Drag on empty space to box select, then press Delete to remove them.\n"
                                       "Esc cancels; Backspace/Delete restores default key.%s",
                                       isModified ? "\nThis slot is currently rebound." : "");
                 } else {

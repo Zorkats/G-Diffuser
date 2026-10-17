@@ -20,15 +20,19 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <unordered_map>
 
+#include "port_log.h" // gdx_port_logf
 #include "ship/Context.h"
 #include "ship/resource/ResourceManager.h"
 #include "ship/resource/File.h"
+#include "ship/resource/archive/Archive.h"
 #include "ship/resource/archive/ArchiveManager.h"
 #include "libultraship/bridge/consolevariablebridge.h"
 
+#include "gdx_workshop.h"    // GdxWorkshopModsDir: the mods/ containment rule GdxWorkshopReload uses
 #include "n64_rdram.h"       // gdx_rdram_persist_alloc_raw (after <cstddef>, per the header's contract)
 #include "gdx_audio_gsmp.h"  // GSMP container validation + Sample/Loop/Book mirrors (shared with stage 4)
 
@@ -94,10 +98,153 @@ void logReject(int reason, int32_t bankId, uint32_t bankOffset) {
     gdx_cki("[sample-pack]  bankOffset", (int) bankOffset);
 }
 
+// Mounted-pack diagnostics. The game loads only "audio/sample/<key>" entries, so a pack that keeps
+// raw WAVs at its root (or key-named entries outside that folder) mounts fine and applies nothing.
+// These log once per pack, never once per sample probe.
+bool gDiagScanned = false;
+uint32_t gDiagEpoch = 0;
+bool gOffHintLogged = false;
+std::set<std::string> gWarnedPacks; // the four diagnostic globals are guarded by gProbeMutex
+
+std::string asciiLower(std::string s) {
+    for (char& c : s) {
+        if (c >= 'A' && c <= 'Z') {
+            c = static_cast<char>(c - 'A' + 'a');
+        }
+    }
+    return s;
+}
+
+// Lower-case, with the "./" prefix that zip tools add to root-level entries removed.
+std::string normalizeEntry(const std::string& raw) {
+    std::string name = asciiLower(raw);
+    while (name.rfind("./", 0) == 0) {
+        name.erase(0, 2);
+    }
+    return name;
+}
+
+// A bare sample key ("<bank>__0x<offset>__<size>", no extension) in any folder.
+bool looksLikeSampleKey(const std::string& name) {
+    const size_t slash = name.rfind('/');
+    const std::string base = (slash == std::string::npos) ? name : name.substr(slash + 1);
+    const size_t sizeSep = base.rfind("__");
+    if (sizeSep == std::string::npos || sizeSep + 2 >= base.size() || base.find("__0x") == std::string::npos) {
+        return false;
+    }
+    for (size_t i = sizeSep + 2; i < base.size(); ++i) {
+        if (base[i] < '0' || base[i] > '9') {
+            return false;
+        }
+    }
+    return true;
+}
+
+struct PackEntryStats {
+    int sampleEntries = 0; // entries under audio/sample/ that the game can load
+    int strayWavs = 0;     // .wav entries; raw WAVs are never loaded, wherever they sit
+    int strayKeys = 0;     // key-shaped entries outside audio/sample/ (converted, but misplaced)
+    std::string example;   // first stray entry as stored in the archive, for the warning
+};
+
+// Walks the archive's in-memory file table (filled at mount; nothing is extracted).
+PackEntryStats scanPackEntries(Ship::Archive& archive) {
+    PackEntryStats stats;
+    auto files = archive.ListFiles();
+    if (files == nullptr) {
+        return stats;
+    }
+    for (const auto& entry : *files) {
+        const std::string name = normalizeEntry(entry.second);
+        const bool isWav = name.size() > 4 && name.compare(name.size() - 4, 4, ".wav") == 0;
+        if (!isWav && name.rfind("audio/sample/", 0) == 0) {
+            ++stats.sampleEntries;
+            continue;
+        }
+        if (isWav) {
+            ++stats.strayWavs;
+        } else if (looksLikeSampleKey(name)) {
+            ++stats.strayKeys;
+        } else {
+            continue;
+        }
+        if (stats.example.empty()) {
+            stats.example = entry.second;
+        }
+    }
+    return stats;
+}
+
+// Runs once per pack epoch. Only archives under mods/ count, with the same containment test that
+// GdxWorkshopReload uses, so stock archives never trigger a diagnostic.
+void diagnoseMountedPacks(uint32_t epoch, bool channelOn) {
+    {
+        std::lock_guard<std::mutex> lock(gProbeMutex);
+        if (gDiagScanned && gDiagEpoch == epoch) {
+            return;
+        }
+    }
+    auto am = archiveManager();
+    auto archives = (am != nullptr) ? am->GetArchives() : nullptr;
+    if (archives == nullptr) {
+        return;
+    }
+    const std::string modsKey = asciiLower(GdxWorkshopModsDir(false));
+    int samplePacks = 0;
+    for (const auto& ar : *archives) {
+        if (ar == nullptr || modsKey.empty() || asciiLower(ar->GetPath()).find(modsKey) == std::string::npos) {
+            continue;
+        }
+        const PackEntryStats stats = scanPackEntries(*ar);
+        const int strays = stats.strayWavs + stats.strayKeys;
+        if (stats.sampleEntries + strays == 0) {
+            continue;
+        }
+        ++samplePacks;
+        if (strays == 0) {
+            continue;
+        }
+        bool firstWarning = false;
+        {
+            std::lock_guard<std::mutex> lock(gProbeMutex);
+            firstWarning = gWarnedPacks.insert(ar->GetPath()).second;
+        }
+        if (firstWarning) {
+            gdx_port_logf("[sample-pack] WARNING: %s has %d raw .wav or misplaced sample file(s) outside "
+                          "audio/sample/ (first: %s). The game loads only converted audio/sample/<key> "
+                          "entries, so these are ignored. Rebuild the pack from a folder of WAVs with "
+                          "tools/gen_sample_pack.py.\n",
+                          ar->GetPath().c_str(), strays, stats.example.c_str());
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(gProbeMutex);
+        gDiagScanned = true;
+        gDiagEpoch = epoch;
+    }
+    if (samplePacks == 0 || channelOn) {
+        return;
+    }
+    bool firstHint = false;
+    {
+        std::lock_guard<std::mutex> lock(gProbeMutex);
+        firstHint = !gOffHintLogged;
+        gOffHintLogged = true;
+    }
+    if (firstHint) {
+        gdx_port_logf("[sample-pack] %d sample pack(s) mounted but gEnhancements.Workshop.SamplePacks is off, "
+                      "so none are applied. Turn on Workshop > Mods > Enable sample packs.\n",
+                      samplePacks);
+    }
+}
+
 } // namespace
 
 void GdxSamplePackApply(int32_t fontId, int32_t bankId, uint32_t bankOffset, uint32_t stockSize, void* samplePtr) {
-    if (CVarGetInteger("gEnhancements.Workshop.SamplePacks", 0) == 0) {
+    // Diagnostics run ahead of the channel gate so an off channel still gets its one-shot hint.
+    const bool channelOn = CVarGetInteger("gEnhancements.Workshop.SamplePacks", 0) != 0;
+    diagnoseMountedPacks(GdxWorkshopPackEpoch(), channelOn);
+    if (!channelOn) {
         return;
     }
     auto* sample = static_cast<GdxSampleMirror*>(samplePtr);

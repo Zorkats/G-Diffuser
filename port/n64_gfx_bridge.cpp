@@ -829,7 +829,8 @@ uint32_t ReadBE32(const uint8_t* src) {
            static_cast<uint32_t>(src[3]);
 }
 
-bool LookupAssetSegment(uint32_t raw, AssetSegmentLookup& out) {
+// allowSpan=false limits the match to exact rows and whole-array ranges, with no per-symbol interior span.
+bool LookupAssetSegment(uint32_t raw, AssetSegmentLookup& out, bool allowSpan = true) {
     unsigned char segment = 0;
     unsigned int romBase = 0;
     unsigned char compressed = 0;
@@ -837,7 +838,8 @@ bool LookupAssetSegment(uint32_t raw, AssetSegmentLookup& out) {
     unsigned int imageSize = 0;
 
     if (gdx_lookup_asset_segment(raw, &segment, &romBase, &compressed, &offset, &imageSize) == 0 &&
-        gdx_lookup_asset_segment_interior(raw, &segment, &romBase, &compressed, &offset, &imageSize) == 0) {
+        (!allowSpan ||
+         gdx_lookup_asset_segment_interior(raw, &segment, &romBase, &compressed, &offset, &imageSize) == 0)) {
         return false;
     }
 
@@ -1651,6 +1653,88 @@ const char* LookupRacePortraitOverride(uint32_t symbol, uintptr_t source, size_t
     return entry->unchanged ? entry->path.c_str() : nullptr;
 }
 
+// Race HUD position digits and ordinal suffixes (issue #27). The digit atlas is zero-filled in ROM
+// (see the [digit-carve] note), so a stock-bytes comparison would not be a stable gate. Identity is the
+// carve address instead: the SETTIMG source must be gSegments[4] + the glyph offset while the mode owns
+// segment 4 with the HUD_GFX family resident. Symbols and offsets mirror the hud_gfx rows in
+// port/gen/AssetBindings.c; the keys are the o2r names from those rows.
+struct HudGlyph {
+    uint32_t offset;
+    const char* key;
+    uint32_t width;
+    uint32_t height;
+};
+constexpr uint32_t kHudGlyphSegment = 4;
+constexpr uint32_t kHudGlyphRomBase = 0x001B8550u;
+constexpr HudGlyph kHudGlyphs[] = {
+    {0x00013DE0u, "hud_gfx/aPosition0Tex", 28, 32},
+    {0x000144E0u, "hud_gfx/aPosition1Tex", 28, 32},
+    {0x00014BE0u, "hud_gfx/aPosition2Tex", 28, 32},
+    {0x000152E0u, "hud_gfx/aPosition3Tex", 28, 32},
+    {0x000159E0u, "hud_gfx/aPosition4Tex", 28, 32},
+    {0x000160E0u, "hud_gfx/aPosition5Tex", 28, 32},
+    {0x000167E0u, "hud_gfx/aPosition6Tex", 28, 32},
+    {0x00016EE0u, "hud_gfx/aPosition7Tex", 28, 32},
+    {0x000175E0u, "hud_gfx/aPosition8Tex", 28, 32},
+    {0x00017CE0u, "hud_gfx/aPosition9Tex", 28, 32},
+    {0x00019020u, "hud_gfx/aPositionOrdinalSuffixSTTex", 20, 20},
+    {0x00019340u, "hud_gfx/aPositionOrdinalSuffixNDTex", 20, 20},
+    {0x00019660u, "hud_gfx/aPositionOrdinalSuffixRDTex", 20, 20},
+    {0x00019980u, "hud_gfx/aPositionOrdinalSuffixTHTex", 20, 20},
+};
+constexpr size_t kHudGlyphCount = sizeof(kHudGlyphs) / sizeof(kHudGlyphs[0]);
+
+const char* LookupHudGlyphOverride(uintptr_t source, size_t loadBytes, uint32_t epoch) {
+    struct Entry {
+        std::string path;
+        uint32_t packEpoch = UINT32_MAX;
+    };
+    static std::array<Entry, kHudGlyphCount> entries{};
+    if (source == 0 || !GdxSegmentEpochStable(epoch)) {
+        return nullptr;
+    }
+    const uintptr_t carve = static_cast<uintptr_t>(gSegments[kHudGlyphSegment]);
+    if (carve == 0) {
+        return nullptr;
+    }
+    for (size_t i = 0; i < kHudGlyphCount; i++) {
+        const HudGlyph& glyph = kHudGlyphs[i];
+        if (source != carve + glyph.offset) {
+            continue;
+        }
+        const size_t glyphBytes = static_cast<size_t>(glyph.width) * glyph.height * 2;
+        if (loadBytes < glyphBytes || gdx_mode_owns_segment(kHudGlyphSegment) == 0 ||
+            gdx_mode_segment_content_matches(kHudGlyphSegment, kHudGlyphRomBase) == 0) {
+            return nullptr;
+        }
+        Entry& entry = entries[i];
+        const uint32_t packEpoch = GdxWorkshopPackEpoch();
+        if (entry.packEpoch != packEpoch) {
+            entry.path.clear();
+            entry.packEpoch = packEpoch;
+            const char* path = GdxWorkshopLookupOverridePathMinSize(glyph.key, glyphBytes);
+            auto ctx = Ship::Context::GetInstance();
+            auto rm = (ctx != nullptr) ? ctx->GetResourceManager() : nullptr;
+            auto replacement = (path != nullptr && rm != nullptr)
+                ? std::dynamic_pointer_cast<Fast::Texture>(rm->LoadResourceProcess(path)) : nullptr;
+            if (replacement != nullptr && replacement->Type == Fast::TextureType::RGBA16bpp &&
+                replacement->ImageData != nullptr && std::isfinite(replacement->HByteScale) &&
+                std::isfinite(replacement->VPixelScale) && replacement->HByteScale >= 1 &&
+                replacement->VPixelScale >= 1 && std::floor(replacement->HByteScale) == replacement->HByteScale &&
+                std::floor(replacement->VPixelScale) == replacement->VPixelScale &&
+                replacement->Width == static_cast<float>(glyph.width) * replacement->HByteScale &&
+                replacement->Height == static_cast<float>(glyph.height) * replacement->VPixelScale &&
+                replacement->Width <= 8192 && replacement->Height <= 8192 &&
+                uint64_t(replacement->Width) * replacement->Height * 2 <= replacement->ImageDataSize) {
+                entry.path = path;
+                gdx_port_logf("[hud-glyph] %s -> %s\n", glyph.key, path);
+            }
+        }
+        return entry.path.empty() ? nullptr : entry.path.c_str();
+    }
+    return nullptr;
+}
+
 /* Game-BUILT wide DLs carry the REAL host address of a generated 1-byte asset stub whenever a
    compile-time table stores asset symbols -- course.c:101-112 stores the venue banks
    D_A000000..D_A008000 directly. Taken verbatim by the wide host-pointer fast path (the EXE
@@ -2124,28 +2208,33 @@ size_t ReadableCommandLimit(const void* source, size_t stride = kN64GfxStride) {
 #endif
 }
 
+/* Walks ADJACENT readable regions, not just the one holding `address`. A region ends wherever page
+   attributes change, and the module's .data/.bss mixes copy-on-write pages with pages already
+   written: both readable, but separate VirtualQuery regions (and separate maps lines on POSIX).
+   Stopping at the first boundary reported a live GfxPool vertex block 304 bytes short, so the
+   vertex failsafe zeroed the venue floor and sky on every tick that used that pool. */
 size_t ReadableByteLimit(uintptr_t address) {
+    constexpr int kMaxRegions = 64;
+    size_t total = 0;
+    uintptr_t cursor = address;
+    for (int i = 0; i < kMaxRegions; i++) {
 #ifdef _WIN32
-    WindowsMemoryRegion region;
-    if (!WindowsMemoryRegionFor(address, region) || !region.readable) {
-        return 0;
-    }
-
-    if (address >= region.end) {
-        return 0;
-    }
-
-    return static_cast<size_t>(region.end - address);
+        WindowsMemoryRegion region;
+        if (!WindowsMemoryRegionFor(cursor, region) || !region.readable || cursor >= region.end) {
+            break;
+        }
+        const uintptr_t end = region.end;
 #else
-    MapsRegion r;
-    if (!PosixRegionFor(address, r) || !r.readable) {
-        return 0;
-    }
-    if (address >= r.end) {
-        return 0;
-    }
-    return static_cast<size_t>(r.end - address);
+        MapsRegion r;
+        if (!PosixRegionFor(cursor, r) || !r.readable || cursor >= r.end) {
+            break;
+        }
+        const uintptr_t end = r.end;
 #endif
+        total += static_cast<size_t>(end - cursor);
+        cursor = end;
+    }
+    return total;
 }
 
 bool IsReadableAddress(uintptr_t address) {
@@ -5871,6 +5960,12 @@ class N64DisplayListAdapter {
                                     }
                                 }
                             }
+                            // Race HUD digits and suffixes arrive as segment-4 carve addresses that the probes
+                            // above never match; LookupHudGlyphOverride keys them by carve offset instead.
+                            if (packPath == nullptr) {
+                                packPath = LookupHudGlyphOverride(translated, estimatedBytes, settimgEpoch);
+                                packViaRdram = packPath != nullptr;
+                            }
                         }
                         if (packPath) {
                             texCensusPath = packViaRdram ? "pack-o2r-rdram" : "pack-o2r";
@@ -7865,26 +7960,26 @@ extern "C" void* gdx_ensure_asset_segment_for_symbol(unsigned int symLow32, unsi
     return reinterpret_cast<void*>(base);
 }
 
-/* CPU-side analogue of ResolveWideAssetStubPointer (this file, ~:1832), for
- * Gdx_ResolvePortAddress's wide-pointer branch. A wide (>32-bit) pointer inside
- * the EXE module range whose low32 matches an asset-segment map row IS that
- * placeholder symbol's own address: the module spans < 2^32 bytes so low32 is a
- * bijection within it, and every map row's low32 derives from this same
- * module's live symbol address — a match is an identity, never a coincidence.
- * Such a pointer must resolve to the decoded, fixed-up segment image; the stub's
- * own storage is zero BSS by construction and nothing legitimately reads it.
- * Runtime-confirmed victim: Camera_InitViewport's &aVp* reads came back all
- * zero ([vpinit] vscale=0/0 vtrans=0/0, vp inside the module), zeroing
- * camera->currentVp{Scale,Trans}{X,Y} and silently killing the 1ST/2ND/3RD
- * position markers, the rival marker, the ending fireworks and the background
- * stars — four symptoms, one read.
- * The module-range gate runs FIRST (cached statics: GetMainModuleRange scans
- * /proc/self/maps on Linux and must not run per pointer); the binary search
- * only prices pointers that already live in the module. Known Linux caveat,
- * inherited from ResolveWideAssetStubPointer's notes: under PIE the range can
- * under-cover the .bss tail, which degrades to a false NEGATIVE (today's
- * behavior) — the "wide-asset" gdx_addr_log line missing on Linux while
- * present on Windows is the signature to watch for. */
+// CPU-side analogue of ResolveWideAssetStubPointer (this file), for Gdx_ResolvePortAddress's
+// wide-pointer branch. A wide (>32-bit) pointer whose low32 matches an asset-segment map row IS
+// that placeholder symbol's own address: every map row's low32 derives from this same module's
+// live symbol address, and the module spans < 2^32 bytes, so inside the module's 4 GB window
+// low32 is a bijection onto addresses. Such a pointer must resolve to the decoded, fixed-up
+// segment image; the stub's own storage is zero BSS by construction and nothing legitimately
+// reads it.
+// Runtime-confirmed victim: Camera_InitViewport's &aVp* reads came back all zero ([vpinit]
+// vscale=0/0 vtrans=0/0, vp inside the module), zeroing camera->currentVp{Scale,Trans}{X,Y} and
+// silently killing the 1ST/2ND/3RD position markers, the rival marker, the ending fireworks and
+// the background stars: four symptoms, one read.
+// Exact rows and whole-array ranges are matched BEFORE the module-range gate, mirroring
+// ResolveWideAssetStubPointer (issue #29). On Linux PIE, GetMainModuleRange under-covers the
+// anonymous .bss tail that holds the aVp* stubs, so gating the match behind the range returned the
+// zero stub verbatim. Outside the range a match is accepted only inside the module's own 4 GB
+// window (first and last byte), which keeps the identity above: a heap or stack pointer in any
+// other window is never rerouted by low32 alone. Per-symbol interior spans stay behind the range
+// gate, so an interior pointer into the .bss tail still returns verbatim.
+// GetMainModuleRange scans /proc/self/maps on Linux, so it runs once and its result is cached in
+// statics. The one-shot "[wide-asset] exact placeholder outside module range" log marks this path.
 /* A/B kill switch for the wide-asset redirect below. Default ON; GDX_WIDE_ASSET_RESOLVE=0
    restores the pre-fix verbatim wide-pointer return so a regression can be attributed to
    this hook vs. the fixed image base that landed in the same build, without a rebuild. */
@@ -7908,6 +8003,32 @@ extern "C" void* gdx_resolve_wide_asset_pointer(const void* full) {
     if (!sInit) {
         sInit = true;
         GetMainModuleRange(sBegin, sEnd);
+    }
+    // Exact rows and whole-array ranges run before the module-range gate below (see
+    // ResolveWideAssetStubPointer, issue #29). The module must sit in one 4 GB window together with v,
+    // so a heap or stack pointer whose low32 happens to match a row is never rerouted. Interior spans
+    // still need the range gate.
+    if (sBegin != 0 && sEnd > sBegin) {
+        const uint64_t window = static_cast<uint64_t>(sBegin) >> 32;
+        if ((static_cast<uint64_t>(v) >> 32) == window && (static_cast<uint64_t>(sEnd - 1) >> 32) == window) {
+            AssetSegmentLookup exact = {};
+            if (LookupAssetSegment(Low32(v), exact, false)) {
+                const uintptr_t base = EnsureAssetSegmentImage(exact);
+                if (base == 0) {
+                    return nullptr;
+                }
+                if (v < sBegin || v >= sEnd) {
+                    static bool sExactOutsideLogged = false;
+                    if (!sExactOutsideLogged) {
+                        sExactOutsideLogged = true;
+                        gdx_port_logf("[wide-asset] exact placeholder outside module range: v=%p seg=%u off=%X\n",
+                                      full, static_cast<unsigned>(exact.segment),
+                                      static_cast<unsigned>(exact.offset));
+                    }
+                }
+                return reinterpret_cast<void*>(base + exact.offset);
+            }
+        }
     }
     if (sBegin == 0 || v < sBegin || v >= sEnd) {
         return nullptr;

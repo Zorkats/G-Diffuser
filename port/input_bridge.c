@@ -48,6 +48,7 @@
 #include "PR/os_pfs.h"
 #include "controller.h"
 #include "fzx_game.h" // GameMode values + GET_MODE (in-race safety checks)
+#include "gdx_input_actions.h" // 3A action layer: per-context N64 button tables (see file header)
 #include "gdx_input_script.h" // GDX_INPUT_SCRIPT: dev-only deterministic input playback (see file header)
 #include "port_log.h"
 
@@ -762,6 +763,21 @@ static void gdx_publish_shared_controller(const u8* connected) {
     gSharedController.sameInputsHeldCounter = gControllers[0].sameInputsHeldCounter;
 }
 
+// Action-layer context for this frame (gdx_input_actions.h). Course Edit is the editor itself. A
+// test drive is race input: 188850.c sets gInCourseEditTestRun without flipping gGameMode, so the
+// mode check alone would miss it. A paused race is menu input.
+static int gdx_input_actions_frame_context(void) {
+    extern bool gInCourseEditTestRun; // decomp/src/game/course_gadgets.c
+
+    if (!gInCourseEditTestRun && GET_MODE(gGameMode) == GAMEMODE_COURSE_EDIT) {
+        return GDX_INPUT_CONTEXT_COURSE_EDIT;
+    }
+    if ((gInCourseEditTestRun || gdx_input_in_gameplay()) && !gGamePaused) {
+        return GDX_INPUT_CONTEXT_RACE;
+    }
+    return GDX_INPUT_CONTEXT_MENU;
+}
+
 void gdx_controller_poll(void) {
     // See the scheduler-counter comment below; declared here so the boundary predicate can be
     // evaluated once for every port.
@@ -789,6 +805,14 @@ void gdx_controller_poll(void) {
     // It is also what keeps the "ControlDeck unavailable" path usable: zero input, but still a
     // controller the game will accept.
     connected[0] = 1;
+
+    // 3A action layer: remap the raw LUS pad bits per context. It runs before mouse steering, the
+    // dev overrides and the Course Edit mouse buttons below, so those stay raw N64 bits. Every port
+    // is applied (a disconnected port reads zero), so each port's edge state stays in step.
+    gdx_input_actions_begin_frame(gdx_input_actions_frame_context());
+    for (i = 0; i < MAXCONTROLLERS; i++) {
+        buttons[i] = gdx_input_actions_apply(i, buttons[i]);
+    }
 
     // Issue #18 mouse steering: absolute position drive — gdx_mouse_steer_stick_x() maps the
     // cursor X inside the blit rect to stick deflection and OVERRIDES player 0's stick X while

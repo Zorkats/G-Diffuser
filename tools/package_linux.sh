@@ -33,8 +33,12 @@ if [ ! -x "$binary_dir/G-Diffuser" ]; then
     exit 1
 fi
 
-stage="$out_dir/G-Diffuser-v$version-$arch"
-rm -rf "$stage"
+# The tarball's top folder is unversioned. Saves live next to the executable, so extracting an
+# update over the previous install keeps them; a versioned folder would start every update
+# without saves (GitHub #41). The staging root stays versioned so packages never collide.
+stage_root="$out_dir/G-Diffuser-v$version-$arch"
+rm -rf "$stage_root"
+stage="$stage_root/G-Diffuser"
 mkdir -p "$stage"
 
 # Everything a fresh install needs. gdx-extract and decomp-recipes/ are what turn the user's
@@ -90,7 +94,7 @@ python3 "$repo_root/tools/check_linux_abi.py" "${lib_args[@]}" \
 tarball="$out_dir/G-Diffuser-v$version-$arch.tar.gz"
 tar --sort=name --owner=0 --group=0 --numeric-owner \
     --mtime="@${SOURCE_DATE_EPOCH:-0}" \
-    -czf "$tarball" -C "$out_dir" "$(basename "$stage")"
+    -czf "$tarball" -C "$stage_root" "$(basename "$stage")"
 
 echo
 echo "$tarball"

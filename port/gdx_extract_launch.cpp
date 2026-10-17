@@ -759,6 +759,9 @@ struct ExtractState {
     // "pal/rev0"), so the shared launcher/wizard can confirm it matches the running binary and offer
     // to launch the matching one on a mismatch.
     std::string profile;
+    // The child's last "FATAL:" (torch) or "[launcher]" (spawn) line, for the failure message. Never
+    // persisted: on Linux the log may not reach the user at all (see detachJournalStdio in main.cpp).
+    std::string failureLine;
     bool valid = false; // true only if the file was read and parsed
 };
 
@@ -899,6 +902,9 @@ void scanStdoutLine(const std::string& line, ExtractState& st) {
         }
         return s;
     };
+    if (line.rfind("FATAL:", 0) == 0 || line.rfind("[launcher] ", 0) == 0) {
+        st.failureLine = line;
+    }
     std::string lc = lower(line);
     auto tailToken = [&](const std::string& s) {
         size_t e = s.find_last_not_of(" \t\r\n");
@@ -1374,9 +1380,13 @@ ExtractOutcome runExtraction(const fs::path& dataDir, const fs::path& romPath, c
         gdx_port_logf("[extract] ERROR: extractor exited with code %d. Keeping any previous %s; booting "
                       "from the raw ROM.\n",
                       exitCode, archiveName);
-        gdxAsyncPublishError(exitCode == 124
-                                 ? std::string("The extractor timed out (exceeded the 120s deadline).")
-                                 : ("The extractor failed (exit code " + std::to_string(exitCode) + ")."));
+        std::string failure = exitCode == 124
+                                  ? std::string("The extractor timed out (exceeded the 120s deadline).")
+                                  : ("The extractor failed (exit code " + std::to_string(exitCode) + ").");
+        if (!state.failureLine.empty()) {
+            failure += "\n" + state.failureLine;
+        }
+        gdxAsyncPublishError(failure);
         removeIfExists(tmpDir);
         return ExtractOutcome::FailedRawFallback;
     }

@@ -23,7 +23,7 @@ Read the last section first if you are here because something renders wrong.
 | `fzerox-expansion-kit/` | submodule → `Zorkats/fzerox-expansion-kit` | 64DD Expansion Kit reference material. Not initialised in every checkout. |
 | `tools/` | in-tree | Python generators and validators: `gen_asset_bindings.py`, `gen_link_stubs.py`, `gen_ek_translated_strings.py`, `gen_f3d_o2r.py`, and the harnesses. |
 | `include/` | in-tree | Torch-generated asset headers (arrays plus `_WIDTH`/`_HEIGHT`/`_COMPRESSED_SIZE` defines). |
-| `docs/` | in-tree, tracked | The documents that ship with a release: this file, `DIAGNOSTICS.md`, `MODDING_GUIDE.md`. |
+| `docs/` | in-tree, tracked | The documents that ship with a release: this file, `DIAGNOSTICS.md`, `MODDING_GUIDE.md` and the per-task guides in `modding/`. |
 | `devdocs/` | in-tree, **gitignored** | Internal working notes: scopes, plans, audits, investigation write-ups. Local-only; not part of the repo or the release. |
 
 All four submodules point at project-owned forks rather than upstream. If you have read an older note

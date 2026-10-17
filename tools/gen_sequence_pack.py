@@ -23,7 +23,7 @@ Output: one .o2r (a ZIP, like tools/gen_texture_pack.py) holding each <name>.seq
 "audio/seq/<name>" (the key convention the runtime resolves in port/gdx_audio_seq_packs.cpp), plus
 the metadata at the archive root as workshop.json.
 
-Runtime rules worth knowing (the packer does not enforce these — see docs/MODDING_GUIDE.md):
+Runtime rules worth knowing (the packer does not enforce these; see docs/modding/CUSTOM_MUSIC.md):
   - Overrides only apply while the "Sequence packs" master switch is on (off by default).
   - An override must FIT the stock sequence's heap slot; oversized entries are ignored at
     runtime and the stock sequence loads instead.

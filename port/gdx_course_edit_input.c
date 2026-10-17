@@ -10,6 +10,8 @@ static GdxCourseEditInt32 sDeleteCount;
 static GdxCourseEditInt32 sSelectionPending;
 static GdxCourseEditInt32 sSelectionPoint;
 static GdxCourseEditInt32 sSelectionToggle;
+static GdxCourseEditMask sSelectionAddMask;
+static GdxCourseEditInt32 sSelectionAddPending;
 static GdxCourseEditInt32 sTestEscDown;
 static GdxCourseEditInt32 sTestEscOwned;
 static GdxCourseEditInt32 sTestEscPending;
@@ -19,6 +21,7 @@ static GdxCourseEditVec3 sMoveTarget;
 static GdxCourseEditInt32 sScalarTargetPending;
 static GdxCourseEditInt32 sScalarTargetOption;
 static GdxCourseEditInt32 sScalarTargetOffset;
+static GdxCourseEditInt32 sLineUpPending;
 
 void gdx_course_edit_input_request_drag_start(GdxCourseEditInt32 point_index) {
     sDragStartPoint = point_index;
@@ -82,6 +85,23 @@ GdxCourseEditInt32 gdx_course_edit_input_take_selection(GdxCourseEditInt32* poin
     *point = sSelectionPoint;
     *toggle = sSelectionToggle;
     sSelectionPending = 0;
+    return 1;
+}
+
+void gdx_course_edit_input_request_selection_add_mask(GdxCourseEditMask mask) {
+    sSelectionAddMask |= mask;
+    sSelectionAddPending = 1;
+}
+
+GdxCourseEditInt32 gdx_course_edit_input_take_selection_add_mask(GdxCourseEditMask* mask) {
+    if (!sSelectionAddPending) {
+        return 0;
+    }
+    if (mask != 0) {
+        *mask = sSelectionAddMask;
+    }
+    sSelectionAddMask = 0;
+    sSelectionAddPending = 0;
     return 1;
 }
 
@@ -156,6 +176,16 @@ GdxCourseEditInt32 gdx_course_edit_input_take_scalar_target(GdxCourseEditInt32* 
     return 1;
 }
 
+void gdx_course_edit_input_request_line_up(void) {
+    sLineUpPending = 1;
+}
+
+GdxCourseEditInt32 gdx_course_edit_input_take_line_up(void) {
+    GdxCourseEditInt32 pending = sLineUpPending;
+    sLineUpPending = 0;
+    return pending;
+}
+
 void gdx_course_edit_input_clear_drag(void) {
     sDragStartPending = 0;
     sDragCommitPending = 0;
@@ -165,7 +195,10 @@ void gdx_course_edit_input_clear_drag(void) {
 }
 
 void gdx_course_edit_input_clear(void) {
+    sSelectionAddMask = 0;
+    sSelectionAddPending = 0;
     gdx_course_edit_input_clear_drag();
     sDeletePending = 0;
     sSelectionPending = 0;
+    sLineUpPending = 0;
 }

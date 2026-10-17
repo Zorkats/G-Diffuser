@@ -41,6 +41,7 @@
 #include "gdx_audio_thread.h"
 #include "gdx_frame_pacer.h"
 #include "gdx_workshop.h"
+#include "gdx_gp_resume.h"
 #include "n64_gfx_bridge.h"
 #include <SDL2/SDL.h>
 
@@ -57,6 +58,12 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+
+#ifndef _WIN32
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 extern "C" void GDiffuser_LoadAllAssets(void);
 extern "C" void bootproc(void);                // decomp boot entry (src/sys/sys_main.c)
@@ -94,6 +101,40 @@ extern "C" void gdx_hide_os_cursor_tick(void);            // port/gdx_course_edi
 static void logStep(const char* s) {
     gdx_port_logf("[G-Diffuser] %s\n", s);
 }
+
+#ifndef _WIN32
+// A desktop launch under systemd (the app-*.service units KDE and GNOME start) connects stdout
+// and stderr to the journal, which stores every line as its own entry: a single play session
+// reached ~300k entries and rotated the player's older system logs away (GitHub #47). systemd
+// exports JOURNAL_STREAM as "<device>:<inode>" of that stream, so only a descriptor matching it is
+// detached; a terminal, a pipe, or a launcher's own capture keeps its output even when the
+// variable was inherited. Diagnostics are unaffected: the run log and crash report are files.
+static void detachJournalStdio() {
+    const char* journalStream = getenv("JOURNAL_STREAM");
+    if (journalStream == nullptr) {
+        return;
+    }
+    unsigned long long device = 0;
+    unsigned long long inode = 0;
+    if (sscanf(journalStream, "%llu:%llu", &device, &inode) != 2) {
+        return;
+    }
+    const int devNull = open("/dev/null", O_WRONLY | O_CLOEXEC);
+    if (devNull < 0) {
+        return;
+    }
+    const int stdioFds[] = { STDOUT_FILENO, STDERR_FILENO };
+    for (const int fd : stdioFds) {
+        struct stat st;
+        if (fstat(fd, &st) == 0 && static_cast<unsigned long long>(st.st_dev) == device &&
+            static_cast<unsigned long long>(st.st_ino) == inode) {
+            fflush(fd == STDOUT_FILENO ? stdout : stderr);
+            dup2(devNull, fd);
+        }
+    }
+    close(devNull);
+}
+#endif
 
 static void loadControllerDatabase() {
     const std::string databasePath = Ship::Context::LocateFileAcrossAppDirs("gamecontrollerdb.txt");
@@ -861,6 +902,10 @@ static std::vector<std::string> findArchivePaths(const char* argv0) {
 int main(int argc, char** argv) {
     // Must precede every log call this process makes. Precedence rules in port/gdx_dev_gates.h.
     gdx_dev_gates_init_env();
+#ifndef _WIN32
+    // Ahead of the first write, and of the extractor child, which inherits these descriptors.
+    detachJournalStdio();
+#endif
 
     // Must run before any libultraship path resolution, so config/logs/disk/IPL consolidate into
     // the resolved data dir.
@@ -926,12 +971,32 @@ int main(int argc, char** argv) {
                       SDL_NumJoysticks());
         logConnectedJoysticks();
     }
-    logStep("construct ControlDeck"); auto controlDeck = std::make_shared<LUS::ControlDeck>();
+    // X and Y ride the two spare N64 bits (BTN_X, BTN_Y). Only the 3A action layer reads them, and
+    // it outputs real N64 bits alone, so the game never sees them (port/gdx_input_actions.h).
+    logStep("construct ControlDeck");
+    auto controlDeck = std::make_shared<LUS::ControlDeck>(std::vector<CONTROLLERBUTTONS_T>{ BTN_X, BTN_Y });
     logStep("InitControlDeck");       ctx->InitControlDeck(controlDeck);
 
     // Context::InitControlDeck() does NOT call ControlDeck::Init() — do it explicitly, or the
     // controllers have no mappings and read all-zero. Config + CVars exist, so it is safe now.
     logStep("ControlDeck::Init");     controlDeck->Init(&sGdxControllerBits);
+
+    // A port 1 config saved before X and Y existed has no mapping for them. Give it their default
+    // gamepad mappings once; a user who clears them afterwards keeps them cleared.
+    if (CVarGetInteger("gEnhancements.Input.SpareButtonsSeeded", 0) == 0) {
+        auto port1 = controlDeck->GetControllerByPort(0);
+        for (CONTROLLERBUTTONS_T bitmask : { BTN_X, BTN_Y }) {
+            auto button = port1 != nullptr ? port1->GetButton(bitmask) : nullptr;
+            if (button != nullptr && button->GetAllButtonMappings().empty()) {
+                button->AddDefaultMappings(Ship::PhysicalDeviceType::SDLGamepad);
+            }
+        }
+        CVarSetInteger("gEnhancements.Input.SpareButtonsSeeded", 1);
+        CVarSave();
+    }
+
+    // Save GP in progress keeps gp_resume.bin in the app directory, like the other port-side files.
+    gdx_gp_resume_set_directory(Ship::Context::GetAppDirectoryPath().c_str());
 
     // ResourceManager MUST init before the window is constructed/inited.
     auto archivePaths = findArchivePaths((argc > 0) ? argv[0] : nullptr);

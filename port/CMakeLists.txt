@@ -157,6 +157,8 @@ if(GDX_EXPANSION_KIT)
 
     target_sources(gdiffuser_game PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_native.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_undo.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_split_tex.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/n64_leo.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gen/EkAssetBindings.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gen/EkLinkStubs.c"
@@ -256,6 +258,9 @@ add_subdirectory(third_party/discord-rpc EXCLUDE_FROM_ALL)
 # executables but no port code references it yet (the runtime core lands separately).
 add_subdirectory(third_party/lua EXCLUDE_FROM_ALL)
 
+# Ogg Vorbis, FLAC and WAV decoders for the streamed BGM replacement (gdx_music_stream.cpp).
+add_subdirectory(third_party/music_decoders EXCLUDE_FROM_ALL)
+
 add_executable(G-Diffuser
     main.cpp
     gdx_discord.cpp
@@ -273,17 +278,28 @@ add_executable(G-Diffuser
     gdx_course_edit_mouse.cpp  # Course Edit absolute mouse drive + issue #18 steering; extern "C"
                                # wrappers over Fast3dWindow for the decomp-side C callers
     gdx_course_edit_input.c
+    gdx_course_edit_help.cpp   # Course Edit hint strip and Controls Help block (F1 Enhancements > Mouse)
     gdx_course_bounds.c        # Course Edit control-point bounds; the decomp clamp sites call in
                                # here so editor and save validator agree on the y range
     gdx_course_strings.c       # Per-course names/subtitles/BGM from the mounted archive, so a ROM
                                # hack shows its own track names instead of the retail ones
     gdx_input_script.c
+    gdx_input_actions.c        # 3A action layer: per-context N64 button tables, called from
+                               # gdx_controller_poll before the dev overrides and mouse merges
+    gdx_input_profiles.c       # 4A controller profiles: presets that write the 3A Race table
     n64_gfx_bridge.cpp
     gdx_interp.cpp
     n64_gfx_convert.cpp
     gdx_vi_convert.c
     n64_audio_hle.c            # standalone C, deliberately not part of gdiffuser_game
     gdx_audio_lle.c
+    gdx_audio_mix.c            # Music/SFX volume scale, called from decomp effects.c
+    gdx_music_stream.cpp       # 6A streamed BGM replacement: worker decode, ring, os.cpp mixer hook
+    gdx_course_music.cpp       # 7A custom Course Edit soundtracks: music scan, store choice, stream override
+    gdx_ek_text.c              # Course Edit names and number badges composed from the stock EK textures
+    gdx_edit_cup.c             # Edit Cup slot names split into CRS_ENTRY.CENT and .CENL (decomp MFS calls it)
+    gdx_course_state.cpp       # Registry phase 2: course-elements.gdxs load and flush
+    gdx_course_packs.cpp       # Registry phase 2: mods/<pack>/elements.txt and the custom skybox rows
     gdx_audio_thread.cpp
     gdx_audio_capture.c
     gdx_frame_pacer.c          # default OFF: LUS's Fast3D backend already paces EndFrame() to 60fps
@@ -303,6 +319,8 @@ add_executable(G-Diffuser
                                    # mirrors the ghost structs, walking gMfsRamArea directly
     gdx_content_import.c           # E2 .gdxc import; validation chain + disk-thread install
                                    # staging (op slot 30 in decomp/src/sys/disk/75000.c)
+    gdx_content_pack.cpp           # .gdxp share packages: zip of a .gdxc, its sidecars and songs
+    gdx_course_registry.c          # Course Edit element registry + GXE1 sidecar codec (pure C)
     gdx_rom_courses.c              # W2 ROM course table reader; converts ROM courses (including
                                    # FZEP hack courses) into CRSD payloads for the same import chain
     gdx_mfs_image.c                # A2 read-only MFS over foreign .ndd/.ram images; feeds the
@@ -312,6 +330,8 @@ add_executable(G-Diffuser
     gdx_hackmods_window.cpp    # W3 ROM Hacks picker, separate from the Workshop pack list
     gdx_content_window.cpp         # Content Library window; the F12 unified Export/Import shell
     gdx_xcup_seed.c                # M3 X Cup seed codes; hooked from Course_GenerateRandomCourse
+    gdx_single_race.c              # Single Race rules for Practice; hooked from racer.c and ovl_i3
+    gdx_gp_resume.c                # Save GP in progress codec and file; hooked from game.c
     gdx_palette.cpp              # F2 palette editor; mirrors Machine like gdx_ghost_io.c mirrors
                                  # the ghost structs, so it links against racer.c without decomp headers
     gdx_machine_stats.cpp        # F2b machine stat editor; mirrors Machine like gdx_palette.cpp,
@@ -344,7 +364,8 @@ if(GDX_EXPANSION_KIT)
     # All four files reference EK-only symbols (gdx_ek_assets_fill, machine_create labels, EK
     # overlay .data), so they must not build in US-only configs.
     target_sources(G-Diffuser PRIVATE disk_buffer.cpp gen/EkTranslatedOverrides.c
-                                      gdx_ek_strings.c gen/EkTranslatedStrings.c)
+                                      gdx_ek_strings.c gen/EkTranslatedStrings.c
+                                      gdx_course_edit_history.cpp)
     # shims.c guards its US-only Leo stubs on this define.
     target_compile_definitions(G-Diffuser PRIVATE EXPANSION_KIT=1)
 endif()
@@ -530,6 +551,7 @@ target_include_directories(G-Diffuser PRIVATE
 target_link_libraries(G-Diffuser PRIVATE cxd4_rsp)
 target_link_libraries(G-Diffuser PRIVATE discord-rpc)
 target_link_libraries(G-Diffuser PRIVATE gdx_lua)
+target_link_libraries(G-Diffuser PRIVATE gdx_music_decoders)
 
 if(WIN32)
     # user32: MessageBox; Comdlg32: ROM picker; Comctl32: extraction progress marquee.
@@ -656,6 +678,112 @@ elseif(GDX_PORT_WARN_FLAGS)
     target_compile_options(gdx_course_bounds_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
 endif()
 
+# Course Edit element registry and GXE1 sidecar codec: standalone pure C, no decomp headers.
+add_executable(gdx_course_registry_tests
+    tests/gdx_course_registry_tests.c
+    gdx_course_registry.c)
+if(MSVC)
+    target_compile_options(gdx_course_registry_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_course_registry_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+
+# Composed Expansion Kit names and number badges: standalone pure C.
+add_executable(gdx_ek_text_tests
+    tests/gdx_ek_text_tests.c
+    gdx_ek_text.c)
+if(MSVC)
+    target_compile_options(gdx_ek_text_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_ek_text_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+
+# Edit Cup CENT/CENL split: standalone pure C.
+add_executable(gdx_edit_cup_tests
+    tests/gdx_edit_cup_tests.c
+    gdx_edit_cup.c)
+if(MSVC)
+    target_compile_options(gdx_edit_cup_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_edit_cup_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+
+# X Cup seed code parsing and the code queue: standalone pure C.
+add_executable(gdx_xcup_seed_tests
+    tests/gdx_xcup_seed_tests.c
+    gdx_xcup_seed.c)
+if(MSVC)
+    target_compile_options(gdx_xcup_seed_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_xcup_seed_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+
+# Save GP in progress: codec and file layer, standalone pure C (reuses the CRC-32 in gdx_course_registry.c).
+add_executable(gdx_gp_resume_tests
+    tests/gdx_gp_resume_tests.c
+    gdx_gp_resume.c
+    gdx_course_registry.c)
+if(MSVC)
+    target_compile_options(gdx_gp_resume_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_gp_resume_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+
+# 3A action layer: context tables, press latching and the CVar cache. controller.h (decomp) supplies
+# the BTN_* names, so the decomp include dir is needed.
+add_executable(gdx_input_actions_tests
+    tests/gdx_input_actions_tests.c
+    gdx_input_actions.c)
+target_include_directories(gdx_input_actions_tests PRIVATE "${DECOMP}/include" "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_definitions(gdx_input_actions_tests PRIVATE
+    PORT=1
+    GDIFFUSER_PORT=1
+    _LANGUAGE_C=1
+    VERSION_US=1)
+if(MSVC)
+    target_compile_options(gdx_input_actions_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_input_actions_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+
+# 4A controller profiles: Race-table presets over the 3A layer, so both sources are linked.
+add_executable(gdx_input_profiles_tests
+    tests/gdx_input_profiles_tests.c
+    gdx_input_actions.c
+    gdx_input_profiles.c)
+target_include_directories(gdx_input_profiles_tests PRIVATE "${DECOMP}/include" "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_definitions(gdx_input_profiles_tests PRIVATE
+    PORT=1
+    GDIFFUSER_PORT=1
+    _LANGUAGE_C=1
+    VERSION_US=1)
+if(MSVC)
+    target_compile_options(gdx_input_profiles_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_input_profiles_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+
+# 6A streamed BGM: loop tags from the three decoders, the BGM key table and the loop wrap. The module
+# links with a CVar stub and a stub for the decomp fade getter, so no game code is pulled in.
+add_executable(gdx_music_stream_tests
+    tests/gdx_music_stream_tests.cpp
+    gdx_music_stream.cpp
+    gdx_audio_mix.c
+    gdx_dev_gates.c)   # port_log.h reads the developer-gate cache
+target_include_directories(gdx_music_stream_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_definitions(gdx_music_stream_tests PRIVATE
+    "GDX_TEST_MUSIC_DIR=\"${CMAKE_SOURCE_DIR}/devdocs/test-assets/feature-requests/music\"")
+target_link_libraries(gdx_music_stream_tests PRIVATE gdx_music_decoders)
+if(MSVC)
+    target_compile_options(gdx_music_stream_tests PRIVATE /W3)
+    # Same definition the G-Diffuser target carries, so port_log.h's strcpy/strcat stay quiet here.
+    target_compile_definitions(gdx_music_stream_tests PRIVATE _CRT_SECURE_NO_WARNINGS=1)
+else()
+    find_package(Threads REQUIRED)
+    target_link_libraries(gdx_music_stream_tests PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+    target_compile_options(gdx_music_stream_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+
 add_executable(gdx_course_edit_input_tests
     tests/gdx_course_edit_input_tests.c
     gdx_course_edit_input.c)
@@ -754,6 +882,9 @@ if(TARGET libultraship)
     add_executable(gdx_hd_texture_tests tests/gdx_hd_texture_tests.cpp)
     target_link_libraries(gdx_hd_texture_tests PRIVATE libultraship)
     target_compile_features(gdx_hd_texture_tests PRIVATE cxx_std_20)
+    add_executable(gdx_content_pack_tests tests/gdx_content_pack_tests.cpp gdx_content_pack.cpp)
+    target_link_libraries(gdx_content_pack_tests PRIVATE libultraship)
+    target_compile_features(gdx_content_pack_tests PRIVATE cxx_std_20)
     add_executable(resource_smoketest resource_smoketest.cpp resource/ResourceFactories.cpp)
     target_include_directories(resource_smoketest PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
@@ -814,6 +945,9 @@ if(GDX_BUILD_JP)
     if(GDX_EXPANSION_KIT)
         add_dependencies(gdiffuser_game_jp gdiffuser_ek_compile_assets)
         target_sources(gdiffuser_game_jp PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_native.c"
+            "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_undo.c"
+            "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_split_tex.c"
             "${CMAKE_CURRENT_SOURCE_DIR}/n64_leo.c"
             "${CMAKE_CURRENT_SOURCE_DIR}/gen/EkAssetBindings.c"   # US-EK bindings reused; jp/ek TODO
             "${CMAKE_CURRENT_SOURCE_DIR}/gen/EkLinkStubs.c"
@@ -872,6 +1006,8 @@ if(GDX_BUILD_JP)
         gdx_discord.cpp
         input_bridge.c
         gdx_input_script.c
+        gdx_input_actions.c    # 3A action layer; input_bridge.c calls it, so this target links it too
+        gdx_input_profiles.c   # 4A controller profiles; the Actions page in gdx_menu_registry.cpp calls it
         gdx_course_strings.c   # decomp game.c calls gdx_course_strings_apply() under PORT, so this
                                # is a link dependency and not an optional feature
         n64_gfx_bridge.cpp
@@ -880,6 +1016,13 @@ if(GDX_BUILD_JP)
         gdx_vi_convert.c
         n64_audio_hle.c
         gdx_audio_lle.c
+        gdx_audio_mix.c
+        gdx_music_stream.cpp
+        gdx_course_music.cpp
+        gdx_ek_text.c
+        gdx_edit_cup.c
+        gdx_course_state.cpp
+        gdx_course_packs.cpp
         gdx_audio_thread.cpp
         gdx_audio_capture.c
         gdx_frame_pacer.c
@@ -895,6 +1038,27 @@ if(GDX_BUILD_JP)
         disk_savefile.cpp
         gdx_ghost_io.c
         gdx_ghost_window.cpp
+        # Port sources the main G-Diffuser target also builds; this target was missing them.
+        gdx_course_edit_mouse.cpp
+        gdx_course_edit_input.c
+        gdx_course_edit_help.cpp
+        gdx_course_bounds.c
+        gdx_content_io.c
+        gdx_content_import.c
+        gdx_content_pack.cpp
+        gdx_course_registry.c
+        gdx_rom_courses.c
+        gdx_mfs_image.c
+        gdx_hackmods.cpp
+        gdx_hackmods_window.cpp
+        gdx_content_window.cpp
+        gdx_xcup_seed.c
+        gdx_single_race.c
+        gdx_gp_resume.c
+        gdx_palette.cpp
+        gdx_machine_stats.cpp
+        gdx_custom_grid.c
+        gdx_achievements.cpp
         gdx_input_viewer.cpp
         gdx_fps_overlay.cpp
         gdx_perf.cpp
@@ -925,7 +1089,8 @@ if(GDX_BUILD_JP)
     if(GDX_EXPANSION_KIT)
         # EK-only symbols — see the matching US-target comment above.
         target_sources(G-Diffuser-JP PRIVATE disk_buffer.cpp gen/EkTranslatedOverrides.c
-                                             gdx_ek_strings.c gen/EkTranslatedStrings.c)
+                                             gdx_ek_strings.c gen/EkTranslatedStrings.c
+                                             gdx_course_edit_history.cpp)
         target_compile_definitions(G-Diffuser-JP PRIVATE EXPANSION_KIT=1)
     endif()
 
@@ -948,6 +1113,7 @@ if(GDX_BUILD_JP)
     target_link_libraries(G-Diffuser-JP PRIVATE cxd4_rsp)
     target_link_libraries(G-Diffuser-JP PRIVATE discord-rpc)
     target_link_libraries(G-Diffuser-JP PRIVATE gdx_lua)
+    target_link_libraries(G-Diffuser-JP PRIVATE gdx_music_decoders)
 
     if(WIN32)
         target_link_libraries(G-Diffuser-JP PRIVATE user32 Comdlg32 Comctl32)

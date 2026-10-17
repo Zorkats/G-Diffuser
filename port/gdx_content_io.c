@@ -10,6 +10,12 @@
 #define _CRT_SECURE_NO_WARNINGS /* plain fopen/fread/fwrite below; harmless on non-MSVC */
 
 #include "gdx_content_io.h"
+#include "gdx_content_pack.h"
+#include "gdx_course_music.h"
+#include "gdx_course_registry.h"
+#include "gdx_course_state.h"
+#include "gdx_edit_cup.h"
+#include "port_log.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -88,9 +94,10 @@ extern GdxMfsRamArea gMfsRamArea;
 extern int32_t gDirectoryEntryCount;
 extern uint16_t gWorkingDirectory;
 
-/* EK build: ovl_i2/course_context.c:45 defines [6 * 4][9]; the Edit Cup occupies the first 6
- * slots and CRS_ENTRY.CENT persists the whole 216-byte image. */
-extern char gEditCupTrackNames[24][9];
+/* EK build: ovl_i2/course_context.c:45 defines [6 * 4][EDIT_CUP_TRACK_NAME_SIZE] (21 in the port); the
+ * Edit Cup occupies the first 6 slots. CRS_ENTRY.CENT keeps the stock 216-byte image and CRS_ENTRY.CENL
+ * the names over 8 characters (gdx_edit_cup.h). */
+extern char gEditCupTrackNames[GDX_EDIT_CUP_ROWS][GDX_EDIT_CUP_NAME_SIZE];
 
 /* Disk-thread busy flags, decomp/src/sys/disk/75000.c:24-25. D_80794E14 = a ring-buffer op is
  * executing; D_80794E18 = the D_807C6EA8 op slot is mid-dispatch (save/load/flush/...). */
@@ -479,11 +486,195 @@ static int gdx_content_write_container(const char* path, const GdxContentEntry* 
                                            flags, payload, payloadSize);
 }
 
+/* Writes bytes to path atomically (tmp + rename), the same way the container is written. */
+static int gdx_content_write_bytes_atomic(const char* path, const unsigned char* bytes, size_t length) {
+    char tempPath[2048];
+    FILE* f;
+    int n;
+    int rc;
+
+    n = snprintf(tempPath, sizeof(tempPath), "%s.tmp", path);
+    if (n < 0 || (size_t) n >= sizeof(tempPath)) {
+        return GDX_CONTENT_ERR_BAD_ARGS;
+    }
+
+    f = fopen(tempPath, "wb");
+    if (f == NULL) {
+        return GDX_CONTENT_ERR_IO;
+    }
+    rc = GDX_CONTENT_OK;
+    if (fwrite(bytes, 1, length, f) != length || fflush(f) != 0) {
+        rc = GDX_CONTENT_ERR_IO;
+    }
+    if (fclose(f) != 0) {
+        rc = GDX_CONTENT_ERR_IO;
+    }
+    if (rc != GDX_CONTENT_OK) {
+        remove(tempPath);
+        return rc;
+    }
+
+#ifdef _WIN32
+    if (!MoveFileExA(tempPath, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        remove(tempPath);
+        return GDX_CONTENT_ERR_IO;
+    }
+#else
+    if (rename(tempPath, path) != 0) {
+        remove(tempPath);
+        return GDX_CONTENT_ERR_IO;
+    }
+#endif
+    return GDX_CONTENT_OK;
+}
+
+int gdx_content_load_track_payload(const char* name, uint8_t* out, size_t outCap) {
+    GdxContentEntry probe;
+    GdxMfsRamDirectoryEntry dirEntry;
+    int rc;
+
+    if (name == NULL || name[0] == '\0' || strlen(name) > 20 || out == NULL ||
+        outCap < GDX_CONTENT_TRACK_PAYLOAD_SIZE) {
+        return GDX_CONTENT_ERR_BAD_ARGS;
+    }
+    rc = gdx_content_ensure_mounted();
+    if (rc != GDX_CONTENT_OK) {
+        return rc;
+    }
+    if (gdx_content_mfs_busy()) {
+        return GDX_CONTENT_ERR_BUSY;
+    }
+    memset(&probe, 0, sizeof(probe));
+    snprintf(probe.name, sizeof(probe.name), "%s", name);
+    memcpy(probe.extension, "CRSD", 5);
+    probe.contentType = GDX_CONTENT_TYPE_TRACK;
+    if (!gdx_content_find_entry(&probe, &dirEntry)) {
+        return GDX_CONTENT_ERR_NOT_FOUND;
+    }
+    if (dirEntry.fileSize != GDX_CONTENT_TRACK_PAYLOAD_SIZE) {
+        return GDX_CONTENT_ERR_BAD_SIZE;
+    }
+    if (Mfs_LoadFileInDir(gWorkingDirectory, dirEntry.name, dirEntry.extension, out,
+                          GDX_CONTENT_TRACK_PAYLOAD_SIZE) != 0) {
+        return GDX_CONTENT_ERR_LOAD;
+    }
+    return GDX_CONTENT_OK;
+}
+
+/* GXE1 sidecar for a track with Course Edit extension keys: exports/<stem>.gdxe, bound to the
+ * payload CRC-32 (gdx_course_registry.h). The caller writes it before the container, so a failure
+ * here leaves no .gdxc behind. */
+static int gdx_content_write_extension_sidecar(const char* directory, const char* stem, const char* courseId,
+                                               const unsigned char* payload, uint32_t payloadSize) {
+    const GdxCourseExtRecord* records;
+    unsigned char* block;
+    char path[1600];
+    int recordCount = 0;
+    int length;
+    int n;
+    int rc;
+
+    records = gdx_course_ext_records(courseId, &recordCount);
+    block = (unsigned char*) malloc(GDX_COURSE_EXT_MAX_BYTES);
+    if (block == NULL) {
+        return GDX_CONTENT_ERR_IO;
+    }
+    length = gdx_course_ext_encode(records, recordCount, gdx_content_crc32(payload, payloadSize), block,
+                                   GDX_COURSE_EXT_MAX_BYTES);
+    if (length < 0) {
+        free(block);
+        return GDX_CONTENT_ERR_BAD_ARGS;
+    }
+#ifdef _WIN32
+    n = snprintf(path, sizeof(path), "%s\\%s.gdxe", directory, stem);
+#else
+    n = snprintf(path, sizeof(path), "%s/%s.gdxe", directory, stem);
+#endif
+    if (n < 0 || (size_t) n >= sizeof(path)) {
+        free(block);
+        return GDX_CONTENT_ERR_IO;
+    }
+    rc = gdx_content_write_bytes_atomic(path, block, (size_t) length);
+    free(block);
+    return rc;
+}
+
+/* GXT1 title sidecar for a track whose session title (8A) differs from its file name:
+ * exports/<stem>.gdxt, bound to the payload CRC-32 (gdx_course_registry.h). Written before the
+ * container, like the GXE1 sidecar. */
+static int gdx_content_write_title_sidecar(const char* directory, const char* stem, const char* title,
+                                           uint32_t payloadCrc) {
+    unsigned char block[GDX_COURSE_TITLE_MAX_BYTES];
+    char path[1600];
+    int length;
+    int n;
+
+    length = gdx_course_title_encode(title, payloadCrc, block, sizeof(block));
+    if (length < 0) {
+        return GDX_CONTENT_ERR_BAD_ARGS;
+    }
+#ifdef _WIN32
+    n = snprintf(path, sizeof(path), "%s\\%s.gdxt", directory, stem);
+#else
+    n = snprintf(path, sizeof(path), "%s/%s.gdxt", directory, stem);
+#endif
+    if (n < 0 || (size_t) n >= sizeof(path)) {
+        return GDX_CONTENT_ERR_IO;
+    }
+    return gdx_content_write_bytes_atomic(path, block, (size_t) length);
+}
+
+/* "<dir>/<name>" with the host separator. Returns 0 when it does not fit. */
+static int gdx_content_join_path(char* out, size_t outCap, const char* dir, const char* name) {
+#ifdef _WIN32
+    int n = snprintf(out, outCap, "%s\\%s", dir, name);
+#else
+    int n = snprintf(out, outCap, "%s/%s", dir, name);
+#endif
+    return n >= 0 && (size_t) n < outCap;
+}
+
+/* .gdxp: makes exports/.gdxp-export exist and empty, and writes its path into stageDir. */
+static int gdx_content_package_stage(const char* exportsDir, char* stageDir, size_t stageCap) {
+    if (!gdx_content_join_path(stageDir, stageCap, exportsDir, GDX_CONTENT_PACK_EXPORT_WORK_DIR) ||
+        gdx_content_pack_clear_dir(stageDir, 0) != GDX_CONTENT_PACK_OK) {
+        return GDX_CONTENT_ERR_IO;
+    }
+    return GDX_CONTENT_OK;
+}
+
+/* .gdxp: zips the staged files into exports/<stem>.gdxp and removes the staging folder, whatever the
+ * outcome. On success outPath receives the package path. */
+static int gdx_content_package_finish(const char* exportsDir, const char* stageDir, const char* stem, char* outPath,
+                                      size_t outCap) {
+    char name[96];
+    char packPath[1600];
+    int rc = GDX_CONTENT_PACK_ERR_ARGS;
+    int n = snprintf(name, sizeof(name), "%s%s", stem, GDX_CONTENT_PACK_EXT);
+
+    if (n >= 0 && (size_t) n < sizeof(name) && gdx_content_join_path(packPath, sizeof(packPath), exportsDir, name)) {
+        rc = gdx_content_pack_write_dir(packPath, stageDir);
+    }
+    gdx_content_pack_clear_dir(stageDir, 1);
+    if (rc != GDX_CONTENT_PACK_OK) {
+        gdx_port_logf("[content] package %s not written: %s\n", name, gdx_content_pack_error_string(rc));
+        return GDX_CONTENT_ERR_PACKAGE;
+    }
+    if (outPath != NULL && outCap > 0) {
+        if (snprintf(outPath, outCap, "%s", packPath) < 0 || strlen(packPath) >= outCap) {
+            outPath[0] = '\0';
+        }
+    }
+    return GDX_CONTENT_OK;
+}
+
 int gdx_content_export(const GdxContentEntry* entry, char* outPath, size_t outCap) {
     GdxMfsRamDirectoryEntry dirEntry;
     unsigned char* payload;
+    char exportsDir[1200];
     char directory[1200];
     char sanitized[64];
+    char stem[64];
     char path[1600];
     int32_t expectedSize;
     uint32_t flags = 0;
@@ -493,6 +684,7 @@ int gdx_content_export(const GdxContentEntry* entry, char* outPath, size_t outCa
     if (entry == NULL || (entry->contentType != GDX_CONTENT_TYPE_TRACK && entry->contentType != GDX_CONTENT_TYPE_MACHINE)) {
         return GDX_CONTENT_ERR_BAD_ARGS;
     }
+    gdx_course_boot(); /* the store must hold the saved keys before the sidecar reads it */
     {
         int rc = gdx_content_ensure_mounted();
         if (rc != GDX_CONTENT_OK) {
@@ -536,23 +728,86 @@ int gdx_content_export(const GdxContentEntry* entry, char* outPath, size_t outCa
         flags = GDX_CONTENT_FLAG_GHOSTS_STRIPPED | GDX_CONTENT_FLAG_RECORDS_STRIPPED;
     }
 
-    if (!gdx_content_exports_directory(directory, sizeof(directory), 1)) {
+    if (!gdx_content_exports_directory(exportsDir, sizeof(exportsDir), 1)) {
         free(payload);
         return GDX_CONTENT_ERR_IO;
     }
+    /* A track is staged and then packaged with its sidecars and songs; a machine stays a loose .gdxc. */
+    if (entry->contentType == GDX_CONTENT_TYPE_TRACK) {
+        rc = gdx_content_package_stage(exportsDir, directory, sizeof(directory));
+        if (rc != GDX_CONTENT_OK) {
+            free(payload);
+            return rc;
+        }
+    } else {
+        snprintf(directory, sizeof(directory), "%s", exportsDir);
+    }
     gdx_content_sanitize_filename(entry->name, sanitized, sizeof(sanitized));
+    /* Names inside a package are plain ASCII (gdx_content_pack.h). The importer takes the course name
+     * from the container header, so only the package itself keeps the full file name. */
+    memcpy(stem, sanitized, sizeof(stem));
+    if (entry->contentType == GDX_CONTENT_TYPE_TRACK) {
+        for (n = 0; stem[n] != '\0'; n++) {
+            if ((unsigned char) stem[n] >= 0x7F) {
+                stem[n] = '_';
+            }
+        }
+    }
 #ifdef _WIN32
-    n = snprintf(path, sizeof(path), "%s\\%s.gdxc", directory, sanitized);
+    n = snprintf(path, sizeof(path), "%s\\%s.gdxc", directory, stem);
 #else
-    n = snprintf(path, sizeof(path), "%s/%s.gdxc", directory, sanitized);
+    n = snprintf(path, sizeof(path), "%s/%s.gdxc", directory, stem);
 #endif
     if (n < 0 || (size_t) n >= sizeof(path)) {
         free(payload);
+        if (entry->contentType == GDX_CONTENT_TYPE_TRACK) {
+            gdx_content_pack_clear_dir(directory, 1);
+        }
         return GDX_CONTENT_ERR_IO;
+    }
+
+    /* A track with Course Edit extension keys gets its GXE1 sidecar first, and the container then
+     * carries flag bit 2. A track without keys is written exactly as before. */
+    if (entry->contentType == GDX_CONTENT_TYPE_TRACK) {
+        char courseId[GDX_COURSE_FILE_ID_MAX + 1];
+        char title[GDX_COURSE_TITLE_MAX + 1];
+
+        snprintf(courseId, sizeof(courseId), "%s.%s", entry->name, entry->extension);
+        if (gdx_course_ext_count(courseId) > 0) {
+            rc = gdx_content_write_extension_sidecar(directory, stem, courseId, payload,
+                                                     (uint32_t) expectedSize);
+            if (rc != GDX_CONTENT_OK) {
+                free(payload);
+                gdx_content_pack_clear_dir(directory, 1);
+                return rc;
+            }
+            /* 7A: the audio of custom BGM choices travels beside the .gdxc. A failed copy is logged by
+             * the course music module and does not fail the export. */
+            gdx_course_music_export_course(courseId, directory);
+            flags |= GDX_CONTENT_FLAG_EXTENSIONS;
+        }
+        /* 8A: a track listed under a short cup name keeps its full title in a GXT1 sidecar. */
+        if (gdx_course_title_get(courseId, title, sizeof(title)) && strcmp(title, entry->name) != 0) {
+            rc = gdx_content_write_title_sidecar(directory, stem, title,
+                                                 gdx_content_crc32(payload, (size_t) expectedSize));
+            if (rc != GDX_CONTENT_OK) {
+                free(payload);
+                gdx_content_pack_clear_dir(directory, 1);
+                return rc;
+            }
+            flags |= GDX_CONTENT_FLAG_TITLE;
+        }
     }
 
     rc = gdx_content_write_container(path, entry, flags, payload, (uint32_t) expectedSize);
     free(payload);
+    if (entry->contentType == GDX_CONTENT_TYPE_TRACK) {
+        if (rc != GDX_CONTENT_OK) {
+            gdx_content_pack_clear_dir(directory, 1);
+            return rc;
+        }
+        return gdx_content_package_finish(exportsDir, directory, sanitized, outPath, outCap);
+    }
     if (rc == GDX_CONTENT_OK && outPath != NULL && outCap > 0) {
         if (snprintf(outPath, outCap, "%s", path) < 0 || strlen(path) >= outCap) {
             outPath[0] = '\0';
@@ -568,8 +823,9 @@ int gdx_content_export(const GdxContentEntry* entry, char* outPath, size_t outCa
 #define GDX_CONTENT_BUNDLE_NAME "EDIT-CUP"
 #define GDX_CONTENT_BUNDLE_FILE_STEM "edit-cup"
 #define GDX_CONTENT_BUNDLE_MAX_PAYLOAD                                                        \
-    (2 + GDX_CONTENT_BUNDLE_ENTRY_HEADER_SIZE * (1 + GDX_CONTENT_BUNDLE_MAX_TRACKS) +         \
-     GDX_CONTENT_CENT_PAYLOAD_SIZE + GDX_CONTENT_BUNDLE_MAX_TRACKS * GDX_CONTENT_TRACK_PAYLOAD_SIZE)
+    (2 + GDX_CONTENT_BUNDLE_ENTRY_HEADER_SIZE * (2 + GDX_CONTENT_BUNDLE_MAX_TRACKS) +         \
+     GDX_CONTENT_CENT_PAYLOAD_SIZE + GDX_CONTENT_CENL_PAYLOAD_SIZE +                         \
+     GDX_CONTENT_BUNDLE_MAX_TRACKS * GDX_CONTENT_TRACK_PAYLOAD_SIZE)
 
 /* Finds a CRSD file by NUL-terminated name in the working directory (same comparison shape as
  * gdx_content_file_exists). */
@@ -613,18 +869,101 @@ static void gdx_content_pack_bundle_entry(unsigned char** cursor, const char ext
     *cursor = p;
 }
 
+/* Bundle companion (plan slice 9, scope D): exports/edit-cup.gdxs, a GXS1 file with one entry per member
+ * that has extension keys or a title. Each entry is bound to its member's post-strip payload CRC-32, so the
+ * companion applies only to the .gdxc it was written with. The .gdxc container itself is unchanged, so
+ * older readers see the same bytes they always did. A stale companion is removed when the new bundle has
+ * nothing to carry. *outFlags receives GDX_CONTENT_FLAG_EXTENSIONS and/or GDX_CONTENT_FLAG_TITLE. */
+static int gdx_content_write_bundle_companion(const char* directory, char (*members)[GDX_EDIT_CUP_NAME_SIZE],
+                                              const uint32_t* memberCrc, int memberCount, uint32_t* outFlags) {
+    GdxCourseStateEntry* entries;
+    unsigned char* block;
+    char path[1600];
+    int entryCount = 0;
+    int anyRecords = 0;
+    int anyTitles = 0;
+    int length;
+    int n;
+    int i;
+    int rc = GDX_CONTENT_OK;
+
+    *outFlags = 0;
+#ifdef _WIN32
+    n = snprintf(path, sizeof(path), "%s\\%s.%s", directory, GDX_CONTENT_BUNDLE_FILE_STEM, "gdxs");
+#else
+    n = snprintf(path, sizeof(path), "%s/%s.%s", directory, GDX_CONTENT_BUNDLE_FILE_STEM, "gdxs");
+#endif
+    if (n < 0 || (size_t) n >= sizeof(path)) {
+        return GDX_CONTENT_ERR_IO;
+    }
+    entries = (GdxCourseStateEntry*) calloc((size_t) (memberCount > 0 ? memberCount : 1), sizeof(*entries));
+    block = (unsigned char*) malloc(GDX_COURSE_STATE_MAX_BYTES);
+    if (entries == NULL || block == NULL) {
+        free(entries);
+        free(block);
+        return GDX_CONTENT_ERR_IO;
+    }
+    for (i = 0; i < memberCount; i++) {
+        GdxCourseStateEntry* e = &entries[entryCount];
+        const GdxCourseExtRecord* records;
+        int recordCount = 0;
+        char title[GDX_COURSE_TITLE_MAX + 1];
+
+        memset(e, 0, sizeof(*e));
+        snprintf(e->courseId, sizeof(e->courseId), "%s.CRSD", members[i]);
+        e->bindCrc = memberCrc[i];
+        records = gdx_course_ext_records(e->courseId, &recordCount);
+        if (recordCount > 0) {
+            e->records = records;
+            e->recordCount = recordCount;
+        }
+        if (gdx_course_title_get(e->courseId, title, sizeof(title)) && strcmp(title, members[i]) != 0) {
+            e->hasTitle = 1;
+            snprintf(e->title, sizeof(e->title), "%s", title);
+        }
+        if (e->recordCount > 0 || e->hasTitle) {
+            anyRecords |= e->recordCount > 0;
+            anyTitles |= e->hasTitle;
+            entryCount++;
+        }
+    }
+
+    if (entryCount == 0) {
+        remove(path); /* nothing to carry; a stale companion must not apply to this bundle */
+        free(entries);
+        free(block);
+        return GDX_CONTENT_OK;
+    }
+    length = gdx_course_state_encode(entries, entryCount, block, GDX_COURSE_STATE_MAX_BYTES);
+    if (length < 0) {
+        rc = GDX_CONTENT_ERR_BAD_ARGS;
+    } else {
+        rc = gdx_content_write_bytes_atomic(path, block, (size_t) length);
+    }
+    if (rc == GDX_CONTENT_OK) {
+        *outFlags = (anyRecords ? GDX_CONTENT_FLAG_EXTENSIONS : 0u) | (anyTitles ? GDX_CONTENT_FLAG_TITLE : 0u);
+    }
+    free(entries);
+    free(block);
+    return rc;
+}
+
 int gdx_content_export_bundle(char* outPath, size_t outCap) {
     unsigned char cent[GDX_CONTENT_CENT_PAYLOAD_SIZE];
+    unsigned char cenl[GDX_CONTENT_CENL_PAYLOAD_SIZE];
     unsigned char* bundlePayload = NULL;
     unsigned char* trackBuf = NULL;
     unsigned char* cursor;
     GdxMfsRamDirectoryEntry dirEntry;
-    char packedNames[GDX_CONTENT_BUNDLE_MAX_TRACKS][10];
+    char packedNames[GDX_CONTENT_BUNDLE_MAX_TRACKS][GDX_EDIT_CUP_NAME_SIZE];
+    uint32_t memberCrc[GDX_CONTENT_BUNDLE_MAX_TRACKS];
+    char exportsDir[1200];
     char directory[1200];
     char path[1600];
     uint32_t flags = 0;
     int stripGhosts;
     int trackCount = 0;
+    int haveCenl;
     int n;
     int i;
     int j;
@@ -637,9 +976,14 @@ int gdx_content_export_bundle(char* outPath, size_t outCap) {
         }
     }
 
-    /* The CENT image is the in-memory cup state (loaded from CRS_ENTRY.CENT at mount and kept
-     * in sync by every game-side registration path). */
-    memcpy(cent, gEditCupTrackNames, sizeof(cent));
+    gdx_course_boot(); /* the store must hold the saved keys before the companion reads it */
+
+    /* The CENT and CENL images come from the in-memory cup state (loaded from CRS_ENTRY.CENT and .CENL
+     * at mount and kept in sync by every game-side registration path), packed the way MFS writes them.
+     * The CENL entry is added only when a slot name is over 8 characters, so a cup of short names
+     * still imports on older builds. */
+    gdx_edit_cup_pack_cent((const char*) gEditCupTrackNames, cent);
+    haveCenl = gdx_edit_cup_pack_cenl((const char*) gEditCupTrackNames, cenl);
     stripGhosts = CVarGetInteger("gEnhancements.Content.ExportIncludeGhosts", 0) == 0;
 
     bundlePayload = (unsigned char*) malloc(GDX_CONTENT_BUNDLE_MAX_PAYLOAD);
@@ -652,11 +996,14 @@ int gdx_content_export_bundle(char* outPath, size_t outCap) {
 
     cursor = bundlePayload + 2; /* entryCount patched once the track count is known */
     gdx_content_pack_bundle_entry(&cursor, "CENT", "CRS_ENTRY", cent, sizeof(cent));
+    if (haveCenl) {
+        gdx_content_pack_bundle_entry(&cursor, "CENL", "CRS_ENTRY", cenl, sizeof(cenl));
+    }
 
     for (i = 0; i < GDX_CONTENT_BUNDLE_MAX_TRACKS; i++) {
-        char slot[10];
-        memcpy(slot, gEditCupTrackNames[i], 9);
-        slot[9] = '\0';
+        char slot[GDX_EDIT_CUP_NAME_SIZE];
+        memcpy(slot, gEditCupTrackNames[i], GDX_EDIT_CUP_NAME_SIZE);
+        slot[GDX_EDIT_CUP_NAME_SIZE - 1] = '\0';
         if (slot[0] == '\0') {
             continue;
         }
@@ -694,6 +1041,7 @@ int gdx_content_export_bundle(char* outPath, size_t outCap) {
         if (stripGhosts) {
             memset(trackBuf + GDX_CONTENT_GHOST_REGION_OFFSET, 0, GDX_CONTENT_STRIP_REGION_SIZE);
         }
+        memberCrc[trackCount] = gdx_content_crc32(trackBuf, GDX_CONTENT_TRACK_PAYLOAD_SIZE);
         gdx_content_pack_bundle_entry(&cursor, "CRSD", slot, trackBuf, GDX_CONTENT_TRACK_PAYLOAD_SIZE);
         memcpy(packedNames[trackCount], slot, sizeof(packedNames[trackCount]));
         trackCount++;
@@ -707,12 +1055,17 @@ int gdx_content_export_bundle(char* outPath, size_t outCap) {
     if (stripGhosts) {
         flags = GDX_CONTENT_FLAG_GHOSTS_STRIPPED | GDX_CONTENT_FLAG_RECORDS_STRIPPED;
     }
-    bundlePayload[0] = (unsigned char) ((1 + trackCount) & 0xFF);
-    bundlePayload[1] = (unsigned char) (((1 + trackCount) >> 8) & 0xFF);
+    bundlePayload[0] = (unsigned char) ((1 + haveCenl + trackCount) & 0xFF);
+    bundlePayload[1] = (unsigned char) (((1 + haveCenl + trackCount) >> 8) & 0xFF);
 
-    if (!gdx_content_exports_directory(directory, sizeof(directory), 1)) {
+    if (!gdx_content_exports_directory(exportsDir, sizeof(exportsDir), 1)) {
         free(bundlePayload);
         return GDX_CONTENT_ERR_IO;
+    }
+    rc = gdx_content_package_stage(exportsDir, directory, sizeof(directory));
+    if (rc != GDX_CONTENT_OK) {
+        free(bundlePayload);
+        return rc;
     }
 #ifdef _WIN32
     n = snprintf(path, sizeof(path), "%s\\%s.gdxc", directory, GDX_CONTENT_BUNDLE_FILE_STEM);
@@ -721,19 +1074,40 @@ int gdx_content_export_bundle(char* outPath, size_t outCap) {
 #endif
     if (n < 0 || (size_t) n >= sizeof(path)) {
         free(bundlePayload);
+        gdx_content_pack_clear_dir(directory, 1);
         return GDX_CONTENT_ERR_IO;
+    }
+
+    /* Keys, titles and 7A audio of the members (plan slice 9, D). The companion is written before the
+     * container, like the single-track sidecars, so a failed container leaves no bundle that claims them. */
+    {
+        uint32_t companionFlags = 0;
+        int m;
+
+        rc = gdx_content_write_bundle_companion(directory, packedNames, memberCrc, trackCount, &companionFlags);
+        if (rc != GDX_CONTENT_OK) {
+            free(bundlePayload);
+            gdx_content_pack_clear_dir(directory, 1);
+            return rc;
+        }
+        flags |= companionFlags;
+        for (m = 0; m < trackCount; m++) {
+            char courseId[GDX_COURSE_FILE_ID_MAX + 1];
+
+            snprintf(courseId, sizeof(courseId), "%s.CRSD", packedNames[m]);
+            gdx_course_music_export_course(courseId, directory);
+        }
     }
 
     rc = gdx_content_write_container_raw(path, GDX_CONTENT_TYPE_BUNDLE, gdx_content_fourcc("CENT"),
                                          GDX_CONTENT_BUNDLE_NAME, flags, bundlePayload,
                                          (uint32_t) (cursor - bundlePayload));
     free(bundlePayload);
-    if (rc == GDX_CONTENT_OK && outPath != NULL && outCap > 0) {
-        if (snprintf(outPath, outCap, "%s", path) < 0 || strlen(path) >= outCap) {
-            outPath[0] = '\0';
-        }
+    if (rc != GDX_CONTENT_OK) {
+        gdx_content_pack_clear_dir(directory, 1);
+        return rc;
     }
-    return rc;
+    return gdx_content_package_finish(exportsDir, directory, GDX_CONTENT_BUNDLE_FILE_STEM, outPath, outCap);
 }
 
 const char* gdx_content_error_string(int rc) {
@@ -754,6 +1128,8 @@ const char* gdx_content_error_string(int rc) {
             return "MFS load failed";
         case GDX_CONTENT_ERR_NO_FS:
             return "no disk filesystem mounted";
+        case GDX_CONTENT_ERR_PACKAGE:
+            return "could not write the .gdxp package";
         default:
             return "unknown error";
     }

@@ -55,7 +55,7 @@ not a preference — it is what keeps the port honest against the original.
 | Asset dump — 11 classes, native, no Python required | `torch/src/gdx/dump_all.cpp:498-501` |
 | `ARRAY`/`GARR` resource dumping | `torch/src/gdx/dump_arrays.cpp` — 62 entries, 38 PNGs |
 | Ghost library — `.gdg` v1, import/export, 128 entries, browser | `port/gdx_ghost_io.h`, `port/gdx_ghost_window.cpp` |
-| Workshop channels: texture, sequence, sample, soundfont, model packs + sandboxed Lua scripts (build- and tool-verified; owner runtime verification pending for the 1.1.0 wave) | `port/gdx_workshop.cpp`, `port/gdx_audio_*_packs.*`, `port/gdx_model_packs.*`, `port/gdx_lua.*`; MODDING_GUIDE §12–§16 |
+| Workshop channels: texture, sequence, sample, soundfont, model packs + sandboxed Lua scripts (build- and tool-verified; owner runtime verification pending for the 1.1.0 wave) | `port/gdx_workshop.cpp`, `port/gdx_audio_*_packs.*`, `port/gdx_model_packs.*`, `port/gdx_lua.*`; `docs/modding/` |
 
 ### Platform
 
@@ -281,7 +281,7 @@ Not recommendations — forks that need an owner's answer.
 2. **Ports 1–3.** Pre-1.0 parity defect, or explicit non-goal?
 3. **Frame interpolation.** Fix the predicate for 1.0, or hide the toggle until it works?
 4. **Lua scripting.** Resolved 2026-08-18 by owner directive: committed, shipped as the sandboxed
-   read-only v1 (MODDING_GUIDE §15). The support-contract concern stands for v2+ (state write, HUD
+   read-only v1 (`docs/modding/LUA_SCRIPTS.md`). The support-contract concern stands for v2+ (state write, HUD
    draw) — each remains its own decision.
 5. **Leaderboards.** The ghost format makes replay verification impossible, not merely hard. Publish
    knowing entries are structurally forgeable, or not at all?

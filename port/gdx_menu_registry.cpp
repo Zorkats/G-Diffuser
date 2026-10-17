@@ -54,7 +54,10 @@
 #include "gdx_palette.h" // F2 palette editor: override table + persistence (extern "C" API)
 #include "gdx_machine_stats.h" // F2b machine stat editor: body/boost/grip/weight overrides
 #include "gdx_custom_grid.h" // F3 custom grid: roster string CVar parse/format (extern "C" API)
+#include "gdx_input_actions.h" // 3A action layer: per-context N64 button tables (extern "C" API)
+#include "gdx_input_profiles.h" // 4A controller profiles: Race-table presets over the 3A layer (extern "C" API)
 #include "gdx_achievements.h" // F10 playtime tracker + local achievements
+#include "gdx_gp_resume.h"    // Save GP in progress: saved cup record + Continue Cup (extern "C" API)
 
 #include <algorithm>
 #include <cctype>
@@ -72,6 +75,68 @@
 
 using namespace gdxmenu;
 
+// Save GP in progress. The safe-point gate and the request are defined in decomp/src/game/game.c
+// (PORT block); gMachineNames is the decomp name table (common.c), as in gdx_ghost_window.cpp.
+extern "C" {
+int gdx_gp_resume_safe_point(void);
+void gdx_gp_resume_request_continue(void);
+extern const char* gMachineNames[];
+}
+
+// Continue Cup entry (Gameplay page). The save is read at most once a second, so the menu
+// never reads the file every frame. The button is live only with a readable save and at the main
+// menu's top-level selection; the request is taken on the next game tick.
+static void DrawContinueCupEntry() {
+    static const char* const kSaveCupNames[] = { "Jack Cup", "Queen Cup", "King Cup", "Joker Cup", "X Cup" };
+    static const char* const kSaveDifficultyNames[] = { "Novice", "Standard", "Expert", "Master" };
+    static GdxGpResumeState sSaved;
+    static GdxGpResumeError sSavedError = GDX_GP_RESUME_ERR_IO;
+    static double sNextRead = 0.0;
+    static char sTooltip[384];
+
+    const double now = ImGui::GetTime();
+    if (now >= sNextRead) {
+        sSavedError = gdx_gp_resume_load(&sSaved);
+        sNextRead = now + 1.0;
+    }
+
+    const bool haveSave = sSavedError == GDX_GP_RESUME_OK;
+    const bool safe = gdx_gp_resume_safe_point() != 0;
+    const bool enabled = haveSave && safe;
+
+    if (!enabled) {
+        ImGui::BeginDisabled();
+    }
+    if (ImGui::Button("Continue Cup") && enabled) {
+        gdx_gp_resume_request_continue();
+    }
+    if (!enabled) {
+        ImGui::EndDisabled();
+    }
+
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        if (haveSave) {
+            const int machine = sSaved.playerCharacter[0];
+            const char* machineName = (machine >= 0 && machine < GDX_GP_RESUME_MACHINE_COUNT &&
+                                       gMachineNames[machine] != nullptr)
+                                          ? gMachineNames[machine]
+                                          : "Unknown";
+            snprintf(sTooltip, sizeof(sTooltip), "%s, %s, race %d of 6. Machine: %s.\n%s",
+                     kSaveCupNames[sSaved.cup], kSaveDifficultyNames[sSaved.difficulty],
+                     (int) (sSaved.courseIndex % 6) + 1, machineName,
+                     safe ? "Resumes the saved cup from the last race boundary."
+                          : "Available on the mode select screen, with nothing else in progress.");
+        } else if (sSavedError == GDX_GP_RESUME_ERR_IO) {
+            snprintf(sTooltip, sizeof(sTooltip),
+                     "No cup is saved. Grand Prix saves the cup between races, so a cup in progress shows here.");
+        } else {
+            snprintf(sTooltip, sizeof(sTooltip), "The saved cup cannot be resumed: %s.",
+                     gdx_gp_resume_error_text(sSavedError));
+        }
+        ImGui::SetTooltip("%s", sTooltip);
+    }
+}
+
 // From port/input_bridge.c: nonzero while an on-track race is live. Declared here rather than
 // including the bridge header (this TU needs nothing else from it); the signature matches exactly.
 // Drives DISABLE_FOR_RACE_IN_PROGRESS.
@@ -84,6 +149,9 @@ extern "C" double gdx_gfx_interp_last_t(void);
 // From decomp/src/game/racer.c: the player's last machine-select choice. Drawn read-only as
 // custom-grid slot 0, which func_80089800 never overrides.
 extern "C" int16_t gPlayerCharacters[4];
+
+// From port/gdx_course_edit_help.cpp: the Controls Help block on the Enhancements > Mouse page.
+void GdxCourseEditDrawControlsHelp(void);
 
 namespace {
 
@@ -361,9 +429,15 @@ void DrawCustomGrid() {
         int skinIndex = skins[slot] + 1;
         ImGui::SetNextItemWidth(150.0f);
         bool slotChanged = ImGui::Combo("##character", &charIndex, sGridCharNames, GDX_CUSTOM_GRID_SLOTS + 1);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Machine for this starting slot. Random lets the game choose.");
+        }
         ImGui::SameLine();
         ImGui::SetNextItemWidth(90.0f);
         slotChanged |= ImGui::Combo("##skin", &skinIndex, kGridSkinNames, GDX_CUSTOM_GRID_SKIN_COUNT + 1);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Color for this slot's machine. Random lets the game choose.");
+        }
         if (slotChanged) {
             characters[slot] = charIndex - 1;
             skins[slot] = skinIndex - 1;
@@ -379,12 +453,225 @@ void DrawCustomGrid() {
         }
         changed = true;
     }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Set every slot to a random machine and a random color.");
+    }
 
     if (changed) {
         GdxCustomGrid_FormatRoster(characters, skins, roster, sizeof(roster));
         CVarSetString("gEnhancements.CustomGrid.Roster", roster);
         CVarSave();
     }
+}
+
+// 3A action layer (port/gdx_input_actions.c). Row order and column order both match GdxInputOutput:
+// column i is the N64 bit of row i, which is also that row's identity input.
+struct InputActionText {
+    const char* label;
+    const char* tip;
+};
+
+struct InputActionColumn {
+    const char* header;
+    const char* name;
+};
+
+constexpr const char* kActionPlainTip = "The N64 button as read from the controller. This context gives it no action name.";
+constexpr const char* kActionUnusedDpadTip = "No race code reads the D-pad, so this row does nothing in races.";
+
+// Race labels verified against the decomp: Accelerate racer.c:4326, Boost racer.c:3811, drift and
+// side attack racer.c:3696 and 3965-3990 (Z and R each start a side attack, Z with R is a spin),
+// Air brake racer.c:3771, Rear view camera.c:3223, Camera camera.c:3211, Lap counter toggle
+// minimap.c:229 (2 or more players), Gap to leader toggle menus.c:5807 (see hud.c:2298), Pause
+// menus.c:6226.
+const InputActionText kRaceActions[GDX_INPUT_OUT_COUNT] = {
+    { "Accelerate (A)", "Throttle. Hold to accelerate." },
+    { "Boost (B)", "Press to boost when the machine has energy and no boost is running." },
+    { "Drift left / side attack (Z)", "Hold to drift. Press for a side attack. Hold R and press Z for a spin attack." },
+    { "Pause (Start)", "Pauses the race and opens the pause menu." },
+    { "D-pad up (unused in races)", kActionUnusedDpadTip },
+    { "D-pad down (unused in races)", kActionUnusedDpadTip },
+    { "D-pad left (unused in races)", kActionUnusedDpadTip },
+    { "D-pad right (unused in races)", kActionUnusedDpadTip },
+    { "Gap to leader toggle (L)", "Toggles the gap-to-leader time display." },
+    { "Drift right / side attack (R)", "Hold to drift. Press for a side attack. Hold Z and press R for a spin attack." },
+    { "Rear view (C-Up)", "Hold to look back." },
+    { "Air brake (C-Down)", "Hold to brake." },
+    { "Lap counter toggle (C-Left)", "Toggles the minimap lap counter. Used in races with 2 or more players." },
+    { "Camera (C-Right)", "Press to cycle the race camera." },
+};
+
+const InputActionText kCourseEditActions[GDX_INPUT_OUT_COUNT] = {
+    { "Accept (A)", "Confirms the highlighted choice in the editor." },
+    { "Back (B)", "Cancels the current editor step or goes back." },
+    { "Z", kActionPlainTip },
+    { "Start", kActionPlainTip },
+    { "D-pad up", kActionPlainTip },
+    { "D-pad down", kActionPlainTip },
+    { "D-pad left", kActionPlainTip },
+    { "D-pad right", kActionPlainTip },
+    { "L", kActionPlainTip },
+    { "R", kActionPlainTip },
+    { "C-Up", kActionPlainTip },
+    { "C-Down", kActionPlainTip },
+    { "C-Left", kActionPlainTip },
+    { "C-Right", kActionPlainTip },
+};
+
+const InputActionText kMenuActions[GDX_INPUT_OUT_COUNT] = {
+    { "Accept (A)", "Confirms the highlighted choice in menus." },
+    { "Back (B)", "Goes back to the previous menu." },
+    { "Z", kActionPlainTip },
+    { "Start", kActionPlainTip },
+    { "D-pad up", kActionPlainTip },
+    { "D-pad down", kActionPlainTip },
+    { "D-pad left", kActionPlainTip },
+    { "D-pad right", kActionPlainTip },
+    { "L", kActionPlainTip },
+    { "R", kActionPlainTip },
+    { "C-Up", kActionPlainTip },
+    { "C-Down", kActionPlainTip },
+    { "C-Left", kActionPlainTip },
+    { "C-Right", kActionPlainTip },
+};
+
+// Input columns in gdx_input_actions_input_bit order: the 14 N64 buttons, then gamepad X and Y.
+const InputActionColumn kActionInputColumns[GDX_INPUT_IN_COUNT] = {
+    { "A", "A button" },         { "B", "B button" },           { "Z", "Z button" },
+    { "Start", "Start button" }, { "Up", "D-pad up" },          { "Down", "D-pad down" },
+    { "Left", "D-pad left" },    { "Right", "D-pad right" },    { "L", "L button" },
+    { "R", "R button" },         { "C-Up", "C-Up button" },     { "C-Down", "C-Down button" },
+    { "C-Left", "C-Left button" }, { "C-Right", "C-Right button" }, { "X", "gamepad X button" },
+    { "Y", "gamepad Y button" },
+};
+
+// One table per context: a row per action, a checkbox per input N64 button. A checked box means
+// that input triggers the action in this context. Every click writes one CVar and saves the config.
+void DrawInputActionTable(int context, const char* title, const char* scope, const InputActionText* rows) {
+    ImGui::PushID(context);
+    ImGui::TextUnformatted(title);
+    ImGui::SameLine();
+    ImGui::TextDisabled("%s", scope);
+    ImGui::SameLine();
+    if (ImGui::Button("Reset to N64 default")) {
+        gdx_input_actions_reset_context(context);
+        CVarSave();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Every %s action goes back to its own N64 button.", title);
+    }
+
+    const ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollX;
+    if (ImGui::BeginTable("##InputActions", 1 + GDX_INPUT_IN_COUNT, flags)) {
+        ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed, 260.0f);
+        for (int col = 0; col < GDX_INPUT_IN_COUNT; col++) {
+            ImGui::TableSetupColumn(kActionInputColumns[col].header, ImGuiTableColumnFlags_WidthFixed, 56.0f);
+        }
+        ImGui::TableNextRow(ImGuiTableRowFlags_Headers);
+        for (int col = 0; col <= GDX_INPUT_IN_COUNT; col++) {
+            ImGui::TableSetColumnIndex(col);
+            ImGui::TableHeader(ImGui::TableGetColumnName(col));
+            if (col > 0 && ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Input: %s", kActionInputColumns[col - 1].name);
+            }
+        }
+
+        for (int out = 0; out < GDX_INPUT_OUT_COUNT; out++) {
+            unsigned short mask = gdx_input_actions_get_mask(context, out);
+
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextUnformatted(rows[out].label);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s", rows[out].tip);
+            }
+            if (mask == 0) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("(no input)");
+            }
+
+            for (int in = 0; in < GDX_INPUT_IN_COUNT; in++) {
+                unsigned short bit = gdx_input_actions_input_bit(in);
+                bool on = (mask & bit) != 0;
+
+                ImGui::TableSetColumnIndex(in + 1);
+                ImGui::PushID(out * GDX_INPUT_IN_COUNT + in);
+                if (ImGui::Checkbox("##trigger", &on)) {
+                    mask = (unsigned short) (on ? (mask | bit) : (mask & ~bit));
+                    gdx_input_actions_set_mask(context, out, mask);
+                    CVarSave();
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip(on ? "%s: the %s triggers %s. Uncheck to remove it."
+                                         : "%s: check to let the %s trigger %s.",
+                                      title, kActionInputColumns[in].name, rows[out].label);
+                }
+                ImGui::PopID();
+            }
+        }
+        ImGui::EndTable();
+    }
+    ImGui::PopID();
+}
+
+// Profile combo (4A, gdx_input_profiles.c). Each entry is a Race-table preset assuming the default
+// controller mapping. "Custom" shows while the Race table matches no preset. Picking an entry writes
+// its masks and saves the config. The tooltip gives the preset's limitations.
+void DrawInputProfileCombo() {
+    const int match = gdx_input_profiles_match();
+    const char* preview = match >= 0 ? gdx_input_profiles_name(match) : "Custom";
+
+    ImGui::SetNextItemWidth(260.0f);
+    if (ImGui::BeginCombo("Profile##InputProfile", preview)) {
+        for (int i = 0; i < gdx_input_profiles_count(); i++) {
+            ImGui::PushID(i);
+            const bool selected = (i == match);
+            if (ImGui::Selectable(gdx_input_profiles_name(i), selected)) {
+                gdx_input_profiles_apply(i);
+                CVarSave();
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s\n\nLimitations: %s", gdx_input_profiles_description(i),
+                                  gdx_input_profiles_limitations(i));
+            }
+            if (selected) {
+                ImGui::SetItemDefaultFocus();
+            }
+            ImGui::PopID();
+        }
+        if (match < 0) {
+            ImGui::Selectable("Custom", true, ImGuiSelectableFlags_Disabled);
+        }
+        ImGui::EndCombo();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Presets for the Race table. Menu and Course Edit are not changed.");
+    }
+}
+
+// Settings > Controls > Actions. The shell is data; this block is the whole page. The two-layer line
+// at the top is the page's explanation and is kept verbatim.
+void DrawInputActionsPage() {
+    ImGui::TextWrapped("Input Editor maps your controller to N64 buttons. This page decides what each N64 "
+                       "button does in races, Course Edit and menus.");
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Layer 1 is the Input Editor (controller to N64 button).\n"
+                          "Layer 2 is this page (N64 button to action).\n"
+                          "Rows are actions. Checked columns are the N64 buttons that trigger them.\n"
+                          "The X and Y columns are your gamepad's X and Y. The N64 has no such buttons,\n"
+                          "so they do nothing until a box in their column is checked.");
+    }
+    ImGui::Spacing();
+    DrawInputProfileCombo();
+    ImGui::Spacing();
+
+    DrawInputActionTable(GDX_INPUT_CONTEXT_RACE, "Race", "(on track, not paused)", kRaceActions);
+    ImGui::Spacing();
+    DrawInputActionTable(GDX_INPUT_CONTEXT_COURSE_EDIT, "Course Edit", "(the editor, not a test drive)",
+                         kCourseEditActions);
+    ImGui::Spacing();
+    DrawInputActionTable(GDX_INPUT_CONTEXT_MENU, "Menu", "(everything else, including the pause menu)",
+                         kMenuActions);
 }
 
 // F10: read-only view over the achievement table (port/gdx_achievements.cpp). The tracker ticks
@@ -991,13 +1278,17 @@ void GdxMenu::RegisterMenu() {
     AddSidebarEntry("Settings", "Audio", 2, "audio lle hle filter low pass volume reverb latency buffer");
     AddSidebarEntry("Settings", "Controls", 1,
                     "controls controller configuration keyboard gamepad mouse bindings remap");
+    AddSidebarEntry("Settings", "Actions", 1,
+                    "actions action layer race course edit menu drift boost accelerate pause camera rear view "
+                    "air brake remap button context");
     AddSidebarEntry("Settings", "Input Viewer", 2, "input viewer overlay analog stick buttons speedrun");
 
     AddSidebarEntry("Enhancements", "Visuals", 2,
                     "visuals graphics enhancements widescreen hud ui draw distance lod frame pacing "
                     "interpolation smoothing target fps refresh rate");
     AddSidebarEntry("Enhancements", "Gameplay", 1,
-                    "gameplay transitions ai aggression random opponent colors custom grid x cup seed");
+                    "gameplay transitions ai aggression random opponent colors custom grid x cup seed "
+                    "continue cup resume grand prix");
     AddSidebarEntry("Enhancements", "Mouse", 1,
                     "mouse steering sensitivity cursor control hide cursor confine window course edit "
                     "create machine issue 18");
@@ -1006,6 +1297,8 @@ void GdxMenu::RegisterMenu() {
                     "create machine");
     AddSidebarEntry("Enhancements", "Practice", 1,
                     "practice lap delta ghost photo mode free camera replay");
+    AddSidebarEntry("Enhancements", "Single Race", 1,
+                    "single race gp grand prix laps cpu racers rival finish results");
     AddSidebarEntry("Enhancements", "Ghosts", 1,
                     "ghost browser replay library opponents import export staff player autosave boost trail");
     AddSidebarEntry("Enhancements", "Cosmetics", 1,
@@ -1418,6 +1711,38 @@ void GdxMenu::RegisterMenu() {
                                .LabelPosition(UIWidgets::LabelPositions::Near)
                                .Tooltip("Final output gain. 100% = stock (bit-exact, no gain applied)."))
                   .SearchTerms("volume loudness gain level"));
+    AddWidget("Settings", "Audio", SECTION_COLUMN_2,
+              WidgetInfo{ .name = "Music volume (%)", .cVar = "gEnhancements.Audio.MusicVolume",
+                          .type = GdxUI::WIDGET_CVAR_SLIDER_INT }
+                  .Options(UIWidgets::IntSliderOptions()
+                               .Min(0)
+                               .Max(100)
+                               .DefaultValue(100)
+                               .ShowButtons(false)
+                               .LabelPosition(UIWidgets::LabelPositions::Near)
+                               .Tooltip("Background music level. Scales the BGM only. 100% = stock."))
+                  .SearchTerms("music volume bgm background loudness level"));
+    AddWidget("Settings", "Audio", SECTION_COLUMN_2,
+              WidgetInfo{ .name = "Sound effects volume (%)", .cVar = "gEnhancements.Audio.SfxVolume",
+                          .type = GdxUI::WIDGET_CVAR_SLIDER_INT }
+                  .Options(UIWidgets::IntSliderOptions()
+                               .Min(0)
+                               .Max(100)
+                               .DefaultValue(100)
+                               .ShowButtons(false)
+                               .LabelPosition(UIWidgets::LabelPositions::Near)
+                               .Tooltip("Sound effects level. The Expansion Kit title screen guitar riff plays as a "
+                                        "sound effect, so it follows this slider. 100% = stock."))
+                  .SearchTerms("sound effects sfx volume loudness level"));
+    AddWidget("Settings", "Audio", SECTION_COLUMN_2,
+              WidgetInfo{ .name = "Streamed music replacement", .cVar = "gEnhancements.Audio.StreamedMusic",
+                          .type = GdxUI::WIDGET_CVAR_CHECKBOX }
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(true).Tooltip(
+                      "Plays a replacement file for each BGM when one exists: music/<bgm key>.ogg, .flac or "
+                      ".wav beside the game, or in mods/music/. Example: music/bgm_title.ogg.\n"
+                      "Off = stock music only."))
+                  .ModifiedMarker()
+                  .SearchTerms("custom replacement stream streamed music bgm soundtrack file ogg flac wav"));
 
     // Wired to the HLE reverb kill switch in n64_audio_hle.c (the A_MIXER wet->dry return), read
     // live there. It affects the HLE engine ONLY: under the default LLE engine reverb comes from
@@ -1481,6 +1806,14 @@ void GdxMenu::RegisterMenu() {
                       "restarts and replugs.\nOn = default. Turn off to manage ports manually in "
                       "the Input Editor."))
                   .SearchTerms("multiplayer two controllers player 2 assign port seating hotplug"));
+
+    // 3A action layer: which N64 buttons trigger each action in races, Course Edit and menus.
+    // The Input Editor (above) runs first and maps controllers to N64 buttons; these tables run after it.
+    AddWidget("Settings", "Actions", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Input actions", .type = GdxUI::WIDGET_CUSTOM }
+                  .CustomFunction([](WidgetInfo&) { DrawInputActionsPage(); })
+                  .SearchTerms("actions race course edit menu drift boost accelerate pause camera rear view "
+                               "air brake remap button context"));
 
     // ═════════════════════════════════════════════════════════════════════════════════════════
     // SETTINGS -> Input Viewer (2 columns)
@@ -1946,6 +2279,12 @@ void GdxMenu::RegisterMenu() {
                   .ModifiedMarker()
                   .SearchTerms("lava strip damage kill energy drain course editor"));
 
+    // Save GP in progress: resumes the GP cup saved at the last race boundary (port/gdx_gp_resume.h).
+    AddWidget("Enhancements", "Gameplay", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Continue Cup", .type = GdxUI::WIDGET_CUSTOM }
+                  .CustomFunction([](WidgetInfo&) { DrawContinueCupEntry(); })
+                  .SearchTerms("continue cup resume grand prix gp save saved progress boundary"));
+
     // ═════════════════════════════════════════════════════════════════════════════════════════
     // ENHANCEMENTS -> Mouse
     // ═════════════════════════════════════════════════════════════════════════════════════════
@@ -2104,6 +2443,25 @@ void GdxMenu::RegisterMenu() {
                   .SearchTerms("course edit editor mouse tool key keybind rebind shortcut 1 2 3 4 5 6 7 8 9")
                   .DisableWhen({ GdxUI::DISABLE_FOR_COURSE_EDIT_MOUSE_OFF }));
 
+    // Editor hint strip toggle and the read-only control map. The map reads the live gesture button
+    // and tool keys, so a rebound key or button shows its new name here.
+    AddWidget("Enhancements", "Mouse", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Controls Help", .type = GdxUI::WIDGET_SEPARATOR_TEXT });
+    AddWidget("Enhancements", "Mouse", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Editor hint strip",
+                          .cVar = "gEnhancements.Input.EditorHintStrip",
+                          .type = GdxUI::WIDGET_CVAR_CHECKBOX }
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(true).Tooltip(
+                      "Shows the active Course Edit tool, its key, and its actions in the bottom-left\n"
+                      "corner of the game view while the editor mouse drive is on."))
+                  .ModifiedMarker()
+                  .SearchTerms("course edit editor hint strip overlay tool key help controls")
+                  .DisableWhen({ GdxUI::DISABLE_FOR_COURSE_EDIT_MOUSE_OFF }));
+    AddWidget("Enhancements", "Mouse", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Course Edit controls", .type = GdxUI::WIDGET_CUSTOM }
+                  .CustomFunction([](WidgetInfo&) { GdxCourseEditDrawControlsHelp(); })
+                  .SearchTerms("course edit controls help camera orbit pan zoom select drag delete cancel tools keys"));
+
     // Issue #18. Absolute position steering (cursor X inside the game view maps to stick
     // deflection), a separate mechanism from the editor absolute drive above; gated on race
     // modes, so the two are mode-disjoint and never active together.
@@ -2179,13 +2537,25 @@ void GdxMenu::RegisterMenu() {
               WidgetInfo{ .name = "Extended course height (experimental)",
                           .cVar = "gEnhancements.CourseEdit.ExtendedHeight",
                           .type = GdxUI::WIDGET_CVAR_CHECKBOX }
-                  .Options(UIWidgets::CheckboxOptions().DefaultValue(true).Tooltip(
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(false).Tooltip(
                       "Raises the Course Edit height ceiling from 5,000 to 30,000.\n"
                       "Tracks above 5,000 will not load on real hardware or in other\n"
                       "Expansion Kit tools. Experimental: extreme-height camera,\n"
                       "collision, fog, and chunk-budget behavior still needs validation."))
                   .ModifiedMarker()
                   .SearchTerms("course edit extended height altitude experimental limit 30000"));
+
+    // Read by gdx_course_edit_mouse.cpp before it draws GdxCourseEditDrawHistoryPanel.
+    AddWidget("Enhancements", "Course Edit & Machine", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Course Edit: undo history panel",
+                          .cVar = "gEnhancements.CourseEdit.HistoryPanel",
+                          .type = GdxUI::WIDGET_CVAR_CHECKBOX }
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(false).Tooltip(
+                      "Shows a window listing the last 32 Course Edit changes.\n"
+                      "Click a row to undo or redo back to it. Ctrl+Z undoes and\n"
+                      "Ctrl+Y redoes with or without the panel."))
+                  .ModifiedMarker()
+                  .SearchTerms("course edit undo redo history backlog"));
 
     // Gates the PORT branch in course_edit/19C470.c func_xk2_800EB3B4: B inside the
     // OFFICIAL course list reopens the parent picker instead of closing the File menu.
@@ -2338,6 +2708,58 @@ void GdxMenu::RegisterMenu() {
               WidgetInfo{ .name = "Replay theater", .type = GdxUI::WIDGET_COMING_SOON });
     AddWidget("Enhancements", "Practice", SECTION_COLUMN_1,
               WidgetInfo{ .name = "Diagnostic overlay", .type = GdxUI::WIDGET_COMING_SOON });
+
+    // ═════════════════════════════════════════════════════════════════════════════════════════
+    // ENHANCEMENTS -> Single Race
+    // ═════════════════════════════════════════════════════════════════════════════════════════
+
+    // Single Race is the one-player Practice race outside the title demo. Laps 3, 5, 7 or 9 make
+    // it GP-style (finish on the last lap, GP results, no cup, points or GP progress). It never
+    // writes Practice best laps, Time Attack records, ghosts, GP records or points. Retry re-reads
+    // these options.
+    AddWidget("Enhancements", "Single Race", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Single Race rules in Practice", .cVar = "gEnhancements.SingleRace.Enabled",
+                          .type = GdxUI::WIDGET_CVAR_CHECKBOX }
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(false).Tooltip(
+                      "Applies to the one-player Practice race only. Off keeps the stock Practice rules.\n"
+                      "Never writes Practice best laps, Time Attack records, ghosts, GP records or points."))
+                  .ModifiedMarker()
+                  .SearchTerms("single race practice gp grand prix rules finish"));
+
+    AddWidget("Enhancements", "Single Race", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Laps", .cVar = "gEnhancements.SingleRace.Laps",
+                          .type = GdxUI::WIDGET_CVAR_COMBOBOX }
+                  .ComboItems({ "3", "5", "7", "9", "Unlimited" })
+                  .Options(UIWidgets::ComboboxOptions()
+                               .DefaultIndex(0)
+                               .LabelPosition(UIWidgets::LabelPositions::Near)
+                               .Tooltip("Laps per race. 3, 5, 7 or 9 finish on the last lap with GP results.\n"
+                                        "Unlimited keeps the Practice lap wrap and never finishes."))
+                  .ModifiedMarker()
+                  .SearchTerms("single race laps lap count unlimited finish"));
+
+    AddWidget("Enhancements", "Single Race", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "CPU racers", .cVar = "gEnhancements.SingleRace.CpuCount",
+                          .type = GdxUI::WIDGET_CVAR_SLIDER_INT }
+                  .Options(UIWidgets::IntSliderOptions()
+                               .Min(0)
+                               .Max(29)
+                               .DefaultValue(29)
+                               .ShowButtons(false)
+                               .LabelPosition(UIWidgets::LabelPositions::Near)
+                               .Tooltip("CPU racers in a Single Race (0 to 29). 29 gives the stock 30-racer grid.\n"
+                                        "Total racers = 1 + CPU racers."))
+                  .ModifiedMarker()
+                  .SearchTerms("single race cpu racers opponents field size grid"));
+
+    AddWidget("Enhancements", "Single Race", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Random rivals", .cVar = "gEnhancements.SingleRace.RandomRivals",
+                          .type = GdxUI::WIDGET_CVAR_CHECKBOX }
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(false).Tooltip(
+                      "Marks one random CPU racer as your rival for the whole race.\n"
+                      "The rival is picked when the race starts. Off by default."))
+                  .ModifiedMarker()
+                  .SearchTerms("single race rival random rivals marker"));
 
     // ═════════════════════════════════════════════════════════════════════════════════════════
     // ENHANCEMENTS -> Ghosts

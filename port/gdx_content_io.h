@@ -12,7 +12,8 @@
  *   0x08  contentType   u32: 1 = track (CRSD/CRSE), 2 = machine (CARD)
  *   0x0C  extTag        u32: fourcc of the MFS extension ("CRSD"/"CRSE"/"CARD")
  *   0x10  name          char[21], MFS directory-entry name, NUL-padded
- *   0x25  flags         u32: bit0 = ghosts stripped, bit1 = records stripped (track only)
+ *   0x25  flags         u32: bit0 = ghosts stripped, bit1 = records stripped, bit2 = GXE1 sidecar (track only),
+ *                       bit3 = GXT1 title sidecar (track only, 8A)
  *   0x29  payloadSize   u32: 0xC830 (track) / 0x20 (machine) / variable (bundle)
  *   0x2D  payloadCrc32  u32, CRC-32 of payload
  *   0x31  reserved      16 bytes, zero
@@ -22,10 +23,12 @@
  * self-describing via contentType and v1 readers reject the unknown type cleanly):
  * extTag = "CENT", name = "EDIT-CUP", payload =
  *
- *   u16 entryCount (LE; 1 + track count, hard-capped at 7), then per entry a hand-packed LE
- *   record { extTag u32, name char[21] NUL-padded, payloadSize u32, payloadCrc32 u32,
- *   payload bytes }. Entry 0 is the CRS_ENTRY.CENT image (216 bytes, 24 x 9-byte cup slots,
- *   only the first 6 are the Edit Cup); entries 1..N are the CRSD payloads it references.
+ *   u16 entryCount (LE; 1 + track count, plus 1 with a CENL, hard-capped at 8), then per entry
+ *   a hand-packed LE record { extTag u32, name char[21] NUL-padded, payloadSize u32,
+ *   payloadCrc32 u32, payload bytes }. Entry 0 is the CRS_ENTRY.CENT image (216 bytes, 24 x
+ *   9-byte cup slots, only the first 6 are the Edit Cup). When a slot name is over 8
+ *   characters, entry 1 is the CRS_ENTRY.CENL image (508 bytes, gdx_edit_cup.h) with the long
+ *   names; older builds reject such a bundle. The remaining entries are the CRSD payloads.
  *
  * Threading: export is read-only against game state and runs on the menu thread, but ONLY while
  * the disk thread is idle (gdx_content_mfs_busy()). The busy-guard is structural, not
@@ -52,6 +55,7 @@ extern "C" {
 #define GDX_CONTENT_ERR_BAD_SIZE (-5)   /* dir-entry size is not the exact type size */
 #define GDX_CONTENT_ERR_LOAD (-6)       /* Mfs_LoadFileInDir rejected the read */
 #define GDX_CONTENT_ERR_NO_FS (-7)      /* no disk filesystem is mounted/initialized */
+#define GDX_CONTENT_ERR_PACKAGE (-8)   /* the .gdxp share package could not be written */
 
 #define GDX_CONTENT_TYPE_TRACK 1
 #define GDX_CONTENT_TYPE_MACHINE 2
@@ -59,12 +63,15 @@ extern "C" {
 
 #define GDX_CONTENT_FLAG_GHOSTS_STRIPPED (1u << 0)
 #define GDX_CONTENT_FLAG_RECORDS_STRIPPED (1u << 1)
+#define GDX_CONTENT_FLAG_EXTENSIONS (1u << 2) /* a GXE1 sidecar, <stem>.gdxe, sits next to the .gdxc */
+#define GDX_CONTENT_FLAG_TITLE (1u << 3)      /* a GXT1 title sidecar, <stem>.gdxt, sits next to the .gdxc */
 
 #define GDX_CONTENT_TRACK_PAYLOAD_SIZE 0xC830 /* sizeof(CourseContext), fzx_course.h:41-47 */
 #define GDX_CONTENT_MACHINE_PAYLOAD_SIZE 0x20 /* sizeof(CustomMachine), unk_structs.h:504-528 */
 
-/* E4 bundle limits: one CENT image plus one CRSD per Edit-Cup slot. */
-#define GDX_CONTENT_CENT_PAYLOAD_SIZE 216          /* 24 x 9-byte slots (EK gEditCupTrackNames) */
+/* E4 bundle limits: one CENT image, an optional CENL image, and one CRSD per Edit-Cup slot. */
+#define GDX_CONTENT_CENT_PAYLOAD_SIZE 216          /* 24 x 9-byte slots, the stock CRS_ENTRY.CENT */
+#define GDX_CONTENT_CENL_PAYLOAD_SIZE 508          /* GDX_EDIT_CUP_CENL_SIZE: magic + 24 x 21 */
 #define GDX_CONTENT_BUNDLE_MAX_TRACKS 6
 #define GDX_CONTENT_BUNDLE_ENTRY_HEADER_SIZE 33    /* extTag u32 + name[21] + size u32 + crc u32 */
 
@@ -89,19 +96,34 @@ int gdx_content_mfs_busy(void);
  * code. Never touches the prepared-dir iterator globals (blocker B2). */
 int gdx_content_list(GdxContentEntry* outEntries, int capacity);
 
-/* Exports one listed entry to exports/<sanitized name>.gdxc next to the exe, atomically
- * (tmp + rename). When the entry is a track and gEnhancements.Content.ExportIncludeGhosts is 0,
+/* Exports one listed entry. A machine is written to exports/<sanitized name>.gdxc next to the exe,
+ * atomically (tmp + rename). A track is written the same way into the staging folder
+ * exports/.gdxp-export, together with its sidecars and songs, and that folder is then zipped into the
+ * share package exports/<sanitized name>.gdxp (gdx_content_pack.h) and removed. Sidecar names below
+ * are the names inside the package. When the entry is a track and gEnhancements.Content.ExportIncludeGhosts is 0,
  * the ghostSave+records region is zeroed before packing and both strip flag bits are set.
- * On success outPath receives the written path. */
+ * A track with Course Edit extension keys (gdx_course_registry.h) also gets
+ * exports/<sanitized name>.gdxe, a GXE1 block bound to the payload CRC-32. It is written before
+ * the container, and flag bit 2 (GDX_CONTENT_FLAG_EXTENSIONS) is set. A track without keys gets
+ * no sidecar and no flag. A track whose session title (8A short-name alias) differs from its file
+ * name also gets exports/<sanitized name>.gdxt, a GXT1 block bound to the payload CRC-32, and flag
+ * bit 3 (GDX_CONTENT_FLAG_TITLE). On success outPath receives the written .gdxc (machine) or .gdxp
+ * (track) path. GDX_CONTENT_ERR_PACKAGE when the package could not be written. */
 int gdx_content_export(const GdxContentEntry* entry, char* outPath, size_t outCap);
 
-/* E4: exports the whole Edit Cup as one bundle container to exports/edit-cup.gdxc. Gathers the
+/* E4: exports the whole Edit Cup as one bundle container, packaged like a track export: edit-cup.gdxc,
+ * its edit-cup.gdxs companion and the member songs are zipped into exports/edit-cup.gdxp. Gathers the
  * in-memory CENT image plus the CRSD payload of every slot that names an existing CRSD file
  * (empty and dangling slots are skipped; a track named by two slots is packed once). Track
  * payloads honor the same ExportIncludeGhosts strip toggle as single exports. Returns
  * GDX_CONTENT_ERR_NOT_FOUND when no slot resolves to a track. Menu thread, busy-guarded like
  * gdx_content_export. */
 int gdx_content_export_bundle(char* outPath, size_t outCap);
+
+/* 8A: copies the CRSD payload of the working-directory track name (<= 20 chars) into out, which
+ * must hold GDX_CONTENT_TRACK_PAYLOAD_SIZE bytes. Busy-guarded; BAD_SIZE unless the file is exactly
+ * the track size. Used to stage a short-name alias copy for the disk thread. */
+int gdx_content_load_track_payload(const char* name, uint8_t* out, size_t outCap);
 
 /* exports/ directory next to the exe (created when create != 0). Same helper shape as the ghost
  * library directory. */

@@ -25,16 +25,16 @@
  *
  * E3 adds Edit-Cup register/unregister (op 31 -> GdxContentCup_RunOnDiskThread): the disk
  * thread mutates gEditCupTrackNames[slot] and persists CRS_ENTRY.CENT, mirroring
- * func_xk2_800EC110 (course_edit/19D4A0.c:176-181). Cup slots hold 8 chars + NUL; a longer
- * track name can never resolve (Mfs_GetFileIndex compares the full fixed-width name), so
- * registration refuses it instead of writing a dangling slot the game would silently clear.
+ * func_xk2_800EC110 (course_edit/19D4A0.c:176-181). A cup slot holds a whole MFS name (20
+ * characters); MFS keeps the stock 9-byte CENT rows and writes the names over 8 to
+ * CRS_ENTRY.CENL (gdx_edit_cup.h), so a long track registers directly.
  *
  * E4 adds cup bundles (contentType 3, payload layout in gdx_content_io.h): the same validation
  * chain runs per bundled entry (per-entry CRC, track validators, name rules) plus a whole-
  * bundle quota check BEFORE any write; the disk-thread install (op 32 ->
  * GdxContentBundle_RunOnDiskThread) saves every CRSD then merges only the 6 Edit-Cup rows of
- * the bundled CENT into gEditCupTrackNames (rows 6..23 keep the importer's other cups) and
- * persists CRS_ENTRY.CENT.
+ * the bundled CENT (plus its CENL long names) into gEditCupTrackNames (rows 6..23 keep the
+ * importer's other cups) and persists CRS_ENTRY.CENT.
  *
  * A2 adds a disk-image import source (gdx_mfs_image.h): tracks and machines are read out of a
  * foreign emulator/console 64DD dump as raw payloads and fed through the same validation chain
@@ -49,6 +49,7 @@
 #include <stdint.h>
 
 #include "gdx_content_io.h"
+#include "gdx_course_registry.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -75,6 +76,7 @@ extern "C" {
 #define GDX_IMPORT_ERR_STATE_UNKNOWN (1u << 17)   /* disk busy: quota/collision not checked */
 #define GDX_IMPORT_ERR_BUNDLE_STRUCTURE (1u << 18)/* bundle entry table malformed/truncated/dupe */
 #define GDX_IMPORT_ERR_BUNDLE_CENT (1u << 19)     /* CENT entry missing/wrong size/dangling slot */
+#define GDX_IMPORT_ERR_BAD_PACKAGE (1u << 20)     /* .gdxp not a valid share package (gdx_content_pack.h) */
 
 /* Advisory bits (GdxContentImportEntry.warnings). Install stays allowed. */
 #define GDX_IMPORT_WARN_QUOTA (1u << 0)       /* class count >= QuotaWarnThreshold (default 90) */
@@ -102,13 +104,20 @@ typedef struct GdxContentImportEntry {
     int32_t classFileCount; /* files in the target extension class; -1 when unknown (busy) */
     int32_t bundleTrackCount; /* E4: tracks inside a cup bundle; -1 for single items */
     char bundleContents[160]; /* E4: ", "-joined bundled track names for the confirm prompt */
+    char title[GDX_COURSE_TITLE_MAX + 1]; /* 8A: full title from a <stem>.gdxt sidecar; "" when none or unreadable */
 } GdxContentImportEntry;
 
-/* Lists every .gdxc file in exports/ with full validation per file (payload bytes are not
- * retained). Returns the entry count or a negative GDX_CONTENT_ERR_* code. */
+/* Lists every .gdxc and .gdxp file in exports/ with full validation per file (payload bytes are not
+ * retained). A .gdxp share package (gdx_content_pack.h) is unpacked without its songs into
+ * exports/.gdxp-import, its .gdxc is validated there, and the folder is removed; fileName stays the
+ * package name. A package that fails its own checks gets GDX_IMPORT_ERR_BAD_PACKAGE. Returns the entry
+ * count or a negative GDX_CONTENT_ERR_* code. */
 int gdx_content_import_list(GdxContentImportEntry* outEntries, int capacity);
 
 /* Re-reads, re-validates and installs exports/<fileName> (never trusts a stale list snapshot).
+ * A .gdxp is unpacked with its songs into exports/.gdxp-import first, the steps below run on its
+ * .gdxc, and the folder is removed before returning (the staged payloads and keys are in memory by
+ * then). GDX_CONTENT_IMPORT_ERR_VALIDATION when the package fails its own checks.
  * Validation and staging happen on the calling (menu) thread; the MFS install is enqueued to
  * the disk thread. A cup bundle (contentType 3) validates every entry and installs all tracks +
  * the CENT merge via op 32, all-or-nothing at the validation gate. Returns GDX_CONTENT_OK once
@@ -127,6 +136,29 @@ int gdx_content_import_result(int32_t* outMfsError);
  * entries were already written -- MFS has no multi-file transaction, so a mid-install failure
  * leaves a partial install; the admission gate is the pre-write validation. */
 int32_t gdx_content_import_bundle_failed_index(void);
+
+/* Extension sidecar (<stem>.gdxe, GXE1) of the last gdx_content_import_begin; every begin call
+ * resets it. The sidecar is advisory: an unknown key never blocks an install, the course keeps its
+ * CourseData stock values, and the missing keys are kept for a UI message. */
+#define GDX_CONTENT_EXT_NONE 0            /* the container has no extension flag */
+#define GDX_CONTENT_EXT_OK 1              /* sidecar read, decoded and checked */
+#define GDX_CONTENT_EXT_SIDECAR_MISSING 2 /* flag set but no .gdxe next to the .gdxc */
+#define GDX_CONTENT_EXT_SIDECAR_INVALID 3 /* decode or registry check failed; see decodeCode */
+#define GDX_CONTENT_EXT_IO 4              /* container or sidecar could not be read */
+#define GDX_CONTENT_EXT_MISSING_MAX 16    /* missing keys kept for the UI message */
+
+typedef struct GdxContentImportExtension {
+    int32_t status;        /* GDX_CONTENT_EXT_* */
+    int32_t decodeCode;    /* GDX_COURSE_EXT_ERR_* when INVALID, or GDX_COURSE_ERR_SCOPE */
+    int32_t recordCount;   /* records in the sidecar */
+    int32_t resolvedCount; /* records whose key is registered in this build */
+    int32_t missingCount;  /* records whose key is not registered in this build */
+    int32_t missingStored; /* missing keys kept in missingKeys, up to GDX_CONTENT_EXT_MISSING_MAX */
+    char missingKeys[GDX_CONTENT_EXT_MISSING_MAX][GDX_COURSE_KEY_MAX + 1];
+} GdxContentImportExtension;
+
+/* Copies the sidecar result of the last begin into out. GDX_CONTENT_ERR_BAD_ARGS when out is NULL. */
+int gdx_content_import_last_extension(GdxContentImportExtension* out);
 
 /* A2 disk-image source (direct payloads, no .gdxc container). */
 
@@ -152,11 +184,11 @@ void gdx_content_import_format_warnings(uint32_t warnings, char* out, size_t out
  * ------------------------------------------------------------------------------- */
 
 #define GDX_CONTENT_CUP_SLOT_COUNT 6
-#define GDX_CONTENT_CUP_NAME_MAX 8 /* a cup slot is char[9]: 8 chars + NUL */
+#define GDX_CONTENT_CUP_NAME_MAX 20 /* a cup slot holds a whole MFS name + NUL (gdx_edit_cup.h) */
 
 /* gdx_content_cup_register_begin / gdx_content_cup_unregister_begin return codes, on top of the
  * shared GDX_CONTENT_ERR_* and GDX_CONTENT_IMPORT_ERR_* ones. */
-#define GDX_CONTENT_CUP_ERR_NAME_TOO_LONG (-110) /* > 8 chars can never resolve from a cup slot */
+#define GDX_CONTENT_CUP_ERR_NAME_TOO_LONG (-110) /* longer than an MFS name */
 #define GDX_CONTENT_CUP_ERR_BAD_SLOT (-111)      /* slot outside 0..5 */
 #define GDX_CONTENT_CUP_ERR_EMPTY_SLOT (-112)    /* unregister of an already-empty slot */
 
@@ -166,8 +198,8 @@ void gdx_content_import_format_warnings(uint32_t warnings, char* out, size_t out
 int gdx_content_cup_list(char outNames[GDX_CONTENT_CUP_SLOT_COUNT][GDX_CONTENT_CUP_NAME_MAX + 1]);
 
 /* Stages and enqueues a slot write + CENT persist to the disk thread. Registration requires the
- * named CRSD to exist in the working directory; the name is validated against MFS rules and the
- * 8-char slot cap. Refused while a race is live or another content op is pending. */
+ * named CRSD to exist in the working directory; the name is validated against MFS rules. Refused
+ * while a race is live or another content op is pending. */
 int gdx_content_cup_register_begin(const char* name, int32_t slot);
 int gdx_content_cup_unregister_begin(int32_t slot);
 

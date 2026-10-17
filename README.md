@@ -60,7 +60,7 @@ legally obtained dumps; game data is extracted or loaded locally from the files 
 - **Texture-pack modding** — drop `.o2r` packs in a `mods/` folder to override textures
   (`gEnhancements.Workshop.TexturePacks`), with hot reload from the menu.
 - **Asset dumping** — decode named assets straight from the extracted archive, per class, from the
-  Workshop tab. See `docs/MODDING_GUIDE.md` for which dumper to use when building a pack.
+  Workshop tab. See the [modding guide](docs/MODDING_GUIDE.md) to turn a dump into a pack.
 - **Durable 64DD save sidecar** — Course Edit saves and disk writes are journaled to a sidecar
   file next to the game; your original `.ndd` disk image is **never** modified.
 - **Modern rendering knobs** — internal resolution scale, MSAA, texture filtering, VSync,
@@ -103,6 +103,12 @@ today. These are the next things planned for G-Diffuser:
    remains beside the executable so later launches boot directly into the game.
 4. **Play.** Press **F1** at any time to open the enhancement menu.
 
+**Updating.** Saves are stored in `saves/` beside the executable, and every release unpacks to a
+folder named `G-Diffuser`. To update, extract the new release into the same place as your current
+install, replacing its files: your `saves/`, ROM and game data stay where they are. On Windows,
+**Extract All** proposes a new folder named after the zip, so change the destination to the folder
+that contains your existing `G-Diffuser` folder.
+
 ### Expansion Kit files (required)
 
 G-Diffuser is a port of the full Expansion Kit experience — Course Edit, the DD cups, and the
@@ -144,10 +150,10 @@ to initialize the renderer. On first boot, `gdx-extract` uses your ROM and the C
 `decomp-recipes/` metadata to generate your local `fzerox.o2r`. That generated archive contains
 game-derived data and must not be redistributed with G-Diffuser.
 
-To mod textures, place additional `.o2r` packs in a `mods/` folder next to the game; enable
-**texture packs** in the Workshop tab and reload. You can build packs from the game's own textures
-using the built-in **texture dump** feature. A numeric filename prefix (for example,
-`10-hifonts.o2r`) controls load order.
+To mod the game, place `.o2r` packs in a `mods/` folder next to the game, enable their kind on
+**Workshop > Mods**, and click **Reload packs**. Packs can replace textures, music, sound effects,
+instruments, and machine models, or add Lua scripts. The [modding guide](docs/MODDING_GUIDE.md)
+has a step-by-step guide for each, plus a walkthrough for code mods.
 
 ## Building
 

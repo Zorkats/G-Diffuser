@@ -22,6 +22,10 @@ static void test_one_shot_actions(void) {
     gdx_course_edit_input_request_delete(3, 4);
     assert(gdx_course_edit_input_take_delete(3, 4) == 1);
     assert(gdx_course_edit_input_take_delete(3, 4) == 0);
+
+    gdx_course_edit_input_request_line_up();
+    assert(gdx_course_edit_input_take_line_up() == 1);
+    assert(gdx_course_edit_input_take_line_up() == 0);
 }
 
 static void test_latest_continuous_command_wins(void) {
@@ -50,6 +54,7 @@ static void test_clear_drops_stale_commands(void) {
     gdx_course_edit_input_request_delete(3, 4);
     gdx_course_edit_input_request_move_target(0, (GdxCourseEditVec3){ 1.0f, 2.0f, 3.0f });
     gdx_course_edit_input_request_scalar_target(2, 20);
+    gdx_course_edit_input_request_line_up();
     gdx_course_edit_input_clear();
 
     assert(gdx_course_edit_input_take_drag_start(0) == 0);
@@ -58,6 +63,7 @@ static void test_clear_drops_stale_commands(void) {
     assert(gdx_course_edit_input_take_delete(3, 4) == 0);
     assert(gdx_course_edit_input_take_move_target(0, 0) == 0);
     assert(gdx_course_edit_input_take_scalar_target(0, 0) == 0);
+    assert(gdx_course_edit_input_take_line_up() == 0);
 }
 
 static void test_delete_selection_validation(void) {

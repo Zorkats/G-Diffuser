@@ -1,4 +1,4 @@
-// G-Diffuser — Course Edit / Create Machine absolute mouse drive + issue #18 race mouse steering.
+// G-Diffuser: Course Edit / Create Machine absolute mouse drive + issue #18 race mouse steering.
 //
 // TWO SEPARATE MECHANISMS share this file only because both are thin extern-"C" wrappers over
 // Fast3dWindow for decomp-side C callers:
@@ -12,7 +12,7 @@
 //      owned transactions use the explicit input queue and native lifecycle instead.
 //
 //   2. Issue #18 race steering (gdx_mouse_steer_stick_x): absolute position steering for
-//      port/input_bridge.c — cursor X inside the blit rect maps to stick deflection. Mode-disjoint
+//      port/input_bridge.c: cursor X inside the blit rect maps to stick deflection. Mode-disjoint
 //      with the absolute drive above (race modes only), so the two never fight over the cursor.
 
 #include <chrono>
@@ -29,6 +29,7 @@
 #include "fast/Fast3dWindow.h"
 #include "fast/Fast3dGui.h"
 #include "gdx_course_edit_input.h"
+#include "gdx_course_edit_undo.h"
 #include <imgui.h>
 
 #include "libultraship/bridge/consolevariablebridge.h" // CVarGetInteger
@@ -62,6 +63,14 @@ extern "C" bool gdx_course_edit_unproject_to_plane(int32_t screenX, int32_t scre
 extern "C" bool gdx_course_edit_unproject_to_vertical_line(int32_t screenX, int32_t screenY, float fixedX, float fixedZ,
                                                             float* outY);
 
+extern "C" int32_t func_xk2_800EF090(Vec3f pos, int32_t* outX, int32_t* outY);
+extern "C" int32_t D_xk2_800F7040;
+extern "C" void func_xk2_800EF78C(void);
+
+// Defined in gdx_course_edit_help.cpp and gdx_course_edit_history.cpp.
+void GdxCourseEditFlashMessage(const char* text);
+void GdxCourseEditDrawHistoryPanel(void);
+
 namespace {
 
 std::shared_ptr<Fast::Fast3dWindow> CourseEditMouseWindow() {
@@ -75,12 +84,18 @@ bool CourseEditMouseInSubMenu(void);
 // active mouse transaction to run while native grab state is set.
 enum class DragState {
     Idle,
-    Armed,     // LMB pressed down over a point; awaiting click vs drag threshold
-    Starting,  // Native update has not yet accepted the drag transaction
-    Dragging,  // Pointer moved >= 4 logical pixels; geometry moving
+    Armed,      // LMB pressed over a point, or Shift-pressed on empty space; awaiting click vs drag threshold
+    Starting,   // Native update has not yet accepted the drag transaction
+    Dragging,   // Pointer moved >= 6 window pixels from the press; geometry moving
     Committing,
     Cancelling,
+    BoxSelect,  // Shift-drag from empty space: rectangle on screen, selection added on release
 };
+
+// Squared window-pixel distance that separates a click from a drag (6 px).
+constexpr int32_t kDragStartThresholdSq = 36;
+// Squared pick radius in game pixels for mouse presses (about 12.25 px). The native hover uses the same value.
+constexpr float kMousePickRadiusSq = 150.0f;
 
 struct CourseEditDragState {
     DragState state = DragState::Idle;
@@ -91,7 +106,20 @@ struct CourseEditDragState {
     int32_t moveOption = -1;
     int32_t lastMouseX = 0;
     int32_t lastMouseY = 0;
+    // Sub-pixel game-space x at the press and on the last in-area frame, for the scalar tools.
+    float startGameX = 0.0f;
+    float lastGameX = 0.0f;
     bool released = false;
+    // Press position in window pixels. The drag threshold is measured here, not in game space.
+    Ship::Coords startWindow{};
+    // Box select: game-space corner at the press, last in-game-area corner, and that corner in window pixels.
+    float boxStartX = 0.0f;
+    float boxStartY = 0.0f;
+    float boxEndX = 0.0f;
+    float boxEndY = 0.0f;
+    Ship::Coords boxEndWindow{};
+    // Set by a press that starts a box select: true for Shift (add to the selection), false to replace it.
+    bool boxAdditive = false;
 };
 static CourseEditDragState sCourseEditDrag;
 static bool sDragBlockedUntilRelease = false;
@@ -106,6 +134,67 @@ void CourseEditCancelDrag(void) {
     }
 }
 
+// Applies the queued box-select add to the native selection. The native refresh flag is raised only when at
+// least one point became selected.
+void CourseEditFlushSelectionAdd(void) {
+    GdxCourseEditMask mask = 0;
+    if (!gdx_course_edit_input_take_selection_add_mask(&mask)) {
+        return;
+    }
+    if (gdx_course_edit_native_add_selection_mask(mask) != 0) {
+        D_xk2_800F7040 = 3;
+    }
+}
+
+// Control points whose projected game-space position lies inside the box, edges inclusive, corners in any order.
+// Points that are behind the camera or off the 320x240 screen are skipped.
+GdxCourseEditMask CourseEditPointsInBox(float ax, float ay, float bx, float by) {
+    const float minX = (std::min)(ax, bx);
+    const float maxX = (std::max)(ax, bx);
+    const float minY = (std::min)(ay, by);
+    const float maxY = (std::max)(ay, by);
+    GdxCourseEditMask mask = 0;
+    const int32_t count = gdx_course_edit_native_point_count();
+    for (int32_t i = 0; i < count; i++) {
+        Vec3f pos = {};
+        int32_t sx = 0;
+        int32_t sy = 0;
+        if (!gdx_course_edit_native_point_position(i, &pos) || func_xk2_800EF090(pos, &sx, &sy) != 0) {
+            continue;
+        }
+        const float px = static_cast<float>(sx);
+        const float py = static_cast<float>(sy);
+        if (px >= minX && px <= maxX && py >= minY && py <= maxY) {
+            mask |= UINT64_C(1) << i;
+        }
+    }
+    return mask;
+}
+
+// Nearest control point to a float game-space cursor within kMousePickRadiusSq, or -1. Same squared-distance
+// rule as func_xk2_800EFDE4 (strict less-than, so a tie keeps the lower index), with sub-pixel input.
+int32_t CourseEditPickPoint(float cursorX, float cursorY) {
+    int32_t best = -1;
+    float bestDistSq = kMousePickRadiusSq;
+    const int32_t count = gdx_course_edit_native_point_count();
+    for (int32_t i = 0; i < count; i++) {
+        Vec3f pos = {};
+        int32_t sx = 0;
+        int32_t sy = 0;
+        if (!gdx_course_edit_native_point_position(i, &pos) || func_xk2_800EF090(pos, &sx, &sy) != 0) {
+            continue;
+        }
+        const float dx = static_cast<float>(sx) - cursorX;
+        const float dy = static_cast<float>(sy) - cursorY;
+        const float distSq = dx * dx + dy * dy;
+        if (distSq < bestDistSq) {
+            bestDistSq = distSq;
+            best = i;
+        }
+    }
+    return best;
+}
+
 // Course Edit test-run/grab suppression only applies to Course Edit; Create Machine has neither.
 // Grab mode is tolerated while a point drag is active so the drag can run to commit/cancel.
 bool CourseEditMouseModeActive(void) {
@@ -117,7 +206,7 @@ bool CourseEditMouseModeActive(void) {
             // A native controller grab owns the editor until it releases the grab.
             if (gdx_course_edit_native_grab_state() == 1 && gdx_course_edit_native_mouse_owned() == 0 &&
                 (sCourseEditDrag.state == DragState::Idle || sCourseEditDrag.state == DragState::Armed ||
-                 sCourseEditDrag.state == DragState::Starting)) {
+                 sCourseEditDrag.state == DragState::Starting || sCourseEditDrag.state == DragState::BoxSelect)) {
                 return false;
             }
             return true;
@@ -140,7 +229,7 @@ bool CourseEditEditorActive(void) {
     }
     if (gdx_course_edit_native_grab_state() == 1 && gdx_course_edit_native_mouse_owned() == 0 &&
         (sCourseEditDrag.state == DragState::Idle || sCourseEditDrag.state == DragState::Armed ||
-         sCourseEditDrag.state == DragState::Starting)) {
+         sCourseEditDrag.state == DragState::Starting || sCourseEditDrag.state == DragState::BoxSelect)) {
         return false;
     }
     return true;
@@ -155,7 +244,7 @@ static const char* kCourseEditActionNames[8] = {
     "Bank/tilt",
     "Center offset",
     "Delete selected points",
-    "Straighten segment (A applies)",
+    "Line up points (Enter applies)",
 };
 
 extern "C" const char* gdx_course_edit_action_name(int index) {
@@ -165,34 +254,43 @@ extern "C" const char* gdx_course_edit_action_name(int index) {
     return "Unknown";
 }
 
-int gdx_course_edit_selected_point_count(void) {
-    if (!CourseEditEditorActive()) {
-        return 0;
-    }
-    int count = 0;
-    int total = gdx_course_edit_native_point_count();
-    for (int i = 0; i < total; i++) {
-        if (gdx_course_edit_native_point_selected(i) != 0) {
-            count++;
-        }
-    }
-    return count;
-}
-
 // Modifier and key lifecycle state
 static bool sLeftShiftHeld = false;
 static bool sRightShiftHeld = false;
 static bool sShiftHeld = false;
+static bool sLeftCtrlHeld = false;
+static bool sRightCtrlHeld = false;
+static bool sCtrlHeld = false;
+static bool sLeftAltHeld = false;
+static bool sRightAltHeld = false;
+static bool sAltHeld = false;
+// Scalar drag tool state (width, bank, center offset). Cleared on release and on focus loss.
+struct CourseEditScalarDragState {
+    bool active = false;
+    int32_t pointIndex = -1;
+    int32_t moveOption = -1;
+    int32_t startMouseX = 0;
+    int32_t startMouseY = 0;
+    float base = 0.0f;
+    float anchorX = 0.0f;
+    float rate = 0.0f;
+    float lastOffset = 0.0f;
+};
+static CourseEditScalarDragState sScalarDrag;
 static bool sEditorKeysConsumed[10] = {};
-static bool sDeleteConfirmPending = false;
+// Held and owned state for the keys that act on the selection, the history, and the line-up tool. An owned key is
+// swallowed on both edges, so the native binding for the same key never fires while the editor uses it.
 static bool sDeleteKeyHeld = false;
-static bool sDeleteEnterHeld = false;
 static bool sDeleteKeyOwned = false;
-static bool sDeleteEnterOwned = false;
+static bool sEnterHeld = false;
+static bool sEnterOwned = false;
+static bool sUndoZHeld = false;
+static bool sUndoYHeld = false;
+static bool sUndoZOwned = false;
+static bool sUndoYOwned = false;
+static bool sAKeyHeld = false;
+static bool sAKeyOwned = false;
 static bool sEditorEscOwned = false;
-static uint64_t sDeleteSelectionMask = 0;
-static int sDeleteSelectionCount = 0;
-static int sDeletePointCount = 0;
 
 uint64_t CourseEditSelectionMask(void) {
     uint64_t mask = 0;
@@ -203,58 +301,6 @@ uint64_t CourseEditSelectionMask(void) {
         }
     }
     return mask;
-}
-
-void CourseEditInvalidateDeleteConfirmation(void) {
-    sDeleteConfirmPending = false;
-    sDeleteSelectionMask = 0;
-    sDeleteSelectionCount = 0;
-}
-
-bool CourseEditDeleteContextActive(void) {
-    return CourseEditEditorActive() && gCreateOption == 1 &&
-           gdx_course_edit_native_context_state() == 0 && gdx_course_edit_native_grab_state() == 0 &&
-           gdx_course_edit_native_mouse_owned() == 0;
-}
-
-bool CourseEditDeleteInputContextActive(void) {
-    std::shared_ptr<Fast::Fast3dWindow> wnd = CourseEditMouseWindow();
-    return CVarGetInteger("gEnhancements.Input.CourseEditMouse", 0) != 0 && CourseEditDeleteContextActive() &&
-           wnd != nullptr && !wnd->IsMouseCaptured() &&
-           !wnd->GetGui()->GetMenuOrMenubarVisible() && !CourseEditMouseInSubMenu();
-}
-
-bool CourseEditDeleteSelectionStillMatches(void) {
-    return sDeleteConfirmPending && CourseEditDeleteContextActive() &&
-           (CourseEditSelectionMask() == sDeleteSelectionMask) &&
-           (gdx_course_edit_selected_point_count() == sDeleteSelectionCount) &&
-           (gdx_course_edit_native_point_count() == sDeletePointCount);
-}
-
-void CourseEditArmDeleteConfirmation(void) {
-    int count;
-    if (!CourseEditDeleteInputContextActive()) {
-        CourseEditInvalidateDeleteConfirmation();
-        return;
-    }
-    count = gdx_course_edit_selected_point_count();
-    if (count <= 0) {
-        CourseEditInvalidateDeleteConfirmation();
-        return;
-    }
-    sDeleteConfirmPending = true;
-    sDeleteSelectionMask = CourseEditSelectionMask();
-    sDeleteSelectionCount = count;
-    sDeletePointCount = gdx_course_edit_native_point_count();
-}
-
-void CourseEditConfirmDelete(void) {
-    if (!CourseEditDeleteSelectionStillMatches()) {
-        CourseEditArmDeleteConfirmation();
-        return;
-    }
-    gdx_course_edit_input_request_delete(sDeleteSelectionMask, sDeletePointCount);
-    CourseEditInvalidateDeleteConfirmation();
 }
 
 // Sub-menus, dialogs, and full sub-screens keep the in-game cursor but should not confine the
@@ -272,18 +318,88 @@ bool CourseEditMouseInSubMenu(void) {
     }
 }
 
+// Point-screen context for the keys and clicks that change the selection: Course Edit on the POINT screen, with no
+// transaction, no native grab, no menu, and no sub-menu. The Course Edit mouse CVar gates it, as it gates the tool
+// keys.
+bool CourseEditPointInputContextActive(void) {
+    std::shared_ptr<Fast::Fast3dWindow> wnd = CourseEditMouseWindow();
+    return CVarGetInteger("gEnhancements.Input.CourseEditMouse", 0) != 0 && CourseEditEditorActive() &&
+           gCreateOption == 1 && gdx_course_edit_native_context_state() == 0 &&
+           gdx_course_edit_native_grab_state() == 0 && gdx_course_edit_native_mouse_owned() == 0 &&
+           wnd != nullptr && !wnd->IsMouseCaptured() && !wnd->GetGui()->GetMenuOrMenubarVisible() &&
+           !CourseEditMouseInSubMenu();
+}
+
+// Replaces the native selection now, not through the input queue, so a delete queued in the same host frame sees the
+// new selection. Raises the same refresh flag as CourseEditFlushSelectionAdd. An empty mask clears the selection.
+void CourseEditReplaceSelection(GdxCourseEditMask mask) {
+    gdx_course_edit_native_set_selection_mask(mask);
+    D_xk2_800F7040 = 3;
+}
+
+// Deletes the selected points. An empty selection is refused with NA_SE_32. An accepted delete takes the undo backup
+// first, and the game tick applies it through the native delete consumer.
+void CourseEditRequestDelete(void) {
+    const GdxCourseEditMask mask = CourseEditSelectionMask();
+    if (mask == 0) {
+        gdx_course_edit_native_play_refusal();
+        return;
+    }
+    gdx_course_edit_undo_set_pending_label(GDX_COURSE_EDIT_UNDO_LABEL_DELETE);
+    func_xk2_800EF78C();
+    gdx_course_edit_input_request_delete(mask, gdx_course_edit_native_point_count());
+}
+
+// Delete tool click on a point. The backup comes before the click changes the selection, so an undo returns to the
+// selection from before the click. The click then selects only that point, and the delete removes it.
+void CourseEditDeleteClickedPoint(int32_t point) {
+    const GdxCourseEditMask mask = UINT64_C(1) << point;
+    gdx_course_edit_undo_set_pending_label(GDX_COURSE_EDIT_UNDO_LABEL_DELETE);
+    func_xk2_800EF78C();
+    CourseEditReplaceSelection(mask);
+    gdx_course_edit_input_request_delete(mask, gdx_course_edit_native_point_count());
+}
+
+// Enter in the line-up tool. The pre-check runs the same scan the game tick runs and writes nothing. A refusal shows
+// the reason beside the hint strip and plays NA_SE_32. An accepted line-up is queued, and the tick takes the undo
+// backup before it runs.
+void CourseEditRequestLineUp(void) {
+    GdxCourseEditLineUpPreview preview = {};
+    const int32_t result = gdx_course_edit_native_line_up_scan(&preview);
+    if (result == GDX_COURSE_EDIT_LINE_UP_TOO_FEW) {
+        GdxCourseEditFlashMessage("Select 3 or more points in a row");
+    } else if (result == GDX_COURSE_EDIT_LINE_UP_TOO_CLOSE) {
+        GdxCourseEditFlashMessage("Points would end up too close (under 498 units)");
+    } else {
+        gdx_course_edit_input_request_line_up();
+        return;
+    }
+    gdx_course_edit_native_play_refusal();
+}
+
+// Orbit gain at 100% sensitivity: whole degrees of yaw or pitch per OS pixel.
+static constexpr float kOrbitDegreesPerPixel = 0.5f;
+
 // Camera gesture state for Slice 1 of better course-edit controls.
 // Lives entirely in the port shim; decomp consumers only see the extern "C" getters below.
 // Active only while MMB is held, the CVar is on, the editor is active, no ImGui menu/menubar is
 // open, and the F2 relative-mode capture is not active. Once started, the gesture continues even
 // if the OS cursor drifts outside the game blit rect (e.g. pillarbox bars) so a long drag does not
 // cut off at the edge.
+//
+// Host frames run faster than the ~20 Hz Course Edit game tick. Motion is summed here on every host
+// frame and drained by the getters once per game tick, so drags between ticks are not lost. The
+// pending motion lives in this struct, so every reset (gesture end, mode exit, editor inactive)
+// clears it as well.
 struct CourseEditCameraGesture {
     bool active = false;
     bool shift = false;
-    float dx = 0.0f;
-    float dy = 0.0f;
     Ship::Coords lastPos{ -1, -1 };
+    // Pending motion with the sensitivity already applied: orbit in degrees, pan in OS pixels.
+    float orbitYawDeg = 0.0f;
+    float orbitPitchDeg = 0.0f;
+    float panDx = 0.0f;
+    float panDy = 0.0f;
 };
 static CourseEditCameraGesture sCourseEditCameraGesture;
 
@@ -298,7 +414,7 @@ struct CourseEditKeyState {
 };
 static CourseEditKeyState sCourseEditKeys;
 
-// Default bindings for the nine Course Edit tool keys, in LUS KbScancode space (PS/2 set-1 —
+// Default bindings for the nine Course Edit tool keys, in LUS KbScancode space (PS/2 set-1,
 // the numbering Fast3dWindow::KeyDown delivers on both the SDL and DXGI backends; see
 // ship/controller/controldevice/controller/mapping/keyboard/KeyboardScancodes.h).
 static const int kDefaultEditorKeyScancodes[10] = {
@@ -453,22 +569,41 @@ void CourseEditMouseCameraTick(void) {
         return;
     }
 
-    if (g.active) {
-        g.dx = mouse.x - g.lastPos.x;
-        g.dy = mouse.y - g.lastPos.y;
-    } else {
-        g.active = true;
-        g.dx = 0.0f;
-        g.dy = 0.0f;
-    }
+    // The first frame of a gesture has no previous position, so it moves nothing.
+    const float dx = g.active ? static_cast<float>(mouse.x - g.lastPos.x) : 0.0f;
+    const float dy = g.active ? static_cast<float>(mouse.y - g.lastPos.y) : 0.0f;
+    g.active = true;
     g.lastPos = mouse;
-    g.shift = sShiftHeld || ((SDL_GetModState() & KMOD_SHIFT) != 0);
+
+    const bool shift = sShiftHeld || ((SDL_GetModState() & KMOD_SHIFT) != 0);
+    if (shift != g.shift) {
+        // Shift switches orbit and pan mid-gesture. Motion the mode being left has not drained yet,
+        // so drop it: it must not land in the other mode or resume when Shift is released.
+        if (shift) {
+            g.orbitYawDeg = 0.0f;
+            g.orbitPitchDeg = 0.0f;
+        } else {
+            g.panDx = 0.0f;
+            g.panDy = 0.0f;
+        }
+        g.shift = shift;
+    }
+    if (shift) {
+        const float scale = GdxPanSensitivity() / 100.0f;
+        g.panDx += dx * scale;
+        g.panDy += dy * scale;
+    } else {
+        // Signs match the D-pad: a drag right yaws like BTN_RIGHT, a drag up pitches like BTN_UP.
+        const float scale = kOrbitDegreesPerPixel * GdxOrbitSensitivity() / 100.0f;
+        g.orbitYawDeg -= dx * scale;
+        g.orbitPitchDeg -= dy * scale;
+    }
 }
 
 // Full S1/S4 gate: CVar on, in Course Edit or Create Machine, not test-driving (Course Edit only),
 // not grabbing geometry (Course Edit only), no menu/menubar up, and the OS cursor inside the game
 // blit rect. On success outX/outY receive the cursor position in 320x240 game space.
-bool CourseEditMousePos(std::shared_ptr<Fast::Fast3dWindow>& wnd, int* outX, int* outY) {
+bool CourseEditMousePosF(std::shared_ptr<Fast::Fast3dWindow>& wnd, float* outX, float* outY) {
     if (CVarGetInteger("gEnhancements.Input.CourseEditMouse", 0) == 0) {
         return false;
     }
@@ -488,8 +623,20 @@ bool CourseEditMousePos(std::shared_ptr<Fast::Fast3dWindow>& wnd, int* outX, int
     if (mouse.x < rx || mouse.x >= rx + rw || mouse.y < ry || mouse.y >= ry + rh) {
         return false;
     }
-    *outX = static_cast<int>((mouse.x - rx) * 320.0f / rw);
-    *outY = static_cast<int>((mouse.y - ry) * 240.0f / rh);
+    *outX = (mouse.x - rx) * 320.0f / rw;
+    *outY = (mouse.y - ry) * 240.0f / rh;
+    return true;
+}
+
+// Whole game-pixel form of CourseEditMousePosF (truncated toward zero, as before).
+bool CourseEditMousePos(std::shared_ptr<Fast::Fast3dWindow>& wnd, int* outX, int* outY) {
+    float x = 0.0f;
+    float y = 0.0f;
+    if (!CourseEditMousePosF(wnd, &x, &y)) {
+        return false;
+    }
+    *outX = static_cast<int>(x);
+    *outY = static_cast<int>(y);
     return true;
 }
 
@@ -503,7 +650,7 @@ extern "C" int gdx_course_edit_mouse_pos(int* outX, int* outY) {
     return CourseEditMousePos(wnd, outX, outY) ? 1 : 0;
 }
 
-// S2: per-frame OS-cursor hide, called from main.cpp AFTER MouseStateManager::StartFrame — the
+// S2: per-frame OS-cursor hide, called from main.cpp AFTER MouseStateManager::StartFrame. The
 // manager re-shows the cursor on any movement, so hiding before its tick would flicker. Yields to
 // F2 mouse capture (relative-mode look owns the cursor) and, via the gate, to menu-open.
 extern "C" void gdx_course_edit_mouse_cursor_tick(void) {
@@ -534,7 +681,7 @@ static bool RaceMouseSteeringActive(void) {
 }
 
 // Issue #18: absolute steering. The cursor's X position inside the game blit rect IS the stick
-// deflection — center is straight, the edges are full lock — so a line can be held instead of
+// deflection: center is straight, the edges are full lock, so a line can be held instead of
 // snapping straight the moment the mouse stops moving (the failure mode of the old
 // relative-delta scheme). The sensitivity slider scales deflection: 100% reaches full lock at
 // the blit-rect edge, higher values reach it closer to center. When the mouse has not moved for
@@ -653,30 +800,28 @@ extern "C" int gdx_course_edit_mouse_buttons(void) {
     if (wnd == nullptr || wnd->IsMouseCaptured() || wnd->GetGui()->GetMenuOrMenubarVisible() ||
         CVarGetInteger("gEnhancements.Input.CourseEditMouse", 0) == 0 || !CourseEditMouseModeActive()) {
         CourseEditCancelDrag();
-        CourseEditInvalidateDeleteConfirmation();
         return 0;
     }
     if (gdx_course_edit_mouse_camera_gesture_active() || sCourseEditDrag.state != DragState::Idle ||
         gdx_course_edit_native_mouse_owned() != 0) {
         return 0;
     }
+    // The line-up tool sends no A or B from the mouse. Clicks there only select and box select.
+    if (CourseEditEditorActive() && gCreateOption == 1 && gMoveOption == 6) {
+        return 0;
+    }
 
     int x, y;
     if (!CourseEditMousePos(wnd, &x, &y)) {
-        CourseEditInvalidateDeleteConfirmation();
         return 0;
     }
     if (CourseEditEditorActive() && !CourseEditMouseInSubMenu() && !CourseEditMouseOverChrome(x, y) &&
         gCreateOption == 1 && ((GdxDragEnabled() && gMoveOption >= 0 && gMoveOption <= 4) || gMoveOption == 5)) {
-        if (wnd->GetMouseState(Ship::LUS_MOUSE_BTN_RIGHT)) {
-            CourseEditInvalidateDeleteConfirmation();
-        }
         return 0;
     }
 
     int buttons = 0;
     if (wnd->GetMouseState(Ship::LUS_MOUSE_BTN_LEFT)) {
-        CourseEditInvalidateDeleteConfirmation();
         buttons |= GDX_BTN_A;
     }
     if (wnd->GetMouseState(Ship::LUS_MOUSE_BTN_RIGHT)) {
@@ -693,7 +838,7 @@ extern "C" void gdx_course_edit_mouse_camera_tick(void) {
 
 // Wheel detents accumulated by gdx_course_edit_mouse_on_wheel at HOST-frame rate. The decomp
 // consumers read them through gdx_course_edit_mouse_wheel() on game ticks, which run at ~20 Hz in
-// Course Edit — reading LUS's GetMouseWheel() there loses every detent that landed between ticks,
+// Course Edit: reading LUS's GetMouseWheel() there loses every detent that landed between ticks,
 // because MouseStateManager::StartFrame clears the LUS wheel state on every host frame.
 static float sCourseEditWheelDetents = 0.0f;
 static int sCourseEditMenuDetents = 0;
@@ -727,30 +872,36 @@ extern "C" int gdx_course_edit_mouse_wheel(void) {
     return -steps;
 }
 
-// If an orbit gesture (MMB without Shift) is active this frame, fills dx/dy with the OS pixel delta
-// since the previous frame and returns 1. dx/dy are signed integers in window pixels; decomp-side
-// consumers scale them into the same units the D-pad path uses. Returns 0 if no gesture is active or
-// Shift is held.
-extern "C" int gdx_course_edit_mouse_orbit_delta(int32_t* dx, int32_t* dy) {
-    const CourseEditCameraGesture& g = sCourseEditCameraGesture;
+// Drains the whole part of a pending camera value and keeps the fraction for the next game tick.
+// The cast truncates toward zero, so the remainder keeps the sign of the motion it came from.
+static int32_t TakeWholeUnits(float& pending) {
+    const int32_t whole = static_cast<int32_t>(pending);
+    pending -= static_cast<float>(whole);
+    return whole;
+}
+
+// If an orbit gesture (MMB without Shift) is active, fills yawDeg/pitchDeg with the whole degrees of
+// yaw and pitch change accumulated since the last game tick and returns 1. The values already carry
+// the sign the native camera adds, and the fraction stays pending. Returns 0 if no gesture is active
+// or Shift is held.
+extern "C" int gdx_course_edit_mouse_orbit_delta(int32_t* yawDeg, int32_t* pitchDeg) {
+    CourseEditCameraGesture& g = sCourseEditCameraGesture;
     if (!g.active || g.shift) {
         return 0;
     }
-    const float scale = GdxOrbitSensitivity() / 100.0f;
-    *dx = static_cast<int32_t>(g.dx * scale);
-    *dy = static_cast<int32_t>(g.dy * scale);
+    *yawDeg = TakeWholeUnits(g.orbitYawDeg);
+    *pitchDeg = TakeWholeUnits(g.orbitPitchDeg);
     return 1;
 }
 
-// Same as the orbit helper, but for pan (MMB + Shift).
+// Same as the orbit helper, but for pan (MMB + Shift): whole OS pixels with the pan sensitivity applied.
 extern "C" int gdx_course_edit_mouse_pan_delta(int32_t* dx, int32_t* dy) {
-    const CourseEditCameraGesture& g = sCourseEditCameraGesture;
+    CourseEditCameraGesture& g = sCourseEditCameraGesture;
     if (!g.active || !g.shift) {
         return 0;
     }
-    const float scale = GdxPanSensitivity() / 100.0f;
-    *dx = static_cast<int32_t>(g.dx * scale);
-    *dy = static_cast<int32_t>(g.dy * scale);
+    *dx = TakeWholeUnits(g.panDx);
+    *dy = TakeWholeUnits(g.panDy);
     return 1;
 }
 
@@ -832,7 +983,7 @@ extern "C" const char* gdx_course_edit_mouse_last_key_name(void) {
     return buf;
 }
 
-// Backend-agnostic keyboard entry point, called from Fast3dWindow::KeyDown/KeyUp — the one funnel
+// Backend-agnostic keyboard entry point, called from Fast3dWindow::KeyDown/KeyUp, the one funnel
 // both window backends (SDL and DXGI) feed, in LUS KbScancode space. Tool keys accumulate edges
 // here and are applied on game-boundary frames by gdx_course_edit_mouse_keyboard_tick.
 extern "C" void gdx_course_edit_mouse_key_capture_cancel(void);
@@ -947,9 +1098,25 @@ extern "C" int gdx_course_edit_mouse_on_key(int lusScancode, int isDown) {
         sRightShiftHeld = isDown != 0;
     }
     sShiftHeld = sLeftShiftHeld || sRightShiftHeld;
+    if (lusScancode == 29) {
+        sLeftCtrlHeld = isDown != 0;
+    } else if (lusScancode == 285) {
+        sRightCtrlHeld = isDown != 0;
+    } else if (lusScancode == 56) {
+        sLeftAltHeld = isDown != 0;
+    } else if (lusScancode == 312) {
+        sRightAltHeld = isDown != 0;
+    }
+    sCtrlHeld = sLeftCtrlHeld || sRightCtrlHeld;
+    sAltHeld = sLeftAltHeld || sRightAltHeld;
 
-    bool deleteWasHeld = sDeleteKeyHeld;
-    bool enterWasHeld = sDeleteEnterHeld;
+    // "WasHeld" is the state before this event. Only the first edge of a key acts, so auto-repeat never repeats an
+    // action. An owned key is swallowed on both edges, so the native binding for the same key never sees it.
+    const bool deleteWasHeld = sDeleteKeyHeld;
+    const bool enterWasHeld = sEnterHeld;
+    const bool undoZWasHeld = sUndoZHeld;
+    const bool undoYWasHeld = sUndoYHeld;
+    const bool aKeyWasHeld = sAKeyHeld;
     if (lusScancode == 339) {
         sDeleteKeyHeld = isDown != 0;
         if (sDeleteKeyOwned) {
@@ -958,9 +1125,30 @@ extern "C" int gdx_course_edit_mouse_on_key(int lusScancode, int isDown) {
         }
     }
     if (lusScancode == 28 || lusScancode == 284) {
-        sDeleteEnterHeld = isDown != 0;
-        if (sDeleteEnterOwned) {
-            sDeleteEnterOwned = isDown != 0;
+        sEnterHeld = isDown != 0;
+        if (sEnterOwned) {
+            sEnterOwned = isDown != 0;
+            return 1;
+        }
+    }
+    if (lusScancode == 44) {
+        sUndoZHeld = isDown != 0;
+        if (sUndoZOwned) {
+            sUndoZOwned = isDown != 0;
+            return 1;
+        }
+    }
+    if (lusScancode == 21) {
+        sUndoYHeld = isDown != 0;
+        if (sUndoYOwned) {
+            sUndoYOwned = isDown != 0;
+            return 1;
+        }
+    }
+    if (lusScancode == 45) {
+        sAKeyHeld = isDown != 0;
+        if (sAKeyOwned) {
+            sAKeyOwned = isDown != 0;
             return 1;
         }
     }
@@ -1084,33 +1272,44 @@ extern "C" int gdx_course_edit_mouse_on_key(int lusScancode, int isDown) {
     bool editorInput = CourseEditEditorActive() && inputWindow != nullptr &&
         !inputWindow->IsMouseCaptured() && !inputWindow->GetGui()->GetMenuOrMenubarVisible() &&
         !CourseEditMouseInSubMenu();
-    if (editorInput && lusScancode == 1 &&
-        (sCourseEditDrag.state != DragState::Idle || gdx_course_edit_native_mouse_owned() != 0 ||
-         sDeleteConfirmPending)) {
-        if (isDown) {
+    // The selection, line-up, and history keys act only while the drag machine is idle and no native transaction runs.
+    const bool dragIdle = sCourseEditDrag.state == DragState::Idle && gdx_course_edit_native_mouse_owned() == 0;
+    if (editorInput && lusScancode == 1 && isDown) {
+        // Esc cancels a drag or transaction first, then clears a non-empty selection on the point screen.
+        if (!dragIdle) {
             CourseEditCancelDrag();
-            CourseEditInvalidateDeleteConfirmation();
             sEditorEscOwned = true;
+            return 1;
+        }
+        if (CourseEditPointInputContextActive() && CourseEditSelectionMask() != 0) {
+            CourseEditReplaceSelection(0);
+            sEditorEscOwned = true;
+            return 1;
+        }
+    }
+    if (isDown && !enterWasHeld && (lusScancode == 28 || lusScancode == 284) && dragIdle &&
+        CourseEditPointInputContextActive() && gMoveOption == 6) {
+        sEnterOwned = true;
+        CourseEditRequestLineUp();
+        return 1;
+    }
+    if (isDown && !deleteWasHeld && lusScancode == 339 && dragIdle && CourseEditPointInputContextActive()) {
+        sDeleteKeyOwned = true;
+        CourseEditRequestDelete();
+        return 1;
+    }
+    if (isDown && !undoZWasHeld && lusScancode == 44 && sCtrlHeld && editorInput && dragIdle) {
+        sUndoZOwned = true;
+        if (sShiftHeld) {
+            gdx_course_edit_undo_request_redo();
+        } else {
+            gdx_course_edit_undo_request_undo();
         }
         return 1;
     }
-
-    if (sDeleteConfirmPending && CourseEditDeleteInputContextActive() &&
-        (lusScancode == 28 || lusScancode == 284)) {
-        sDeleteEnterOwned = isDown != 0;
-        if (isDown && !enterWasHeld) {
-            if (CourseEditDeleteSelectionStillMatches()) {
-                gdx_course_edit_input_request_delete(sDeleteSelectionMask, sDeletePointCount);
-            }
-            CourseEditInvalidateDeleteConfirmation();
-        }
-        return 1;
-    }
-    if (lusScancode == 339 && CourseEditDeleteInputContextActive()) {
-        sDeleteKeyOwned = isDown != 0;
-        if (isDown && !deleteWasHeld) {
-            CourseEditConfirmDelete();
-        }
+    if (isDown && !undoYWasHeld && lusScancode == 21 && sCtrlHeld && editorInput && dragIdle) {
+        sUndoYOwned = true;
+        gdx_course_edit_undo_request_redo();
         return 1;
     }
 
@@ -1142,13 +1341,17 @@ extern "C" int gdx_course_edit_mouse_on_key(int lusScancode, int isDown) {
                 return 1;
             }
         }
+        // The line-up tool sends no A. The keyboard A key (X by default) is swallowed on its first edge here, and the
+        // owned flag at the top of this function handles its auto-repeat and release.
+        if (isDown && !aKeyWasHeld && lusScancode == 45 && gCreateOption == 1 && gMoveOption == 6 &&
+            CourseEditEditorActive()) {
+            sAKeyOwned = true;
+            return 1;
+        }
         return 0;
     }
     if (isDown) {
         sEditorKeysConsumed[idx] = true;
-        if (idx != 6) {
-            CourseEditInvalidateDeleteConfirmation();
-        }
         // Win32 auto-repeat refires keydown while a key is held; only the first edge counts.
         if (!sCourseEditKeys.held[idx]) {
             sCourseEditKeys.held[idx] = true;
@@ -1226,15 +1429,11 @@ extern "C" void gdx_course_edit_mouse_keyboard_tick(int gameBoundary) {
         wnd->GetGui()->GetMenuOrMenubarVisible()) {
         gdx_course_edit_input_clear();
         CourseEditCancelDrag();
-        CourseEditInvalidateDeleteConfirmation();
         for (int i = 1; i <= 9; i++) {
             sCourseEditKeys.pressedAccum[i] = false;
             sCourseEditKeys.pressedGame[i] = false;
         }
         return;
-    }
-    if (sDeleteConfirmPending && !CourseEditDeleteSelectionStillMatches()) {
-        CourseEditInvalidateDeleteConfirmation();
     }
     if (gameBoundary) {
         for (int i = 1; i <= 7; i++) {
@@ -1250,7 +1449,7 @@ extern "C" void gdx_course_edit_mouse_keyboard_tick(int gameBoundary) {
                 sCourseEditDrag.state == DragState::Idle && gdx_course_edit_native_mouse_owned() == 0) {
                 sCourseEditKeys.pressedGame[i] = false;
                 // Map 1..7 to the seven MOVE_OPTION_* values in order. Every point tool is gated
-                // on CREATE_OPTION_POINT in the editor, so switch tabs as well — otherwise the
+                // on CREATE_OPTION_POINT in the editor, so switch tabs as well. Otherwise the
                 // hotkey is a silent no-op whenever another tab (COURSE/PARTS/...) is active.
                 gCreateOption = 1 /* CREATE_OPTION_POINT */;
                 gMoveOption = i - 1;
@@ -1322,9 +1521,24 @@ extern "C" void gdx_course_edit_mouse_reset_keys(void) {
     sLeftShiftHeld = false;
     sRightShiftHeld = false;
     sShiftHeld = false;
+    sLeftCtrlHeld = false;
+    sRightCtrlHeld = false;
+    sCtrlHeld = false;
+    sLeftAltHeld = false;
+    sRightAltHeld = false;
+    sAltHeld = false;
+    sScalarDrag = CourseEditScalarDragState();
     sDeleteKeyHeld = false;
-    sDeleteEnterHeld = false;
-    CourseEditInvalidateDeleteConfirmation();
+    sDeleteKeyOwned = false;
+    sEnterHeld = false;
+    sEnterOwned = false;
+    sUndoZHeld = false;
+    sUndoYHeld = false;
+    sUndoZOwned = false;
+    sUndoYOwned = false;
+    sAKeyHeld = false;
+    sAKeyOwned = false;
+    sEditorEscOwned = false;
     gdx_name_entry_queue_clear();
 }
 
@@ -1333,7 +1547,6 @@ extern "C" void gdx_course_edit_mouse_all_keys_up(void) {
     sCourseEditWheelDetents = 0.0f;
     sCourseEditMenuDetents = 0;
     CourseEditCancelDrag();
-    CourseEditInvalidateDeleteConfirmation();
     gdx_course_edit_input_clear_test_esc();
     // Focus loss drops pending actions, not release ownership: repeats must not become new presses.
     for (int i = 1; i <= 9; i++) {
@@ -1343,53 +1556,106 @@ extern "C" void gdx_course_edit_mouse_all_keys_up(void) {
     sLeftShiftHeld = false;
     sRightShiftHeld = false;
     sShiftHeld = false;
+    sLeftCtrlHeld = false;
+    sRightCtrlHeld = false;
+    sCtrlHeld = false;
+    sLeftAltHeld = false;
+    sRightAltHeld = false;
+    sAltHeld = false;
+    sScalarDrag = CourseEditScalarDragState();
     gdx_name_entry_queue_clear();
 }
 
-namespace {
-void CourseEditDrawDeleteBanner(void) {
-    if (!CourseEditEditorActive() || gCreateOption != 1 || gMoveOption != 5) {
-        return;
-    }
-    std::shared_ptr<Fast::Fast3dWindow> wnd = CourseEditMouseWindow();
-    if (wnd == nullptr || wnd->GetGui()->GetMenuOrMenubarVisible() || CourseEditMouseInSubMenu()) {
-        return;
-    }
-    int count = gdx_course_edit_selected_point_count();
-    const ImGuiViewport* vp = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f, vp->WorkPos.y + 28.0f),
-                            ImGuiCond_Always, ImVec2(0.5f, 0.0f));
-    ImGui::SetNextWindowBgAlpha(0.88f);
-    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-                                   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
-                                   ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs;
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 8.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 5.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.5f);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.04f, 0.05f, 0.08f, 1.0f));
-    if (sDeleteConfirmPending) {
-        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
-    } else {
-        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(1.0f, 0.8f, 0.3f, 0.6f));
-    }
+// Hint strip, defined in port/gdx_course_edit_help.cpp. Drawn by the overlay below.
+void GdxCourseEditDrawHintStrip(void);
 
-    if (ImGui::Begin("##CourseEditDeleteBanner", nullptr, flags)) {
-        if (count == 0) {
-            ImGui::TextColored(ImVec4(0.75f, 0.75f, 0.75f, 1.0f),
-                               "Delete tool active: 0 points selected (click/box select points first)");
-        } else if (!sDeleteConfirmPending) {
-            ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.35f, 1.0f),
-                               "Delete tool active: %d point(s) selected. Click to delete.", count);
-        } else {
-            ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f),
-                               "CONFIRM DELETION: %d point(s). Click or press Enter to confirm; Right-Click or Esc to cancel.",
-                               count);
+namespace {
+// Game-space point to window pixels: the inverse of CourseEditMousePosF, so markers sit where clicks land.
+bool CourseEditGameToWindow(float gameX, float gameY, ImVec2* out) {
+    std::shared_ptr<Fast::Fast3dWindow> wnd = CourseEditMouseWindow();
+    if (wnd == nullptr) {
+        return false;
+    }
+    Fast::Fast3dGui* gui = dynamic_cast<Fast::Fast3dGui*>(wnd->GetGui().get());
+    float rx, ry, rw, rh;
+    if (gui == nullptr || !gui->GetGameBlitRect(&rx, &ry, &rw, &rh) || rw <= 0.0f || rh <= 0.0f) {
+        return false;
+    }
+    out->x = rx + gameX * rw / 320.0f;
+    out->y = ry + gameY * rh / 240.0f;
+    return true;
+}
+
+// World-space point to window pixels, through the projection the editor uses for its points. Returns false when the
+// point is behind the camera or the blit rect is unavailable.
+bool CourseEditWorldToWindow(Vec3f pos, ImVec2* out) {
+    int32_t sx = 0;
+    int32_t sy = 0;
+    if (func_xk2_800EF090(pos, &sx, &sy) != 0) {
+        return false;
+    }
+    return CourseEditGameToWindow(static_cast<float>(sx), static_cast<float>(sy), out);
+}
+
+// Delete tool: the point under the cursor is drawn red, so a click on it deletes it.
+void CourseEditDrawDeleteHover(void) {
+    std::shared_ptr<Fast::Fast3dWindow> wnd;
+    float gameX = 0.0f;
+    float gameY = 0.0f;
+    if (gMoveOption != 5 || !CourseEditPointInputContextActive() ||
+        sCourseEditDrag.state != DragState::Idle || !CourseEditMousePosF(wnd, &gameX, &gameY) ||
+        CourseEditMouseOverChrome(static_cast<int32_t>(gameX), static_cast<int32_t>(gameY))) {
+        return;
+    }
+    const int32_t idx = CourseEditPickPoint(gameX, gameY);
+    Vec3f pos = {};
+    ImVec2 at(0.0f, 0.0f);
+    if (idx < 0 || !gdx_course_edit_native_point_position(idx, &pos) || !CourseEditWorldToWindow(pos, &at)) {
+        return;
+    }
+    ImDrawList* draw = ImGui::GetForegroundDrawList();
+    draw->AddCircleFilled(at, 6.0f, IM_COL32(255, 40, 40, 255));
+    draw->AddCircle(at, 6.0f, IM_COL32(255, 255, 255, 230), 0, 1.5f);
+}
+
+// Line-up tool: the line the selection would land on, with a marker at each landing point. Drawn only when the scan
+// accepts the selection, so a refused selection shows nothing here.
+void CourseEditDrawLineUpPreview(void) {
+    if (gMoveOption != 6 || !CourseEditPointInputContextActive()) {
+        return;
+    }
+    GdxCourseEditLineUpPreview preview = {};
+    if (gdx_course_edit_native_line_up_scan(&preview) != GDX_COURSE_EDIT_LINE_UP_OK) {
+        return;
+    }
+    ImDrawList* draw = ImGui::GetForegroundDrawList();
+    ImVec2 start(0.0f, 0.0f);
+    ImVec2 end(0.0f, 0.0f);
+    if (CourseEditWorldToWindow(preview.start, &start) && CourseEditWorldToWindow(preview.end, &end)) {
+        draw->AddLine(start, end, IM_COL32(120, 200, 255, 220), 2.0f);
+    }
+    for (int32_t i = 0; i < preview.count; i++) {
+        ImVec2 at(0.0f, 0.0f);
+        if (CourseEditWorldToWindow(preview.landing[i], &at)) {
+            draw->AddCircleFilled(at, 4.0f, IM_COL32(120, 200, 255, 255));
         }
     }
-    ImGui::End();
+}
 
-    ImGui::PopStyleColor(2);
-    ImGui::PopStyleVar(3);
+// Shift-drag selection rectangle in window pixels, the same space as the press and release samples. Drawn on the
+// foreground list so it sits above the editor windows, and only while a box select is in progress.
+void CourseEditDrawSelectionBox(void) {
+    const CourseEditDragState& d = sCourseEditDrag;
+    if (d.state != DragState::BoxSelect) {
+        return;
+    }
+    const ImVec2 a(static_cast<float>((std::min)(d.startWindow.x, d.boxEndWindow.x)),
+                   static_cast<float>((std::min)(d.startWindow.y, d.boxEndWindow.y)));
+    const ImVec2 b(static_cast<float>((std::max)(d.startWindow.x, d.boxEndWindow.x)),
+                   static_cast<float>((std::max)(d.startWindow.y, d.boxEndWindow.y)));
+    ImDrawList* draw = ImGui::GetForegroundDrawList();
+    draw->AddRectFilled(a, b, IM_COL32(255, 220, 90, 40));
+    draw->AddRect(a, b, IM_COL32(255, 220, 90, 220), 0.0f, 0, 1.0f);
 }
 
 class CourseEditDeleteOverlay final : public Ship::GuiWindow {
@@ -1398,7 +1664,13 @@ public:
         : Ship::GuiWindow("gOpenWindows.CourseEditDeleteOverlay", true, "Course Edit Delete Overlay") {}
 
     void Draw() override {
-        CourseEditDrawDeleteBanner();
+        GdxCourseEditDrawHintStrip();
+        CourseEditDrawSelectionBox();
+        CourseEditDrawDeleteHover();
+        CourseEditDrawLineUpPreview();
+        if (CVarGetInteger("gEnhancements.CourseEdit.HistoryPanel", 0) != 0) {
+            GdxCourseEditDrawHistoryPanel();
+        }
     }
     void DrawElement() override {}
     void InitElement() override {}
@@ -1430,6 +1702,100 @@ bool CourseEditMouseOverChrome(int32_t x, int32_t y) {
 
 } // namespace
 
+// Camera distance in world units (s32). Defined in decomp/src/overlays/course_edit/1A2D70.c:50.
+extern "C" int32_t D_xk2_80104CB4;
+
+namespace {
+
+// Distance at which the scalar drag rate is the stock 1.0 (default camera distance, 1A2D70.c:50).
+constexpr float kScalarReferenceDistance = 15000.0f;
+// Floor from the editor zoom minimum (188850.c:203-205): 300 / 15000 = 0.02.
+constexpr float kScalarDistanceScaleMin = 0.02f;
+// Guard against out-of-range distances. The stock zoom ceiling of 16000 gives about 1.07.
+constexpr float kScalarDistanceScaleMax = 4.0f;
+// Ctrl fine mode runs at one quarter speed.
+constexpr float kScalarFineMultiplier = 0.25f;
+// Alt snap steps. The native side already moves width and center in steps of 10 and bank in steps of
+// 3 degrees (188850.c, gdx_course_edit_set_scalar_target), so the snap steps are coarser
+// multiples of those grids: 50 units for width and center, 15 degrees for bank.
+constexpr float kScalarSnapStepWidth = 50.0f;
+constexpr float kScalarSnapStepBank = 15.0f;
+
+float CourseEditScalarDistanceScale(void) {
+    float scale = static_cast<float>(D_xk2_80104CB4) / kScalarReferenceDistance;
+    if (scale < kScalarDistanceScaleMin) {
+        return kScalarDistanceScaleMin;
+    }
+    if (scale > kScalarDistanceScaleMax) {
+        return kScalarDistanceScaleMax;
+    }
+    return scale;
+}
+
+bool CourseEditCtrlHeld(void) {
+    return sCtrlHeld || ((SDL_GetModState() & KMOD_CTRL) != 0);
+}
+
+bool CourseEditAltHeld(void) {
+    if (sAltHeld || ((SDL_GetModState() & KMOD_ALT) != 0)) {
+        return true;
+    }
+#if defined(_WIN32)
+    // The DXGI backend forwards only WM_KEYDOWN/WM_KEYUP, and Alt arrives as WM_SYSKEYDOWN, so neither
+    // the key hook nor SDL sees it. Ask Windows directly, but only while this process has the foreground.
+    DWORD foregroundPid = 0;
+    GetWindowThreadProcessId(GetForegroundWindow(), &foregroundPid);
+    return foregroundPid == GetCurrentProcessId() && (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+#else
+    return false;
+#endif
+}
+
+// Rounds half away from zero to a multiple of step, the same rounding as std::round on the stock path.
+float CourseEditSnapToStep(float value, float step) {
+    float scaled = value / step;
+    float rounded = scaled >= 0.0f ? scaled + 0.5f : scaled - 0.5f;
+    return static_cast<float>(static_cast<int32_t>(rounded)) * step;
+}
+
+// Returns the unsnapped scalar offset for this tick. The rate is recomputed every tick. When it
+// changes, the value so far is carried into base and measurement restarts from the current cursor,
+// so Ctrl press/release and camera zoom do not make the value jump.
+float CourseEditScalarOffset(const CourseEditDragState& d, float rate) {
+    CourseEditScalarDragState& s = sScalarDrag;
+    if (!s.active || s.pointIndex != d.pointIndex || s.moveOption != d.moveOption ||
+        s.startMouseX != d.startMouseX || s.startMouseY != d.startMouseY) {
+        s.active = true;
+        s.pointIndex = d.pointIndex;
+        s.moveOption = d.moveOption;
+        s.startMouseX = d.startMouseX;
+        s.startMouseY = d.startMouseY;
+        s.base = 0.0f;
+        s.anchorX = d.startGameX;
+        s.rate = rate;
+        s.lastOffset = 0.0f;
+    }
+    float mouseX = d.lastGameX;
+    if (rate != s.rate) {
+        s.base = s.lastOffset;
+        s.anchorX = mouseX;
+        s.rate = rate;
+    }
+    s.lastOffset = s.base + (mouseX - s.anchorX) * s.rate;
+    return s.lastOffset;
+}
+
+} // namespace
+
+// Modifier queries for the help HUD. Return 1 when held, 0 otherwise.
+extern "C" int gdx_course_edit_mouse_fine_held(void) {
+    return CourseEditCtrlHeld() ? 1 : 0;
+}
+
+extern "C" int gdx_course_edit_mouse_snap_held(void) {
+    return CourseEditAltHeld() ? 1 : 0;
+}
+
 // S3: per-frame point-drag state machine. Called from main.cpp alongside the other mouse ticks,
 // after MouseStateManager::StartFrame so the button state is stable for this frame.
 extern "C" void gdx_course_edit_mouse_drag_tick(void) {
@@ -1447,7 +1813,7 @@ extern "C" void gdx_course_edit_mouse_drag_tick(void) {
 
     if (wnd == nullptr || wnd->IsMouseCaptured() || wnd->GetGui()->GetMenuOrMenubarVisible() ||
         CourseEditMouseInSubMenu() || CVarGetInteger("gEnhancements.Input.CourseEditMouse", 0) == 0 ||
-        !CourseEditEditorActive() || (!GdxDragEnabled() && gMoveOption != 5)) {
+        !CourseEditEditorActive() || (!GdxDragEnabled() && gMoveOption != 5 && gMoveOption != 6)) {
         CourseEditCancelDrag();
         sDragBlockedUntilRelease = lmb || rmb;
         return;
@@ -1473,17 +1839,22 @@ extern "C" void gdx_course_edit_mouse_drag_tick(void) {
         return;
     }
 
-    int x, y;
-    bool havePos = CourseEditMousePos(wnd, &x, &y);
+    float gameX = 0.0f;
+    float gameY = 0.0f;
+    bool havePos = CourseEditMousePosF(wnd, &gameX, &gameY);
+    const int32_t x = static_cast<int32_t>(gameX);
+    const int32_t y = static_cast<int32_t>(gameY);
+    // Window pixels, not game pixels: the drag threshold is measured on the real pointer.
+    const Ship::Coords mouse = wnd->GetMousePos();
     if (havePos && !d.released) {
         d.lastMouseX = x;
         d.lastMouseY = y;
+        d.lastGameX = gameX;
     }
     if (lmbUp) {
         d.released = true;
     }
     if (rmbDown) {
-        CourseEditInvalidateDeleteConfirmation();
         CourseEditCancelDrag();
         return;
     }
@@ -1495,17 +1866,17 @@ extern "C" void gdx_course_edit_mouse_drag_tick(void) {
                 return;
             }
             d.released = false;
-            if (gMoveOption == 5 && gdx_course_edit_selected_point_count() != 0) {
-                CourseEditConfirmDelete();
-                return;
-            }
-            if (gMoveOption < 0 || gMoveOption >= 6) {
+            if (gMoveOption < 0 || gMoveOption >= kMoveOptionCount) {
                 return;
             }
             gCourseEditCursorXPos = x;
             gCourseEditCursorYPos = y;
-            int32_t idx = func_xk2_800EFDE4(150.0f);
-            if (idx >= 0) {
+            const int32_t idx = CourseEditPickPoint(gameX, gameY);
+            const bool shiftHeld = sShiftHeld || ((SDL_GetModState() & KMOD_SHIFT) != 0);
+            // The Delete tool arms on every press, so an empty-space press can clear the selection or start a box
+            // select.
+            if (idx >= 0 || shiftHeld || gMoveOption == 5) {
+                // idx < 0 is a box-select candidate; Armed promotes it once the pointer moves.
                 d.state = DragState::Armed;
                 d.pointIndex = idx;
                 d.startMouseX = x;
@@ -1513,26 +1884,58 @@ extern "C" void gdx_course_edit_mouse_drag_tick(void) {
                 d.lastMouseX = x;
                 d.lastMouseY = y;
                 d.moveOption = gMoveOption;
-            } else if (!sShiftHeld && (SDL_GetModState() & KMOD_SHIFT) == 0) {
+                d.startGameX = gameX;
+                d.lastGameX = gameX;
+                d.startWindow = mouse;
+                d.boxStartX = gameX;
+                d.boxStartY = gameY;
+                d.boxAdditive = shiftHeld;
+                // A new press never inherits a scalar drag that ended in a cancel.
+                sScalarDrag = CourseEditScalarDragState();
+            } else {
                 gdx_course_edit_input_request_selection(-1, 0);
-                CourseEditInvalidateDeleteConfirmation();
             }
             break;
         }
         case DragState::Armed: {
-            int dx = d.lastMouseX - d.startMouseX;
-            int dy = d.lastMouseY - d.startMouseY;
-            if (dx * dx + dy * dy >= 16 && d.moveOption != 5) {
+            const int32_t dxWindow = mouse.x - d.startWindow.x;
+            const int32_t dyWindow = mouse.y - d.startWindow.y;
+            const bool moved = dxWindow * dxWindow + dyWindow * dyWindow >= kDragStartThresholdSq;
+            if (d.pointIndex < 0) {
+                // Press on empty space. A moved pointer becomes a box select. A plain click clears the selection;
+                // a Shift-click on empty space does nothing.
+                if (moved) {
+                    d.state = DragState::BoxSelect;
+                    d.boxEndX = d.boxStartX;
+                    d.boxEndY = d.boxStartY;
+                    d.boxEndWindow = d.startWindow;
+                } else if (d.released) {
+                    if (!d.boxAdditive) {
+                        CourseEditReplaceSelection(0);
+                    }
+                    d = {};
+                }
+                break;
+            }
+            if (moved && d.moveOption != 5 && d.moveOption != 6) {
                 if (!gdx_course_edit_native_point_position(d.pointIndex, &d.backupPos)) {
                     d = {};
                     return;
                 }
                 gdx_course_edit_input_request_drag_start(d.pointIndex);
                 d.state = DragState::Starting;
+            } else if (moved) {
+                // The Delete and line-up tools never move points, so a moved press on a point does nothing.
+                d = {};
             } else if (d.released) {
-                bool shiftHeld = sShiftHeld || ((SDL_GetModState() & KMOD_SHIFT) != 0);
-                gdx_course_edit_input_request_selection(d.pointIndex, shiftHeld ? 1 : 0);
-                CourseEditInvalidateDeleteConfirmation();
+                const bool shiftHeld = sShiftHeld || ((SDL_GetModState() & KMOD_SHIFT) != 0);
+                if (d.moveOption == 5 && !shiftHeld) {
+                    CourseEditDeleteClickedPoint(d.pointIndex);
+                } else {
+                    // Line up works on several points, so a plain click there adds or removes one, like Shift+click.
+                    const bool toggle = shiftHeld || d.moveOption == 6;
+                    gdx_course_edit_input_request_selection(d.pointIndex, toggle ? 1 : 0);
+                }
                 d = {};
             }
             break;
@@ -1561,15 +1964,43 @@ extern "C" void gdx_course_edit_mouse_drag_tick(void) {
                     gdx_course_edit_input_request_move_target(d.moveOption, target);
                 }
             } else if (d.moveOption >= 2 && d.moveOption <= 4) {
-                float dxPixels = static_cast<float>(d.lastMouseX - d.startMouseX) * sensitivity;
                 float unitsPerPixel = d.moveOption == 2 ? 5.0f : (d.moveOption == 4 ? 3.0f : 0.75f);
-                gdx_course_edit_input_request_scalar_target(d.moveOption,
-                    static_cast<int>(std::round(dxPixels * unitsPerPixel)));
+                float fineMultiplier = CourseEditCtrlHeld() ? kScalarFineMultiplier : 1.0f;
+                float rate = unitsPerPixel * sensitivity * CourseEditScalarDistanceScale() * fineMultiplier;
+                float offset = CourseEditScalarOffset(d, rate);
+                int32_t target = static_cast<int32_t>(std::round(offset));
+                if (CourseEditAltHeld()) {
+                    const float step = d.moveOption == 3 ? kScalarSnapStepBank : kScalarSnapStepWidth;
+                    target = static_cast<int32_t>(CourseEditSnapToStep(offset, step));
+                }
+                gdx_course_edit_input_request_scalar_target(d.moveOption, target);
+                if (d.released) {
+                    sScalarDrag = CourseEditScalarDragState();
+                }
             }
             // The consumer applies the final target before acknowledging the release.
             if (d.released) {
                 gdx_course_edit_input_request_drag_commit();
                 d.state = DragState::Committing;
+            }
+            break;
+        }
+        case DragState::BoxSelect: {
+            if (havePos) {
+                d.boxEndX = gameX;
+                d.boxEndY = gameY;
+                d.boxEndWindow = mouse;
+            }
+            if (d.released) {
+                // The native selection changes once, on release, from the box as last seen in the game area.
+                const GdxCourseEditMask box = CourseEditPointsInBox(d.boxStartX, d.boxStartY, d.boxEndX, d.boxEndY);
+                if (d.boxAdditive) {
+                    gdx_course_edit_input_request_selection_add_mask(box);
+                    CourseEditFlushSelectionAdd();
+                } else {
+                    CourseEditReplaceSelection(box);
+                }
+                d = {};
             }
             break;
         }

@@ -3,7 +3,9 @@
 #include <imgui.h>
 
 #include "rom_buffer.h" // gdx_rom_path: the clean ROM baseline for W2 course comparison
+#include "gdx_course_registry.h" // GDX_COURSE_EXT_ERR_* names for the sidecar status line
 
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -24,6 +26,16 @@
 extern "C" int gdx_input_in_gameplay(void);
 
 namespace {
+
+// 8A: the session title of a track (a .gdxt title, or the full name behind a short cup alias an
+// older build made).
+// Returns false when the course has no title.
+bool SessionTitle(const char* name, const char* extension, char* out, size_t cap) {
+    char courseId[GDX_COURSE_FILE_ID_MAX + 1];
+
+    snprintf(courseId, sizeof(courseId), "%s.%s", name, extension);
+    return gdx_course_title_get(courseId, out, cap) != 0;
+}
 
 const char* GdxContentTypeLabel(const GdxContentEntry& entry) {
     if (entry.contentType == GDX_CONTENT_TYPE_MACHINE) {
@@ -178,9 +190,10 @@ void GdxContentWindow::UpdateElement() {
 }
 
 void GdxContentWindow::DrawElement() {
-    ImGui::TextWrapped("Tracks and machines stored on the 64DD disk. Export writes a .gdxc file to the "
-                       "exports/ folder next to the executable; share that file, and the other player imports "
-                       "it from the Import section below.");
+    ImGui::TextWrapped("Tracks and machines stored on the 64DD disk. Export writes one file to the exports/ "
+                       "folder next to the executable: a .gdxp package for a track (with its custom music) or a "
+                       ".gdxc for a machine. Share that file, and the other player imports it from the Import "
+                       "section below.");
 
     // E3b: the strip toggle lives next to the export buttons, not buried in the settings menu
     // (risk R5: author ghosts and records travel inside tracks by default).
@@ -259,7 +272,7 @@ void GdxContentWindow::DrawElement() {
     }
     ImGui::EndDisabled();
     ImGui::SameLine();
-    ImGui::TextDisabled("CENT + its tracks -> exports/edit-cup.gdxc");
+    ImGui::TextDisabled("CENT + its tracks and music -> exports/edit-cup.gdxp");
     ImGui::Separator();
 
     if (mEntryCount == 0) {
@@ -283,7 +296,16 @@ void GdxContentWindow::DrawElement() {
             ImGui::TableNextRow();
 
             ImGui::TableNextColumn();
-            ImGui::TextUnformatted(entry.name[0] != '\0' ? entry.name : "(unnamed)");
+            {
+                char title[GDX_COURSE_TITLE_MAX + 1];
+                if (SessionTitle(entry.name, entry.extension, title, sizeof(title))) {
+                    ImGui::TextUnformatted(title);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(%s)", entry.name);
+                } else {
+                    ImGui::TextUnformatted(entry.name[0] != '\0' ? entry.name : "(unnamed)");
+                }
+            }
             ImGui::TableNextColumn();
             ImGui::TextUnformatted(GdxContentTypeLabel(entry));
             ImGui::TableNextColumn();
@@ -335,18 +357,10 @@ void GdxContentWindow::DrawCupPicker(bool busy, bool inGameplay) {
     }
     const GdxContentEntry& track = mEntries[mCupPickerTrack];
 
+    char title[GDX_COURSE_TITLE_MAX + 1];
+    const bool hasTitle = SessionTitle(track.name, track.extension, title, sizeof(title));
     ImGui::Separator();
-    ImGui::Text("Edit Cup — register '%s':", track.name);
-    if (strlen(track.name) > GDX_CONTENT_CUP_NAME_MAX) {
-        // A slot holds 8 chars; a longer name would never resolve and the game would silently
-        // clear it. Refuse up front instead.
-        ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f),
-                           "Track names in the Edit Cup are limited to %d characters.", GDX_CONTENT_CUP_NAME_MAX);
-        if (ImGui::SmallButton("Close")) {
-            mCupPickerTrack = -1;
-        }
-        return;
-    }
+    ImGui::Text("Edit Cup: register '%s':", hasTitle ? title : track.name);
     if (inGameplay) {
         ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "Edit Cup changes are unavailable while a race is live.");
     }
@@ -356,8 +370,13 @@ void GdxContentWindow::DrawCupPicker(bool busy, bool inGameplay) {
         const char* occupant = mCupSlots[slot];
         const bool occupied = occupant[0] != '\0';
         const bool alreadyMine = occupied && strcmp(occupant, track.name) == 0;
+        char occupantTitle[GDX_COURSE_TITLE_MAX + 1];
         ImGui::PushID(2000 + slot);
-        ImGui::Text("%d: %s", slot + 1, occupied ? occupant : "(empty)");
+        if (occupied && SessionTitle(occupant, "CRSD", occupantTitle, sizeof(occupantTitle))) {
+            ImGui::Text("%d: %s (%s)", slot + 1, occupantTitle, occupant);
+        } else {
+            ImGui::Text("%d: %s", slot + 1, occupied ? occupant : "(empty)");
+        }
         ImGui::SameLine();
         ImGui::BeginDisabled(opsDisabled || alreadyMine);
         // R6: overwriting an occupied slot is a two-click confirm; an empty slot registers in one.
@@ -403,6 +422,88 @@ void GdxContentWindow::DrawCupPicker(bool busy, bool inGameplay) {
     }
 }
 
+// Appends formatted text to a status buffer, truncating at the buffer end rather than overflowing.
+static void AppendStatus(char* buf, size_t cap, const char* fmt, ...) {
+    size_t used = strlen(buf);
+    va_list args;
+
+    if (used + 1 >= cap) {
+        return;
+    }
+    va_start(args, fmt);
+    vsnprintf(buf + used, cap - used, fmt, args);
+    va_end(args);
+}
+
+// Plain-words reason for a sidecar decode failure, for the Content Library status line.
+static const char* SidecarDecodeReason(int32_t code) {
+    switch (code) {
+        case GDX_COURSE_EXT_ERR_TRUNCATED:
+            return "the file is cut short";
+        case GDX_COURSE_EXT_ERR_MAGIC:
+            return "it is not a GXE1 file";
+        case GDX_COURSE_EXT_ERR_VERSION:
+            return "its version is not supported";
+        case GDX_COURSE_EXT_ERR_COUNT:
+            return "it lists too many records";
+        case GDX_COURSE_EXT_ERR_CRC:
+            return "its checksum does not match";
+        case GDX_COURSE_EXT_ERR_BINDING:
+            return "it belongs to a different course";
+        case GDX_COURSE_EXT_ERR_RECORD:
+            return "a record is malformed or repeated";
+        case GDX_COURSE_EXT_ERR_LAYOUT:
+            return "its records do not fit the file";
+        case GDX_COURSE_ERR_SCOPE:
+            return "a point index is out of range";
+        default:
+            return "it could not be decoded";
+    }
+}
+
+// Adds what the course element sidecar (.gdxe) of the last import reported. The sidecar is advisory:
+// an unknown or broken one never blocks an import, the course just keeps its stock element values.
+static void AppendSidecarStatus(char* status, size_t cap) {
+    GdxContentImportExtension ext;
+
+    memset(&ext, 0, sizeof(ext));
+    if (gdx_content_import_last_extension(&ext) != GDX_CONTENT_OK) {
+        return;
+    }
+    switch (ext.status) {
+        case GDX_CONTENT_EXT_OK:
+            if (ext.missingCount == 0) {
+                if (ext.recordCount > 0) {
+                    AppendStatus(status, cap, "\nCourse elements: all %d resolved.", (int) ext.resolvedCount);
+                }
+                break;
+            }
+            AppendStatus(status, cap, "\nCourse elements: %d resolved, %d not in this build (stock values kept): ",
+                         (int) ext.resolvedCount, (int) ext.missingCount);
+            for (int32_t i = 0; i < ext.missingStored; i++) {
+                AppendStatus(status, cap, "%s%s", i > 0 ? ", " : "", ext.missingKeys[i]);
+            }
+            if (ext.missingCount > ext.missingStored) {
+                AppendStatus(status, cap, ", and %d more", (int) (ext.missingCount - ext.missingStored));
+            }
+            AppendStatus(status, cap, ".");
+            break;
+        case GDX_CONTENT_EXT_SIDECAR_MISSING:
+            AppendStatus(status, cap, "\nCourse elements: the .gdxe sidecar is missing, so stock values are used.");
+            break;
+        case GDX_CONTENT_EXT_SIDECAR_INVALID:
+            AppendStatus(status, cap,
+                         "\nCourse elements: the .gdxe sidecar was rejected because %s. Stock values are used.",
+                         SidecarDecodeReason(ext.decodeCode));
+            break;
+        case GDX_CONTENT_EXT_IO:
+            AppendStatus(status, cap, "\nCourse elements: the .gdxe sidecar could not be read. Stock values are used.");
+            break;
+        default:
+            break;
+    }
+}
+
 void GdxContentWindow::DrawImportSection(bool busy, bool inGameplay) {
     // Completion poll: on the port the disk-thread handoff is synchronous, so a begun import has
     // normally already finished; the poll keeps the UI honest if scheduling ever changes.
@@ -429,17 +530,20 @@ void GdxContentWindow::DrawImportSection(bool busy, bool inGameplay) {
         RefreshLibrary();
         RefreshImports();
         RefreshCupSlots();
+        if (rc == GDX_CONTENT_OK) {
+            AppendSidecarStatus(mStatus, sizeof(mStatus));
+        }
     }
 
     ImGui::Separator();
     ImGui::TextUnformatted("Import from exports/");
-    ImGui::TextDisabled("%d .gdxc file%s found", mImportCount, mImportCount == 1 ? "" : "s");
+    ImGui::TextDisabled("%d .gdxp/.gdxc file%s found", mImportCount, mImportCount == 1 ? "" : "s");
     if (inGameplay) {
         ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "Import is unavailable while a race is live.");
     }
 
     if (mImportCount == 0) {
-        ImGui::TextDisabled("Drop a .gdxc file into the exports/ folder next to the executable, then refresh.");
+        ImGui::TextDisabled("Drop a .gdxp or .gdxc file into the exports/ folder next to the executable, then refresh.");
         return;
     }
     if (!ImGui::BeginTable("GdxContentImportTable", 4,

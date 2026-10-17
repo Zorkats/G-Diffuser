@@ -2,7 +2,7 @@
 --
 -- Ships inside a mods/*.o2r pack at "scripts/lap_timer.lua" and logs every racer's lap times to
 -- gdiffuser-run.log (and stderr). Requires the "Enable Lua script packs" checkbox
--- (gEnhancements.Workshop.Scripts) in Workshop -> Content.
+-- (gEnhancements.Workshop.Scripts) in Workshop -> Mods.
 --
 -- The script API v1 is read-only: gdx.log/frame/mode/racerCount/racer plus the four callbacks
 -- below. A script that errors or blows its instruction budget is auto-disabled until the next

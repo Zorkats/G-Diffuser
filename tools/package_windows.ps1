@@ -29,8 +29,12 @@ if (-not (Test-Path (Join-Path $binDir "G-Diffuser.exe"))) {
     Write-Error "no G-Diffuser.exe in $binDir`nbuild first: cmake --build $BuildDir --config Release --target G-Diffuser"
 }
 
-$stage = Join-Path $OutDir "G-Diffuser-v$Version-windows-x64"
-if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+# The zip's top folder is unversioned. Saves live next to the executable, so extracting an update
+# over the previous install keeps them; a versioned folder would start every update without saves
+# (GitHub #41). The staging root stays versioned so packages of different versions never collide.
+$stageRoot = Join-Path $OutDir "G-Diffuser-v$Version-windows-x64"
+if (Test-Path $stageRoot) { Remove-Item -Recurse -Force $stageRoot }
+$stage = Join-Path $stageRoot "G-Diffuser"
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
 
 # Everything a fresh install needs. gdx-extract and decomp-recipes/ are what turn the user's ROM

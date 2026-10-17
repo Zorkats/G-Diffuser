@@ -808,12 +808,25 @@ def plan_pack(input_dir, rates, known_keys, npred, check_only=False):
     return entries, errors, warnings, reports
 
 
+def raw_wav_hint(pack_path):
+    """Commands that convert an archive of raw WAVs into a sample pack this script can load."""
+    stem = os.path.splitext(os.path.basename(pack_path))[0]
+    return ("hint: the game loads only converted sample entries (audio/sample/<key>), never raw WAVs.\n"
+            "      Extract the WAVs into an empty folder, then pack it (only its top level is read):\n"
+            '        python -m zipfile -e "%s" "%s-wavs"\n'
+            '        python tools/gen_sample_pack.py "%s-wavs" "%s-samples.o2r" --name "%s"\n'
+            '        python tools/gen_sample_pack.py "%s-samples.o2r" --check\n'
+            "      Then copy %s-samples.o2r into mods/ in place of the original.\n"
+            % (pack_path, stem, stem, stem, stem, stem, stem))
+
+
 def check_pack(path, known_keys):
     """Validate an existing .o2r pack without writing. Returns process exit code."""
     if not zipfile.is_zipfile(path):
         sys.stderr.write("error: %s is not a valid .o2r (zip) archive\n" % path)
         return 2
     errors = []
+    raw_wavs = []
     sample_count = 0
     with zipfile.ZipFile(path, "r") as z:
         names = z.namelist()
@@ -821,6 +834,10 @@ def check_pack(path, known_keys):
             errors.append("no workshop.json (pack metadata) at archive root")
         for name in names:
             if name in ("workshop.json", "manifest.json"):
+                continue
+            if name.lower().endswith(KEY_SUFFIX):
+                # Raw WAVs (root or outside audio/sample/) are never loaded; reported once below.
+                raw_wavs.append(name)
                 continue
             if not name.startswith("audio/sample/"):
                 errors.append("%s: not under audio/sample/ (unknown entry)" % name)
@@ -854,12 +871,17 @@ def check_pack(path, known_keys):
             ptype = meta.get("pack_type")
             if ptype is not None and ptype != "sample":
                 errors.append('workshop.json "pack_type" is "%s" (want "sample")' % ptype)
+    if raw_wavs:
+        errors.append("%d raw .wav file(s) in the archive (e.g. %s): the game never loads raw WAVs"
+                      % (len(raw_wavs), raw_wavs[0]))
     print("pack: %s" % path)
     print("  %d sample override(s)" % sample_count)
     if sample_count == 0:
-        errors.append("no sample override entries found — pack overrides nothing")
+        errors.append("no sample override entries found: pack overrides nothing")
     for msg in errors:
         sys.stderr.write("error: %s\n" % msg)
+    if raw_wavs:
+        sys.stderr.write(raw_wav_hint(path))
     if errors:
         print("FAILED: %d problem(s)" % len(errors))
         return 1

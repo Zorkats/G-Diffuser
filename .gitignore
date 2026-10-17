@@ -75,8 +75,8 @@ Thumbs.db
 .idea/
 
 # Internal working notes — local only, not for the repo.
-# docs/ IS tracked: it holds the three documents that ship with a release
-# (ARCHITECTURE.md, DIAGNOSTICS.md, MODDING_GUIDE.md). Everything else --
+# docs/ IS tracked: it holds the documents that ship with a release
+# (ARCHITECTURE.md, DIAGNOSTICS.md, MODDING_GUIDE.md and its modding/ guides). Everything else --
 # scopes, plans, audits, investigation write-ups -- lives in devdocs/.
 devdocs/
 
