@@ -19,6 +19,16 @@
  * escape hatch is a ~40-line x86-64 asm switch behind this same API, with no caller change in
  * n64_sched.c.
  */
+/* ucontext.h functions (getcontext, makecontext, swapcontext) are deprecated on macOS but remain
+   functional and are the only portable POSIX coroutine API. macOS only exposes them with
+   _XOPEN_SOURCE defined, and a feature macro must come before the first header of the translation
+   unit, so this block sits above every #include. Deprecation warnings are suppressed. */
+#ifdef __APPLE__
+#define _XOPEN_SOURCE
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
+
 #include "gdx_fiber.h"
 
 #include <stdlib.h>
@@ -148,3 +158,7 @@ unsigned long gdx_fiber_current_thread_id(void) {
     return (unsigned long) (uintptr_t) pthread_self();
 #endif
 }
+
+#ifdef __APPLE__
+#pragma clang diagnostic pop
+#endif

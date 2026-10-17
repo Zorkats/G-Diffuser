@@ -15,6 +15,10 @@
 #include <unistd.h>   // readlink, access
 #include <sys/stat.h> // mkdir
 #include <cerrno>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>   // _NSGetExecutablePath
+#include <limits.h>        // PATH_MAX
+#endif
 #endif
 
 // Host-side persistence for the game's cart-SRAM save (settings, course/death-race
@@ -154,9 +158,28 @@ static bool gdx_sram_path(char* outPath, size_t outCap) {
     // save is never clobbered.
     if (access(outPath, F_OK) != 0) {
         char exePath[4096];
-        ssize_t n = readlink("/proc/self/exe", exePath, sizeof(exePath) - 1);
-        if (n > 0) {
-            exePath[n] = '\0';
+        bool haveExePath = false;
+#ifdef __APPLE__
+        {
+            uint32_t bufSize = sizeof(exePath);
+            if (_NSGetExecutablePath(exePath, &bufSize) == 0) {
+                char resolved[PATH_MAX];
+                if (realpath(exePath, resolved) != nullptr && strlen(resolved) < sizeof(exePath)) {
+                    strcpy(exePath, resolved);
+                }
+                haveExePath = true;
+            }
+        }
+#else
+        {
+            ssize_t n = readlink("/proc/self/exe", exePath, sizeof(exePath) - 1);
+            if (n > 0) {
+                exePath[n] = '\0';
+                haveExePath = true;
+            }
+        }
+#endif
+        if (haveExePath) {
             char* slash = strrchr(exePath, '/');
             if (slash != nullptr) {
                 slash[1] = '\0'; // keep trailing separator

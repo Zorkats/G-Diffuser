@@ -17,6 +17,13 @@
 #include <atomic>
 #include <dlfcn.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>      // _NSGetExecutablePath, _dyld_get_image_header
+#include <mach-o/loader.h>    // mach_header_64, segment_command_64, LC_SEGMENT_64
+#include <mach/mach.h>        // mach_vm_region, VM_REGION_BASIC_INFO_64
+#include <mach/mach_vm.h>
+#include <limits.h>           // PATH_MAX
+#endif
 #endif
 
 #include "ship/Context.h"
@@ -474,6 +481,24 @@ struct N64FramebufferInfo {
 };
 
 std::vector<HostRange> gHostRanges;
+
+/* The main-executable range (gdx_register_main_module_range) is kept LAST in gHostRanges.
+ * Translation of truncated low32 pointers takes the first registered range whose low32 window
+ * matches, and the executable's window is large (~36 MB) and, on macOS, lands wherever ASLR put
+ * the image this launch. When an asset blob's low32 happened to fall inside it, the executable won
+ * the lookup: display lists resolved into machine code ([gdl-bad], so HUD pieces, boost flames and
+ * the countdown sign silently vanished) and a DMA once wrote into read-only image memory (crash in
+ * GdxSegmentSourceRead). Keeping it last means real asset ranges are always tried first, and the
+ * executable still resolves genuine pointers into its own BSS when nothing else matches. */
+static uintptr_t sGdxExeRangeBegin = 0;
+
+static void GdxAddHostRange(uintptr_t begin, size_t size) {
+    if (sGdxExeRangeBegin != 0 && !gHostRanges.empty() && gHostRanges.back().begin == sGdxExeRangeBegin) {
+        gHostRanges.insert(gHostRanges.end() - 1, HostRange{ begin, size });
+    } else {
+        gHostRanges.push_back(HostRange{ begin, size });
+    }
+}
 std::vector<HostRange> gRawN64Ranges;
 std::vector<HostRange> gHostN64CommandRanges;
 std::vector<HostRange> gHostWideCommandRanges;
@@ -1037,7 +1062,7 @@ uintptr_t EnsureAssetSegmentImage(const AssetSegmentLookup& lookup) {
     if (gSegments[lookup.segment] == 0) {
         gSegments[lookup.segment] = base;
     }
-    gHostRanges.push_back({ base, loaded.bytes.size() });
+    GdxAddHostRange(base, loaded.bytes.size());
     gRawN64Ranges.push_back({ base, loaded.bytes.size() });
     gLoadedAssetSegments.emplace_back(std::move(loaded));
     // A freshly decoded image may rebind a segment or move the targets converted lists resolved
@@ -1865,7 +1890,7 @@ uintptr_t EnsureSetupGfxSegment() {
         const uintptr_t segBase = reinterpret_cast<uintptr_t>(gSetupGfxSegment.data());
         // Registered so RegisteredHostRemaining() treats this as ROM-backed and G_MOVEWORD cannot
         // overwrite gSegments[3] with a garbage arena-buffer address.
-        gHostRanges.push_back({ segBase, gSetupGfxSegment.size() });
+        GdxAddHostRange(segBase, gSetupGfxSegment.size());
         gHostN64CommandRanges.push_back({ segBase, gSetupGfxSegment.size() });
         if (gSegments[3] == 0) {
             gSegments[3] = segBase;
@@ -2008,8 +2033,36 @@ struct MapsRegion {
 static std::vector<MapsRegion> sMaps;               // sorted by begin, readable runs coalesced
 static std::atomic<uint32_t>   sMapsGeneration{0};
 
-static void ParseProcMaps() {
+static void ParseMemoryRegions() {
     std::vector<MapsRegion> parsed;
+
+#ifdef __APPLE__
+    // macOS: enumerate VM regions via mach_vm_region (the Mach kernel equivalent of /proc/self/maps).
+    mach_port_t task = mach_task_self();
+    mach_vm_address_t address = 0;
+    mach_vm_size_t size = 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t infoCount;
+    mach_port_t objectName;
+
+    while (true) {
+        infoCount = VM_REGION_BASIC_INFO_COUNT_64;
+        kern_return_t kr = mach_vm_region(task, &address, &size,
+                                          VM_REGION_BASIC_INFO_64,
+                                          reinterpret_cast<vm_region_info_t>(&info),
+                                          &infoCount, &objectName);
+        if (kr != KERN_SUCCESS) {
+            break;
+        }
+        MapsRegion r;
+        r.begin = static_cast<uintptr_t>(address);
+        r.end   = static_cast<uintptr_t>(address + size);
+        r.readable = (info.protection & VM_PROT_READ) != 0;
+        parsed.push_back(r);
+        address += size;
+    }
+#else
+    // Linux: parse /proc/self/maps.
     FILE* f = std::fopen("/proc/self/maps", "r");
     if (f != nullptr) {
         char line[512];
@@ -2027,6 +2080,7 @@ static void ParseProcMaps() {
         }
         std::fclose(f);
     }
+#endif
 
     std::sort(parsed.begin(), parsed.end(),
               [](const MapsRegion& a, const MapsRegion& b) { return a.begin < b.begin; });
@@ -2065,11 +2119,11 @@ static const MapsRegion* FindMapsRegion(uintptr_t addr) {
 // Copies the region out by value: a subsequent probe can re-parse and reallocate sMaps.
 static bool PosixRegionFor(uintptr_t addr, MapsRegion& out) {
     if (sMaps.empty()) {
-        ParseProcMaps();
+        ParseMemoryRegions();
     }
     const MapsRegion* r = FindMapsRegion(addr);
     if (r == nullptr) {
-        ParseProcMaps(); // one re-parse then re-query
+        ParseMemoryRegions(); // one re-parse then re-query
         r = FindMapsRegion(addr);
     }
     if (r == nullptr) {
@@ -2113,18 +2167,77 @@ void GetMainModuleRange(uintptr_t& moduleBegin, uintptr_t& moduleEnd) {
     const bool haveDl = dladdr(reinterpret_cast<void*>(&GetMainModuleRange), &info) != 0;
 
     char exePath[4096];
-    ssize_t n = readlink("/proc/self/exe", exePath, sizeof(exePath) - 1);
     const char* wantPath = nullptr;
-    if (n > 0) {
-        exePath[n] = '\0';
-        wantPath = exePath;
-    } else if (haveDl && info.dli_fname != nullptr && info.dli_fname[0] != '\0') {
+#ifdef __APPLE__
+    {
+        uint32_t bufSize = sizeof(exePath);
+        if (_NSGetExecutablePath(exePath, &bufSize) == 0) {
+            char resolved[PATH_MAX];
+            if (realpath(exePath, resolved) != nullptr && strlen(resolved) < sizeof(exePath)) {
+                strcpy(exePath, resolved);
+            }
+            wantPath = exePath;
+        }
+    }
+#else
+    {
+        ssize_t n = readlink("/proc/self/exe", exePath, sizeof(exePath) - 1);
+        if (n > 0) {
+            exePath[n] = '\0';
+            wantPath = exePath;
+        }
+    }
+#endif
+    if (wantPath == nullptr && haveDl && info.dli_fname != nullptr && info.dli_fname[0] != '\0') {
         wantPath = info.dli_fname;
     }
     if (wantPath == nullptr) {
         return;
     }
 
+#ifdef __APPLE__
+    // macOS: walk the Mach-O load commands to find the extent of the main executable image.
+    // _dyld_get_image_header(0) is always the main executable.
+    (void)wantPath; // exe path not needed; dyld gives us the image directly.
+    {
+        const struct mach_header_64* header =
+            reinterpret_cast<const struct mach_header_64*>(_dyld_get_image_header(0));
+        if (header != nullptr) {
+            uintptr_t slide = static_cast<uintptr_t>(_dyld_get_image_vmaddr_slide(0));
+            const uint8_t* ptr =
+                reinterpret_cast<const uint8_t*>(header) + sizeof(struct mach_header_64);
+            uintptr_t lo = UINTPTR_MAX, hi = 0;
+            for (uint32_t i = 0; i < header->ncmds; ++i) {
+                const struct load_command* cmd =
+                    reinterpret_cast<const struct load_command*>(ptr);
+                if (cmd->cmd == LC_SEGMENT_64) {
+                    const struct segment_command_64* seg =
+                        reinterpret_cast<const struct segment_command_64*>(ptr);
+                    // Skip __PAGEZERO — it is a 4 GB guard region (vmaddr=0,
+                    // vmsize=0x100000000 on ARM64) that is never mapped as
+                    // readable memory.  Including it pulls moduleBegin down to
+                    // the ASLR slide value (~0x244000), which lets N64 virtual
+                    // addresses in the 0x00–0x10000000 range pass the
+                    // module-range check and get returned as host pointers
+                    // that land inside the guard page → instant SIGSEGV.
+                    if (seg->vmsize > 0 &&
+                        std::strncmp(seg->segname, "__PAGEZERO", 16) != 0) {
+                        uintptr_t segBegin = static_cast<uintptr_t>(seg->vmaddr) + slide;
+                        uintptr_t segEnd   = segBegin + static_cast<uintptr_t>(seg->vmsize);
+                        if (segBegin < lo) lo = segBegin;
+                        if (segEnd   > hi) hi = segEnd;
+                    }
+                }
+                ptr += cmd->cmdsize;
+            }
+            if (lo < hi) {
+                moduleBegin = lo;
+                moduleEnd   = hi;
+            }
+        }
+    }
+    if (moduleBegin == 0 && haveDl && info.dli_fbase != nullptr) {
+#else
     FILE* f = std::fopen("/proc/self/maps", "r");
     if (f == nullptr) {
         return;
@@ -2159,6 +2272,7 @@ void GetMainModuleRange(uintptr_t& moduleBegin, uintptr_t& moduleEnd) {
         moduleBegin = lo;
         moduleEnd = hi;
     } else if (haveDl && info.dli_fbase != nullptr) {
+#endif
         // Pathname match failed (unusual): fall back to the dladdr load base alone. Without an end
         // we cannot bound the module, so leave moduleEnd at 0 -- callers treat {base,0} the same
         // as {0,0} (an empty range), i.e. no worse than the Windows failure path.
@@ -6972,7 +7086,7 @@ class N64DisplayListAdapter {
 
 extern "C" void gdx_register_host_range(void* ptr, size_t size) {
     if ((ptr == nullptr) || (size == 0)) return;
-    gHostRanges.push_back({ reinterpret_cast<uintptr_t>(ptr), size });
+    GdxAddHostRange(reinterpret_cast<uintptr_t>(ptr), size);
 }
 
 extern "C" void gdx_register_host_n64_command_range(void* ptr, size_t size) {
@@ -7639,11 +7753,29 @@ extern "C" void gdx_vi_present_fallback(void) {
     // requires, and every exit below must satisfy it -- including the ones that
     // return before any of this function's own work happens. See
     // GdxBindWindowFramebuffer above for the full chain.
-    GdxBindWindowFramebuffer();
+    //
+    // METAL ENQUEUE-ORDER FIX: GdxBindWindowFramebuffer() used to be called here,
+    // unconditionally creating fb 0's command buffer before anything else. On
+    // Metal, command buffers execute in ENQUEUE order (not commit order). When the
+    // vi-scanout path below later created mGameFb's command buffer, it was
+    // enqueued SECOND -- but fb 0 reads mGameFb's texture (via ImGui composite),
+    // so fb 0 ran before mGameFb had rendered, reading stale/black content and
+    // causing the intro cinematic to flicker. Fix: defer fb 0 creation to each
+    // path that needs it, so the vi-scanout path creates mGameFb FIRST and fb 0
+    // SECOND (correct dependency order). The gHostFrameGfxTaskRan fast path still
+    // binds fb 0 first thing: Run() has already created mGameFb's command buffer
+    // by then, so binding fb 0 there cannot invert the order on Metal, and D3D11
+    // and OpenGL keep the exact behaviour this function was written for.
 
     // A real GFX task already produced this host frame: nothing to do. Clear the
     // flag for the next frame. This is the hot path once gameplay is rendering.
     if (gHostFrameGfxTaskRan) {
+#ifndef __APPLE__
+        // Not on macOS: this runs after the frame's EndFrame there, so binding fb 0 opens a screen
+        // command buffer on the previous drawable. The next frame then composites onto a stale
+        // drawable that is never cleared, and every frame smears into the next (heavy ghosting).
+        GdxBindWindowFramebuffer();
+#endif
         gHostFrameGfxTaskRan = false;
         GdxPresentPathTrace("task-render");
         return;
@@ -7653,6 +7785,7 @@ extern "C" void gdx_vi_present_fallback(void) {
     if (fbAddr == 0) {
         // Traced: this was the one exit with no telemetry at all, which made it
         // invisible in a present-path soak (every other exit reports a path).
+        GdxBindWindowFramebuffer(); // fb 0 needed for ImGui composite
         GdxPresentPathTrace("no-vi-fb");
         return; // No framebuffer has been presented yet.
     }
@@ -7663,6 +7796,7 @@ extern "C" void gdx_vi_present_fallback(void) {
     if (sFallbackWindow == nullptr) {
         auto ctx = Ship::Context::GetInstance();
         if (ctx == nullptr) {
+            GdxBindWindowFramebuffer();
             return;
         }
         auto wnd = ctx->GetWindow();
@@ -7670,14 +7804,17 @@ extern "C" void gdx_vi_present_fallback(void) {
     }
     Fast::Fast3dWindow* fw = sFallbackWindow;
     if (fw == nullptr) {
+        GdxBindWindowFramebuffer();
         return;
     }
     auto interp = fw->GetInterpreterWeak().lock();
     if (!interp) {
+        GdxBindWindowFramebuffer();
         return;
     }
     Fast::GfxRenderingAPI* rapi = interp->GetCurrentRenderingAPI();
     if (rapi == nullptr) {
+        GdxBindWindowFramebuffer();
         return;
     }
 
@@ -7944,7 +8081,8 @@ extern "C" void gdx_register_main_module_range(void) {
         }
     }
 
-    gHostRanges.push_back({ moduleBegin, moduleEnd - moduleBegin });
+    gHostRanges.push_back({ moduleBegin, moduleEnd - moduleBegin }); // must stay last: see GdxAddHostRange
+    sGdxExeRangeBegin = moduleBegin;
     gdx_port_logf("[bridge-init] registered EXE module range: base=%p low32=%08X size=0x%zx\n",
                   reinterpret_cast<void*>(moduleBegin),
                   static_cast<unsigned>(moduleBegin & 0xFFFFFFFFu),
