@@ -89,8 +89,15 @@ jobs:
     with:
       version: ${{ needs.gate.outputs.version }}
 
+  macos:
+    needs: gate
+    if: needs.gate.outputs.build == 'true'
+    uses: ./.github/workflows/release-macos.yml
+    with:
+      version: ${{ needs.gate.outputs.version }}
+
   publish:
-    needs: [gate, windows, linux]
+    needs: [gate, windows, linux, macos]
     runs-on: ubuntu-latest
     # The only job that can write: it moves the `nightly` tag and replaces the release assets.
     permissions:

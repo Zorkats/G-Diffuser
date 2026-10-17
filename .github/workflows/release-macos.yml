@@ -1,0 +1,178 @@
+name: Release (macOS)
+
+# Builds the macOS release tarball and proves it runs on a Mac without Homebrew before anyone can
+# download it. A plain local build links against /opt/homebrew dylibs and starts only on the
+# machine that built it, the same class of defect v1.0.0 shipped on Linux. So the dependencies
+# are built here from pinned sources, linked statically except SDL2, and tools/package_macos.sh
+# refuses a tree that still points outside the system or the bundled lib/ folder.
+#
+# Apple Silicon only. The tarball is published as a workflow artifact, not attached to a release;
+# uploading it stays a manual step. nightly.yml calls this same workflow, so nightlies pass the
+# same dependency check as tagged releases.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_call:
+    inputs:
+      version:
+        description: 'Version for the tarball name, without the leading v'
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version for the tarball name, without the leading v'
+        required: true
+        default: '0.0.0-test'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos-arm64:
+    # Pinned rather than macos-latest, which moves between images: the toolchain that builds a
+    # release should change when we decide it does, not when the runner pool rolls over.
+    runs-on: macos-14
+
+    env:
+      # Read by clang and by every CMake configure below, dependencies and the gdx-extract
+      # ExternalProject included, so nothing in the tree can raise the floor by accident.
+      # 11.0 is the first macOS that runs on Apple Silicon.
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+      # Pinned so a rebuild of the same commit produces the same dependencies. Same versions as
+      # the Linux job, plus the two the Linux job takes from apt.
+      CMAKE_VERSION: '3.31.6'
+      SDL2_VERSION: '2.30.9'
+      TINYXML2_VERSION: '10.0.0'
+      SPDLOG_VERSION: '1.14.1'
+      LIBZIP_VERSION: '1.10.1'
+      GLEW_VERSION: '2.2.0'
+      NLOHMANN_JSON_VERSION: '3.11.3'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python build dependencies
+        # CMake checks for the interpreter but cannot check for modules, so a missing one would
+        # otherwise surface mid-build as a ModuleNotFoundError. Ninja comes from pip too, so
+        # nothing in the build depends on what Homebrew happens to have installed.
+        run: python -m pip install --disable-pip-version-check pyyaml pillow ninja
+
+      - name: Install CMake
+        # The runner's own CMake moves with the image; the Linux job pins the same version.
+        run: |
+          set -eux
+          curl -fsSL -o cmake.tar.gz \
+            "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-macos-universal.tar.gz"
+          mkdir -p "$RUNNER_TEMP/cmake"
+          tar -xzf cmake.tar.gz -C "$RUNNER_TEMP/cmake" --strip-components=1
+          rm cmake.tar.gz
+          echo "$RUNNER_TEMP/cmake/CMake.app/Contents/bin" >> "$GITHUB_PATH"
+
+      - name: Build pinned dependencies
+        # Installed into a private prefix rather than /usr/local, and Homebrew's prefixes are
+        # ignored outright, so the game cannot quietly pick up a runner-provided copy of a
+        # library that no user's Mac has. Everything is static except SDL2, which travels in
+        # lib/ beside the executable for the same reason as on Linux.
+        run: |
+          set -eux
+          deps="$RUNNER_TEMP/deps"
+          echo "GDX_DEPS_PREFIX=$deps" >> "$GITHUB_ENV"
+          common=(-GNinja -DCMAKE_BUILD_TYPE=Release
+                  "-DCMAKE_INSTALL_PREFIX=$deps" "-DCMAKE_PREFIX_PATH=$deps"
+                  "-DCMAKE_IGNORE_PREFIX_PATH=/opt/homebrew;/usr/local")
+          cd "$RUNNER_TEMP"
+
+          curl -fsSL -o sdl2.tar.gz "https://www.libsdl.org/release/SDL2-${SDL2_VERSION}.tar.gz"
+          tar -xzf sdl2.tar.gz
+          cmake -S "SDL2-${SDL2_VERSION}" -B build-sdl2 "${common[@]}" \
+            -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TEST=OFF
+          cmake --build build-sdl2 --target install
+
+          curl -fsSL -o tinyxml2.tar.gz "https://github.com/leethomason/tinyxml2/archive/refs/tags/${TINYXML2_VERSION}.tar.gz"
+          tar -xzf tinyxml2.tar.gz
+          cmake -S "tinyxml2-${TINYXML2_VERSION}" -B build-tinyxml2 "${common[@]}" \
+            -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON -Dtinyxml2_BUILD_TESTING=OFF
+          cmake --build build-tinyxml2 --target install
+
+          # Bundled fmt rather than an external one: nothing in the tree includes fmt directly.
+          curl -fsSL -o spdlog.tar.gz "https://github.com/gabime/spdlog/archive/refs/tags/v${SPDLOG_VERSION}.tar.gz"
+          tar -xzf spdlog.tar.gz
+          cmake -S "spdlog-${SPDLOG_VERSION}" -B build-spdlog "${common[@]}" \
+            -DSPDLOG_BUILD_SHARED=OFF -DSPDLOG_FMT_EXTERNAL=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DSPDLOG_BUILD_EXAMPLE=OFF -DSPDLOG_BUILD_TESTS=OFF
+          cmake --build build-spdlog --target install
+
+          # zlib comes from the macOS SDK, which every Mac carries. Every crypto backend is off,
+          # as on Linux: nothing in the game reads encrypted archives.
+          curl -fsSL -o libzip.tar.gz "https://github.com/nih-at/libzip/archive/refs/tags/v${LIBZIP_VERSION}.tar.gz"
+          tar -xzf libzip.tar.gz
+          cmake -S "libzip-${LIBZIP_VERSION}" -B build-libzip "${common[@]}" \
+            -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DENABLE_BZIP2=OFF -DENABLE_LZMA=OFF -DENABLE_ZSTD=OFF -DENABLE_OPENSSL=OFF \
+            -DENABLE_GNUTLS=OFF -DENABLE_MBEDTLS=OFF -DENABLE_COMMONCRYPTO=OFF \
+            -DBUILD_TOOLS=OFF -DBUILD_REGRESS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_DOC=OFF
+          cmake --build build-libzip --target install
+
+          # libultraship's mac.cmake requires GLEW even though the game renders through Metal.
+          curl -fsSL -o glew.tgz "https://github.com/nigels-com/glew/releases/download/glew-${GLEW_VERSION}/glew-${GLEW_VERSION}.tgz"
+          tar -xzf glew.tgz
+          cmake -S "glew-${GLEW_VERSION}/build/cmake" -B build-glew "${common[@]}" \
+            -DBUILD_SHARED_LIBS=OFF -DBUILD_UTILS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+          cmake --build build-glew --target install
+
+          # Header-only; installed for its CMake package files.
+          curl -fsSL -o json.tar.gz "https://github.com/nlohmann/json/archive/refs/tags/v${NLOHMANN_JSON_VERSION}.tar.gz"
+          tar -xzf json.tar.gz
+          cmake -S "json-${NLOHMANN_JSON_VERSION}" -B build-json "${common[@]}" \
+            -DJSON_BuildTests=OFF -DJSON_Install=ON
+          cmake --build build-json --target install
+
+      - name: Build
+        run: |
+          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release \
+            "-DCMAKE_PREFIX_PATH=$GDX_DEPS_PREFIX" \
+            "-DCMAKE_IGNORE_PREFIX_PATH=/opt/homebrew;/usr/local"
+          cmake --build build --target G-Diffuser
+
+      - name: Resolve version
+        id: version
+        # Through the environment rather than inline, so the dispatch input cannot be read as
+        # shell syntax.
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$REQUESTED_VERSION" ]; then
+            echo "value=$REQUESTED_VERSION" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Package and verify portability
+        # package_macos.sh bundles SDL2 into lib/ and checks every binary's dependencies,
+        # rpath, minimum macOS and signature before it writes the tarball, so a binary that
+        # would fail to start on another Mac fails the build here instead.
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+          GDIFFUSER_MACOS_LIB_PATH: ${{ env.GDX_DEPS_PREFIX }}/lib
+        run: |
+          export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
+          bash tools/package_macos.sh build "$VERSION" dist macos-arm64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: G-Diffuser-v${{ steps.version.outputs.value }}-macos-arm64
+          path: dist/*.tar.gz
+          if-no-files-found: error

@@ -144,8 +144,17 @@ or any rolling distribution. No CPU features beyond the x86-64 baseline are need
 64-bit will do. Libraries that distributions do not reliably ship travel in `lib/` beside the
 executable, so nothing has to be installed first.
 
-**macOS:** built and tested on Apple Silicon (M1). Intel Macs are untested. There is no
-prebuilt release yet; build from source (see [Building](#macos)).
+**macOS:** Apple Silicon only, tested on an M1; Intel Macs are untested. The nightly release
+carries a `macos-arm64` tarball for macOS 11 or newer, with SDL2 in `lib/` beside the executable
+so nothing has to be installed first. The build is not signed with an Apple Developer ID, so
+macOS blocks the first launch. Allow it once under **System Settings > Privacy & Security**, or
+clear the download flag from Terminal:
+
+```sh
+xattr -dr com.apple.quarantine G-Diffuser
+```
+
+You can also build from source (see [Building](#macos)).
 
 ## Custom Assets
 
