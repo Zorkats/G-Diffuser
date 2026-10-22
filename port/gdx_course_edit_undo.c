@@ -19,6 +19,7 @@
 #include "global.h"
 #include "fzx_expansion_kit.h"
 #include "fzx_course.h"
+#include "gdx_course_branch_edit.h"
 #include "gdx_course_edit_input.h"
 #include "gdx_course_edit_undo.h"
 
@@ -66,6 +67,7 @@ typedef struct GdxCourseEditUndoSnapshot {
     unsigned char segments[sizeof(unk_807B3C20)];
     unsigned char courseData[sizeof(CourseData)];
     unsigned char activePoint[sizeof(s32)];
+    unsigned char branch[GDX_BRANCH_EDIT_STATE_BYTES]; // fork set and path view (gdx_course_branch_edit.c)
 } GdxCourseEditUndoSnapshot;
 
 typedef struct GdxCourseEditUndoSlot {
@@ -189,7 +191,7 @@ static const char* const kPointLabelName[] = {
     "Add point", "Move start", "Center course", "Reverse course", "Clear course",
 };
 static const char* const kDesignLabelName[] = {
-    "Road", "High rails", "No rails", "Tunnel", "Pipe", "Half pipe", "Cylinder", "Gap", "Loop", "Split",
+    "Road", "High rails", "No rails", "Tunnel", "Pipe", "Half pipe", "Cylinder", "Gap", "Loop", "Insert", "Split", "Link",
 };
 static const char* const kPartsLabelName[] = {
     "Energy patch", "Dash plate", "Dirt patch", "Ice patch", "Jump plate", "Trap", "Gate", "Building", "Sign",
@@ -290,6 +292,7 @@ static void snapshot_from_live(GdxCourseEditUndoSnapshot* snap) {
     memcpy(snap->segments, &D_802CB6D0, sizeof(snap->segments));
     memcpy(snap->courseData, &COURSE_CONTEXT()->courseData, sizeof(snap->courseData));
     memcpy(snap->activePoint, &D_800D6CA0.unk_0C, sizeof(snap->activePoint));
+    gdx_branch_edit_state_save(snap->branch);
 }
 
 static void snapshot_from_backup(GdxCourseEditUndoSnapshot* snap) {
@@ -298,6 +301,7 @@ static void snapshot_from_backup(GdxCourseEditUndoSnapshot* snap) {
     memcpy(snap->segments, &D_807B6528, sizeof(snap->segments));
     memcpy(snap->courseData, &D_8010CF50, sizeof(snap->courseData));
     memcpy(snap->activePoint, &D_xk2_80119800, sizeof(snap->activePoint));
+    gdx_branch_edit_backup_save(snap->branch);
 }
 
 static void snapshot_to_backup(const GdxCourseEditUndoSnapshot* snap) {
@@ -306,6 +310,7 @@ static void snapshot_to_backup(const GdxCourseEditUndoSnapshot* snap) {
     memcpy(&D_807B6528, snap->segments, sizeof(snap->segments));
     memcpy(&D_8010CF50, snap->courseData, sizeof(snap->courseData));
     memcpy(&D_xk2_80119800, snap->activePoint, sizeof(snap->activePoint));
+    gdx_branch_edit_backup_load(snap->branch);
 }
 
 static int snapshot_matches_live(const GdxCourseEditUndoSnapshot* snap) {
@@ -322,6 +327,9 @@ static int snapshot_matches_live(const GdxCourseEditUndoSnapshot* snap) {
         return 0;
     }
     if (memcmp(snap->activePoint, &D_800D6CA0.unk_0C, sizeof(snap->activePoint)) != 0) {
+        return 0;
+    }
+    if (!gdx_branch_edit_state_equal(snap->branch)) {
         return 0;
     }
     return 1;
@@ -617,7 +625,7 @@ int gdx_course_edit_undo_row_points(int row) {
 
 const char* gdx_course_edit_undo_label_text(int label) {
     static const char* const kLabelText[GDX_COURSE_EDIT_UNDO_LABEL_COUNT] = {
-        "Edit", "Select", "Move", "Delete", "Line up", "Split", "Option", "Test run", "Load course",
+        "Edit", "Select", "Move", "Delete", "Line up", "Insert", "Split", "Link", "Option", "Test run", "Load course",
     };
 
     if (label < 0 || label >= GDX_COURSE_EDIT_UNDO_LABEL_COUNT) {

@@ -69,6 +69,16 @@ enum GdxPerfSub {
 void gdx_perf_sub_begin(int id);
 void gdx_perf_sub_end(int id);
 
+// Event counters, reported as totals per summary window. Thread-safe and cheap enough to call
+// whether or not telemetry is enabled; counts from before enabling are discarded.
+enum GdxPerfCount {
+    GDX_PERF_COUNT_MAPS_REPARSE = 0, // POSIX memory-map snapshot parses (a full /proc/self/maps read)
+    GDX_PERF_COUNT_MAPS_UNMAPPED,    // snapshot misses answered as unmapped without a re-parse
+    GDX_PERF_COUNT_COUNT
+};
+
+void gdx_perf_count(int id);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

@@ -15,7 +15,7 @@
 //
 //   3. Flash message (GdxCourseEditFlashMessage). gdx_course_edit_mouse.cpp calls it when the line-up
 //      pre-check refuses, and course_edit/188850.c calls it through gdx_course_edit_flash_message when
-//      a Split is refused, so the reason is shown next to the strip.
+//      an Insert, Split or Link is refused, so the reason is shown next to the strip.
 //
 // The editor gate (CourseEditEditorActive and CourseEditMouseInSubMenu) sits in an anonymous namespace
 // in gdx_course_edit_mouse.cpp, so the subset this file needs is rebuilt from the exported natives in
@@ -174,10 +174,22 @@ void DrawSegmentLines(int createOption) {
         ImGui::TextDisabled("Clicks away from the track do nothing");
         return;
     }
-    if (gDesignStyleOption == 9 /* TRACK_DESIGN_STYLE_SPLIT */) {
-        ImGui::TextColored(title, "Split");
+    if (gDesignStyleOption == 9 /* TRACK_DESIGN_STYLE_INSERT */) {
+        ImGui::TextColored(title, "Insert");
         ImGui::TextUnformatted("Click a segment: add a point halfway along it");
         ImGui::TextDisabled("Not the start segment. Up to 60 points");
+        return;
+    }
+    if (gDesignStyleOption == 10 /* TRACK_DESIGN_STYLE_SPLIT */) {
+        ImGui::TextColored(title, "Split");
+        ImGui::TextUnformatted("Click a segment: fork it into path A and path B");
+        ImGui::TextDisabled("Split again on a fork to switch between path A and path B");
+        return;
+    }
+    if (gDesignStyleOption == 11 /* TRACK_DESIGN_STYLE_LINK */) {
+        ImGui::TextColored(title, "Link");
+        ImGui::TextUnformatted("Choose first node: click a segment of a fork");
+        ImGui::TextDisabled("Then click the point where path B rejoins");
         return;
     }
     ImGui::TextColored(title, "Design");
@@ -220,7 +232,7 @@ void GdxCourseEditFlashMessage(const char* text) {
     sFlashUntil = std::chrono::steady_clock::now() + kFlashDuration;
 }
 
-// C entry for the decomp (course_edit/188850.c), which reports Split refusals through the strip.
+// C entry for the decomp (course_edit/188850.c), which reports Insert, Split and Link refusals through the strip.
 extern "C" void gdx_course_edit_flash_message(const char* text) {
     GdxCourseEditFlashMessage(text);
 }
@@ -344,10 +356,17 @@ void GdxCourseEditDrawControlsHelp(void) {
     HelpRow("Left-click the track",
             "Picks the segment under the cursor and applies the selected design or part to it. A click away from "
             "the track does nothing. Z still picks a segment without applying");
-    HelpRow("Left-click a segment (Split design)",
+    HelpRow("Left-click a segment (Insert design)",
             "Adds a point halfway along the segment. Refused, with the reason in the hint strip, on the start "
             "segment, under 4 or at 60 points, on a track at the length limit, or when a neighbour would be under "
             "498 units away");
+    HelpRow("Left-click a segment (Split design)",
+            "Forks the segment into two paths, one point each, on either side of the road. Insert inside a split "
+            "fork adds a point to both paths. Split again on a fork to switch the editor between path A and path B: "
+            "the tools then edit the path that is showing. Up to 4 forks, not on the start or last segment");
+    HelpRow("Left-click twice (Link design)",
+            "Choose first node: click a segment of a fork. Then click the point where its path B rejoins the "
+            "course. Refused with \"Travel path broken\" when the path cannot rejoin there");
 
     HelpSection("Tools");
     for (int i = 1; i <= kToolCount; i++) {

@@ -35,6 +35,7 @@
 #include "gdx_firstboot.h"
 #include "gdx_firstboot_gui.h"
 #include "gdx_fps_overlay.h"
+#include "gdx_update_ui.h"
 #include "gdx_perf.h"
 #include "gdx_dev_gates.h"
 #include "gdx_extract_launch.h"
@@ -1174,6 +1175,8 @@ int main(int argc, char** argv) {
         pgui->AddGuiWindow(std::make_shared<GdxHackModsWindow>("gEnhancements.Hacks.WindowOpen", "ROM Hacks"));
         pgui->AddGuiWindow(std::make_shared<GdxInputViewer>());
         pgui->AddGuiWindow(std::make_shared<GdxFpsOverlay>());
+        pgui->AddGuiWindow(std::make_shared<GdxUpdateNotice>());
+        GdxUpdateBoot();
         extern std::shared_ptr<Ship::GuiWindow> GdxCreateCourseEditDeleteOverlay(void);
         pgui->AddGuiWindow(GdxCreateCourseEditDeleteOverlay());
 

@@ -2417,6 +2417,8 @@ void GdxMenu::DrawDevGates() {
 #endif
 static constexpr const char* kGdxVersionString = GDX_VERSION_STRING;
 
+#include "gdx_update_ui.h"
+
 void GdxMenu::DrawAboutMenu() {
     // Lazy one-shot load on first open rather than at boot: the About page is visited rarely, and a
     // failed load (an archive predating the branding entry) must degrade to the text title rather
@@ -2450,6 +2452,9 @@ void GdxMenu::DrawAboutMenu() {
     }
     ImGui::Text("Version %s", kGdxVersionString);
     ImGui::TextDisabled("A native PC source port of F-Zero X (N64) + Expansion Kit (64DD)");
+
+    ImGui::Separator();
+    GdxUpdateDrawAboutSection();
 
     ImGui::Separator();
 
