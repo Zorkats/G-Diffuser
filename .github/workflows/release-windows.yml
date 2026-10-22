@@ -7,13 +7,10 @@ name: Release (Windows)
 # by hand; tools/check_windows_deps.py now reads the import table instead of trusting memory.
 #
 # Kept separate from the Linux workflow so one platform failing never blocks the other. The zip
-# is published as a workflow artifact; attaching it to a release stays a manual step. nightly.yml
-# calls this same workflow, so nightlies pass the same dependency check as tagged releases.
+# is published as a workflow artifact. release.yml (a v* tag) and nightly.yml call this same
+# workflow and attach the artifacts to their release, so both pass the same dependency check.
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_call:
     inputs:
       version:
@@ -63,6 +60,25 @@ jobs:
           key: vcpkg-windows-2022-${{ hashFiles('libultraship/cmake/dependencies/windows-vcpkg.cmake') }}
           restore-keys: vcpkg-windows-2022-
 
+      - name: Resolve version
+        id: version
+        # Resolved before the build: the version, channel and commit are compiled in for the update
+        # check (port/gdx_update.cpp). A nightly version carries "-nightly."; a v* tag push is
+        # stable; anything else, such as a manual test run, is dev and never offers updates.
+        # Through the environment rather than inline, so the dispatch input cannot be read as
+        # shell syntax.
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          $value = $env:REQUESTED_VERSION
+          if (-not $value) { $value = "$env:GITHUB_REF_NAME" -replace '^v', '' }
+          if ($value -like '*-nightly.*') { $channel = 'nightly' }
+          elseif ($env:GITHUB_REF_TYPE -eq 'tag') { $channel = 'stable' }
+          else { $channel = 'dev' }
+          "value=$value" >> $env:GITHUB_OUTPUT
+          "channel=$channel" >> $env:GITHUB_OUTPUT
+          "commit=$($env:GITHUB_SHA.Substring(0, 7))" >> $env:GITHUB_OUTPUT
+
       - name: Build
         # USE_AUTO_VCPKG lets libultraship bootstrap vcpkg into the build tree. --config Release
         # is required: the Visual Studio generator is multi-config and ignores CMAKE_BUILD_TYPE.
@@ -72,20 +88,14 @@ jobs:
         # can see -- which has none of the modules, so the build gets all the way to a linked
         # executable before a POST_BUILD generator dies on ModuleNotFoundError. setup-python
         # exports Python3_ROOT_DIR, but CMake reads that as a CMake variable, not an env one.
-        run: |
-          cmake -S . -B build/x64 -DUSE_AUTO_VCPKG=ON "-DPython3_EXECUTABLE=$env:pythonLocation\python.exe"
-          cmake --build build/x64 --config Release --target G-Diffuser
-
-      - name: Resolve version
-        id: version
-        # Through the environment rather than inline, so the dispatch input cannot be read as
-        # shell syntax.
         env:
-          REQUESTED_VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.version.outputs.value }}
+          CHANNEL: ${{ steps.version.outputs.channel }}
+          COMMIT: ${{ steps.version.outputs.commit }}
         run: |
-          $value = $env:REQUESTED_VERSION
-          if (-not $value) { $value = "$env:GITHUB_REF_NAME" -replace '^v', '' }
-          "value=$value" >> $env:GITHUB_OUTPUT
+          cmake -S . -B build/x64 -DUSE_AUTO_VCPKG=ON "-DPython3_EXECUTABLE=$env:pythonLocation\python.exe" `
+            "-DGDX_DISPLAY_VERSION=$env:VERSION" "-DGDX_BUILD_CHANNEL=$env:CHANNEL" "-DGDX_BUILD_COMMIT=$env:COMMIT"
+          cmake --build build/x64 --config Release --target G-Diffuser
 
       - name: Package and verify dependencies
         env:

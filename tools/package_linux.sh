@@ -43,9 +43,11 @@ mkdir -p "$stage"
 
 # Everything a fresh install needs. gdx-extract and decomp-recipes/ are what turn the user's
 # ROM into generic.o2r on first boot; without them the game starts and then has no assets.
+# gdx-update is the helper that replaces the build later, so it ships with what it updates.
 payload=(
     G-Diffuser
     gdx-extract
+    gdx-update
     gdiffuser.o2r
     gamecontrollerdb.txt
     fonts
@@ -62,18 +64,18 @@ for item in "${payload[@]}"; do
     fi
     cp -r "$binary_dir/$item" "$stage/"
 done
-chmod +x "$stage/G-Diffuser" "$stage/gdx-extract"
+chmod +x "$stage/G-Diffuser" "$stage/gdx-extract" "$stage/gdx-update"
 
 mkdir -p "$stage/lib"
 mapfile -t bundle < <(python3 "$repo_root/tools/check_linux_abi.py" --list-unbundled \
-    "$stage/G-Diffuser" "$stage/gdx-extract")
+    "$stage/G-Diffuser" "$stage/gdx-extract" "$stage/gdx-update")
 for soname in "${bundle[@]}"; do
     # ldd resolves through the same search path the loader would use, so this picks up the
     # versions actually linked against rather than whatever else is installed. Requiring an
     # absolute path skips the "=> not found" lines, which would otherwise yield the word "not".
     # awk must NOT exit on the first match: with pipefail, closing the pipe early makes ldd die
     # of SIGPIPE and the whole script aborts with 141 on hosts where the match lands early.
-    resolved=$(ldd "$stage/G-Diffuser" "$stage/gdx-extract" \
+    resolved=$(ldd "$stage/G-Diffuser" "$stage/gdx-extract" "$stage/gdx-update" \
         | awk -v want="$soname" '$1 == want && $3 ~ /^\// && !found { print $3; found=1 }')
     if [ -z "$resolved" ] || [ ! -e "$resolved" ]; then
         echo "error: cannot locate $soname to bundle it" >&2
@@ -87,7 +89,7 @@ rmdir "$stage/lib" 2>/dev/null || true
 lib_args=()
 [ -d "$stage/lib" ] && lib_args=(--lib-dir "$stage/lib")
 python3 "$repo_root/tools/check_linux_abi.py" "${lib_args[@]}" \
-    "$stage/G-Diffuser" "$stage/gdx-extract"
+    "$stage/G-Diffuser" "$stage/gdx-extract" "$stage/gdx-update"
 
 # Fixed ownership and sorted order so the same tree always produces the same tarball,
 # matching the determinism the asset extractor already guarantees.

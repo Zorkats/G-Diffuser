@@ -127,6 +127,9 @@ jobs:
             echo "::error::No packages were downloaded for $VERSION."
             exit 1
           fi
+          # The in-game updater refuses any download it cannot check against this file.
+          (cd dist && sha256sum -- *.zip *.tar.gz) > dist/SHA256SUMS
+          assets+=(dist/SHA256SUMS)
 
           previous="$(git rev-parse -q --verify 'refs/tags/nightly^{commit}' || true)"
           {

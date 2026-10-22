@@ -6,14 +6,11 @@ name: Release (macOS)
 # are built here from pinned sources, linked statically except SDL2, and tools/package_macos.sh
 # refuses a tree that still points outside the system or the bundled lib/ folder.
 #
-# Apple Silicon only. The tarball is published as a workflow artifact, not attached to a release;
-# uploading it stays a manual step. nightly.yml calls this same workflow, so nightlies pass the
-# same dependency check as tagged releases.
+# Apple Silicon only. The tarball is published as a workflow artifact. release.yml (a v* tag) and
+# nightly.yml call this same workflow and attach the artifacts to their release, so tagged releases
+# and nightlies pass the same dependency check.
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_call:
     inputs:
       version:
@@ -140,25 +137,40 @@ jobs:
             -DJSON_BuildTests=OFF -DJSON_Install=ON
           cmake --build build-json --target install
 
-      - name: Build
-        run: |
-          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release \
-            "-DCMAKE_PREFIX_PATH=$GDX_DEPS_PREFIX" \
-            "-DCMAKE_IGNORE_PREFIX_PATH=/opt/homebrew;/usr/local"
-          cmake --build build --target G-Diffuser
-
       - name: Resolve version
         id: version
+        # Resolved before the build: the version, channel and commit are compiled in for the update
+        # check (port/gdx_update.cpp). A nightly version carries "-nightly."; a v* tag push is
+        # stable; anything else, such as a manual test run, is dev and never offers updates.
         # Through the environment rather than inline, so the dispatch input cannot be read as
         # shell syntax.
         env:
           REQUESTED_VERSION: ${{ inputs.version }}
         run: |
           if [ -n "$REQUESTED_VERSION" ]; then
-            echo "value=$REQUESTED_VERSION" >> "$GITHUB_OUTPUT"
+            value="$REQUESTED_VERSION"
           else
-            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+            value="${GITHUB_REF_NAME#v}"
           fi
+          case "$value" in
+            *-nightly.*) channel=nightly ;;
+            *) if [ "$GITHUB_REF_TYPE" = tag ]; then channel=stable; else channel=dev; fi ;;
+          esac
+          echo "value=$value" >> "$GITHUB_OUTPUT"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "commit=$(printf '%s' "$GITHUB_SHA" | cut -c1-7)" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+          CHANNEL: ${{ steps.version.outputs.channel }}
+          COMMIT: ${{ steps.version.outputs.commit }}
+        run: |
+          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release \
+            "-DCMAKE_PREFIX_PATH=$GDX_DEPS_PREFIX" \
+            "-DCMAKE_IGNORE_PREFIX_PATH=/opt/homebrew;/usr/local" \
+            "-DGDX_DISPLAY_VERSION=$VERSION" "-DGDX_BUILD_CHANNEL=$CHANNEL" "-DGDX_BUILD_COMMIT=$COMMIT"
+          cmake --build build --target G-Diffuser
 
       - name: Package and verify portability
         # package_macos.sh bundles SDL2 into lib/ and checks every binary's dependencies,
