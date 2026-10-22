@@ -154,6 +154,36 @@ def read_records(path):
     return records
 
 
+def content_digest(path):
+    """SHA-256 over the archive's CONTENTS, independent of the order they are stored in.
+
+    The archive SHA-256 is the strongest gate there is, but it only holds where the
+    extractor was built the same way. Torch writes some entries by iterating an
+    unordered_map (Companion::gCompanionFiles), whose traversal order is
+    implementation-defined, so a future standard-library/toolchain combination may
+    lay the same assets down in a different order. Current desktop and pinned Android
+    builds are both byte-reproducible and use the stronger container SHA-256 gate.
+
+    This is the order-independent equivalent: one record per central-directory entry,
+    carrying the name, the CRC-32 the zip already stores, and the uncompressed size,
+    sorted so the storage order cannot matter. It proves the same thing the byte gate
+    proved about CONTENT and completeness -- every expected asset is present and its
+    bytes hash to the expected value -- and drops only the claim about container layout,
+    which is the part that legitimately varies.
+
+    Dup-inclusive, like record_count: sorting a list of formatted records keeps
+    duplicates rather than collapsing them.
+    """
+    lines = sorted(
+        ("%s\n%08x\n%d\n" % (e.name, e.crc, e.size)).encode("utf-8")
+        for e in read_records(path)
+    )
+    h = hashlib.sha256()
+    for line in lines:
+        h.update(line)
+    return h.hexdigest()
+
+
 def record_count(path):
     """Number of central-directory records (the C3 entry count, dup-inclusive)."""
     with zipfile.ZipFile(path) as z:

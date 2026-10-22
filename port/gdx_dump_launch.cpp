@@ -10,6 +10,10 @@
 #include "gdx_dump_launch.h"
 #include "port_log.h"
 
+#ifdef __ANDROID__
+#include "android/gdx_android_paths.h"
+#endif
+
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -81,6 +85,10 @@ fs::path exeDir() {
     if (n > 0 && n < MAX_PATH) {
         return fs::path(buf).parent_path();
     }
+#elif defined(__ANDROID__)
+    // /proc/self/exe names the zygote here, not this library; the app's files directory is what
+    // stands in for the install directory. See port/android/gdx_android_paths.h.
+    return fs::path(gdx_android_files_dir());
 #else
     char buf[4096];
 #ifdef __APPLE__

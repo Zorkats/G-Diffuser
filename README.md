@@ -4,8 +4,8 @@
 
 **A native PC port of F-Zero X (N64), including 64DD Expansion Kit support.**
 
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-blue)](#platforms)
-[![Renderer](https://img.shields.io/badge/renderer-D3D11%20%7C%20OpenGL%20%7C%20Metal-8A2BE2)](#platforms)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20Android-blue)](#platforms)
+[![Renderer](https://img.shields.io/badge/renderer-D3D11%20%7C%20OpenGL%20%7C%20Metal%20%7C%20OpenGL%20ES-8A2BE2)](#platforms)
 [![Built on](https://img.shields.io/badge/built%20on-libultraship-informational)](https://github.com/Kenix3/libultraship)
 [![Decomp](https://img.shields.io/badge/decomp-inspectredc%2Ffzerox-brightgreen)](https://github.com/inspectredc/fzerox)
 [![Discord](https://img.shields.io/badge/Discord-https%3A%2F%2Fdiscord.gg%2FgpaM8qK9NK-informational?style=flat)](https://discord.gg/gpaM8qK9NK)
@@ -136,8 +136,17 @@ controller-navigation toggle.
 | **Windows** | Direct3D 11 |
 | **Linux** | OpenGL (SDL2) |
 | **macOS** (Apple Silicon) | Metal |
+| **Android** | OpenGL ES 3.0 |
 
-All three targets are driven by libultraship's Fast3D renderer.
+All targets are driven by libultraship's Fast3D renderer.
+
+**Android requirements:** Android 7.0 or newer, arm64, and OpenGL ES 3.0 — which covers
+essentially every device sold since 2019. Your three dumps are imported through the system file
+picker on first run and the archives are built on the device; nothing is bundled with the APK.
+The on-screen pad appears as an ordinary SDL controller, so it can be remapped in-game like a
+physical one, and a Bluetooth or USB controller works with no setup. See
+[docs/ANDROID.md](docs/ANDROID.md) for the full picture, including what had to differ under the
+hood.
 
 **Linux requirements:** glibc 2.35 or newer — Ubuntu 22.04+, Debian 12+, Fedora 36+, SteamOS 3,
 or any rolling distribution. No CPU features beyond the x86-64 baseline are needed, so anything
@@ -248,6 +257,18 @@ cmake --build build/macos --target G-Diffuser -j$(sysctl -n hw.ncpu)
 ```
 
 The game renders through Metal. The executable lands in `build/macos/port/`.
+
+### Android
+
+```sh
+android/gradlew -p android assembleDebug
+```
+
+Needs a JDK between 17 and 25 (Android Studio's own is fine), the Android SDK 36 and NDK
+30.0.15729638, CMake 3.30.3 from the SDK manager, and the same Python 3 with PyYAML and Pillow
+the other platforms need. The APK lands in
+`android/app/build/outputs/apk/debug/`. Full details, including release signing, are in
+[docs/ANDROID.md](docs/ANDROID.md).
 
 ### Expansion Kit build
 
