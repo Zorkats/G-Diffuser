@@ -5,6 +5,7 @@
 #include "port_log.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -53,6 +54,9 @@ struct PerfState {
     // Guarded by mtx: the audio thread writes at ~200 Hz.
     std::mutex mtx;
     std::vector<double> audioTicks;
+
+    // Written from any thread; drained by the summary.
+    std::atomic<uint32_t> counts[GDX_PERF_COUNT_COUNT]{};
 };
 
 // Clamped at 0 in case a seam's wall-clock straddles the phase boundary by a hair.
@@ -122,6 +126,9 @@ void emitSummary(PerfState& s) {
     }
     const double logicMean = subLogicMs(s.phaseAccumMs[PerfGameTick] / n, subMean);
 
+    const uint32_t mapsReparse = s.counts[GDX_PERF_COUNT_MAPS_REPARSE].exchange(0, std::memory_order_relaxed);
+    const uint32_t mapsUnmapped = s.counts[GDX_PERF_COUNT_MAPS_UNMAPPED].exchange(0, std::memory_order_relaxed);
+
     // run[...] is the breakdown INSIDE run, not extra time on top of it. Read it per TICK, not per
     // pass: each term is already summed over the M sub-frames the tick presented, which is the
     // number that has to fit in the 16.68 ms budget.
@@ -129,7 +136,7 @@ void emitSummary(PerfState& s) {
                   "spikes=%d | mean: %s| sub: logic=%.2f xlate=%.2f run=%.2f mirror=%.2f "
                   "| run[gui=%.2f sframe=%.2f irun=%.2f eframe=%.2f] "
                   "| gfxrun=%.2f bridge=%.2f decomp=%.2f setup=%.2f post=%.2f fbmirror=%.2f "
-                  "| audio p95=%.2fms max=%.2fms\n",
+                  "| audio p95=%.2fms max=%.2fms | maps[reparse=%u unmapped=%u]\n",
                   totals.size(), p50, p95, p99, mx, s.spikeCount, phases, logicMean,
                   subMean[GDX_PERF_SUB_XLATE], subMean[GDX_PERF_SUB_RUN], subMean[GDX_PERF_SUB_MIRROR],
                   subMean[GDX_PERF_SUB_GUI], subMean[GDX_PERF_SUB_SFRAME], subMean[GDX_PERF_SUB_IRUN],
@@ -139,7 +146,7 @@ void emitSummary(PerfState& s) {
                   subMean[GDX_PERF_SUB_GFXRUN] - subMean[GDX_PERF_SUB_XLATE] - subMean[GDX_PERF_SUB_RUN],
                   (s.phaseAccumMs[PerfGameTick] / n) - subMean[GDX_PERF_SUB_GFXRUN],
                   subMean[GDX_PERF_SUB_SETUP], subMean[GDX_PERF_SUB_POST],
-                  subMean[GDX_PERF_SUB_FBMIRROR], aP95, aMax);
+                  subMean[GDX_PERF_SUB_FBMIRROR], aP95, aMax, mapsReparse, mapsUnmapped);
 
     s.frameTotals.clear();
     s.spikeCount = 0;
@@ -163,6 +170,10 @@ void PerfFrameBegin() {
     if (s.enabled && !wasEnabled) {
         gdx_port_logf("[GDX perf] telemetry enabled (spike threshold %.0f ms, summary every %d frames)\n",
                       kSpikeThresholdMs, kSummaryWindowFrames);
+        // Counts gathered while disabled would inflate the first window.
+        for (std::atomic<uint32_t>& count : s.counts) {
+            count.store(0, std::memory_order_relaxed);
+        }
     }
     if (!s.enabled) {
         return;
@@ -261,4 +272,11 @@ extern "C" void gdx_perf_sub_end(int id) {
         return;
     }
     s.subMs[id] += gdx::toMs(gdx::Clock::now() - s.subStart[id]);
+}
+
+extern "C" void gdx_perf_count(int id) {
+    if (id < 0 || id >= GDX_PERF_COUNT_COUNT) {
+        return;
+    }
+    gdx::state().counts[id].fetch_add(1, std::memory_order_relaxed);
 }

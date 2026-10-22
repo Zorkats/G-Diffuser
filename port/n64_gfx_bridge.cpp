@@ -15,8 +15,12 @@
 /* POSIX memory-probe backend: /proc/self/maps snapshot helpers plus the #else branches of
  * GetMainModuleRange / ReadableByteLimit / ReadableCommandLimit / IsReadableAddress. */
 #include <atomic>
+#include <cerrno>
 #include <dlfcn.h>
 #include <unistd.h>
+#ifndef __APPLE__
+#include <sys/mman.h>         // mincore
+#endif
 #ifdef __APPLE__
 #include <mach-o/dyld.h>      // _NSGetExecutablePath, _dyld_get_image_header
 #include <mach-o/loader.h>    // mach_header_64, segment_command_64, LC_SEGMENT_64
@@ -2098,6 +2102,41 @@ static void ParseMemoryRegions() {
 
     sMaps.swap(coalesced);
     sMapsGeneration.fetch_add(1, std::memory_order_relaxed);
+    gdx_perf_count(GDX_PERF_COUNT_MAPS_REPARSE);
+}
+
+// True when no mapping covers addr, answered with one syscall instead of a full re-parse. Many
+// probes are fall-through attempts that are expected to fail (segment-table and low32 candidates),
+// and a /proc/self/maps re-parse per such miss scales with the process's mapping count: suspected
+// cause of 20-90 ms translation ticks on Linux 1.1.0. Only a mapped page, i.e. a region created
+// after the snapshot, still needs the re-parse.
+static bool PosixAddressIsUnmapped(uintptr_t addr) {
+#ifdef __APPLE__
+    mach_vm_address_t regionAddress = static_cast<mach_vm_address_t>(addr);
+    mach_vm_size_t regionSize = 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t infoCount = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t objectName;
+    const kern_return_t kr = mach_vm_region(mach_task_self(), &regionAddress, &regionSize,
+                                            VM_REGION_BASIC_INFO_64,
+                                            reinterpret_cast<vm_region_info_t>(&info),
+                                            &infoCount, &objectName);
+    // mach_vm_region reports the region holding addr, or the next one above it.
+    if (kr == KERN_INVALID_ADDRESS) {
+        return true;
+    }
+    return (kr == KERN_SUCCESS) && (regionAddress > addr);
+#else
+    static const uintptr_t pageSize = [] {
+        const long size = sysconf(_SC_PAGESIZE);
+        return static_cast<uintptr_t>(size > 0 ? size : 4096);
+    }();
+    unsigned char residency = 0;
+    void* page = reinterpret_cast<void*>(addr & ~(pageSize - 1));
+    // mincore never faults: it fails with ENOMEM when the range holds unmapped memory. Any other
+    // failure is inconclusive and falls back to the re-parse.
+    return (mincore(page, pageSize, &residency) != 0) && (errno == ENOMEM);
+#endif
 }
 
 static const MapsRegion* FindMapsRegion(uintptr_t addr) {
@@ -2123,6 +2162,18 @@ static bool PosixRegionFor(uintptr_t addr, MapsRegion& out) {
     }
     const MapsRegion* r = FindMapsRegion(addr);
     if (r == nullptr) {
+        if (PosixAddressIsUnmapped(addr)) {
+            gdx_perf_count(GDX_PERF_COUNT_MAPS_UNMAPPED);
+            return false;
+        }
+        // Mapped but absent from the snapshot: a region created since the last parse. Steady-state
+        // translation should not get here every tick, so the first few are named.
+        static int sMappedMissLogs = 0;
+        if (sMappedMissLogs < 8) {
+            ++sMappedMissLogs;
+            gdx_port_logf("[maps] snapshot miss at %p is mapped; re-parsing (%zu regions)\n",
+                          reinterpret_cast<void*>(addr), sMaps.size());
+        }
         ParseMemoryRegions(); // one re-parse then re-query
         r = FindMapsRegion(addr);
     }
@@ -2339,8 +2390,23 @@ size_t ReadableByteLimit(uintptr_t address) {
         }
         const uintptr_t end = region.end;
 #else
+        /* The snapshot already coalesces touching readable runs, so every step after the first
+           lands on a gap or an unreadable region. A gap is a snapshot miss, and PosixRegionFor
+           can answer a miss with a full maps re-parse: doing that on every call cost ~100 ms of
+           translation per frame on Linux. Continuation steps query the snapshot only. */
         MapsRegion r;
-        if (!PosixRegionFor(cursor, r) || !r.readable || cursor >= r.end) {
+        if (i == 0) {
+            if (!PosixRegionFor(cursor, r)) {
+                break;
+            }
+        } else {
+            const MapsRegion* next = FindMapsRegion(cursor);
+            if (next == nullptr) {
+                break;
+            }
+            r = *next;
+        }
+        if (!r.readable || cursor >= r.end) {
             break;
         }
         const uintptr_t end = r.end;

@@ -8,6 +8,21 @@ endif()
 set(DECOMP "${CMAKE_CURRENT_SOURCE_DIR}/../decomp")
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 set(GDX_DISPLAY_VERSION "1.1.0" CACHE STRING "Version shown in the About menu")
+# The release workflows pass the channel and commit; a local build stays "dev", which never
+# offers updates (gdx_update.cpp).
+set(GDX_BUILD_CHANNEL "dev" CACHE STRING "Update channel: stable, nightly or dev")
+set(GDX_BUILD_COMMIT "" CACHE STRING "Short commit hash of this build")
+set(GDX_BUILD_DEFS
+    GDX_VERSION_STRING="${GDX_DISPLAY_VERSION}"
+    GDX_BUILD_CHANNEL="${GDX_BUILD_CHANNEL}"
+    GDX_BUILD_COMMIT="${GDX_BUILD_COMMIT}")
+# Test only: the release JSON URL the update check asks instead of GitHub, so the updater can be run
+# end to end against a local https server. The release workflows never set it.
+set(GDX_UPDATE_TEST_API_URL "" CACHE STRING "Test only: release JSON URL for the update check")
+if(GDX_UPDATE_TEST_API_URL)
+    message(WARNING "GDX_UPDATE_TEST_API_URL is set: this build checks ${GDX_UPDATE_TEST_API_URL} for updates")
+    list(APPEND GDX_BUILD_DEFS GDX_UPDATE_TEST_API_URL="${GDX_UPDATE_TEST_API_URL}")
+endif()
 
 # Warning flags for the port's own targets under GCC/Clang; the decomp library and vendored cxd4
 # stay -w (not ours to fix). No -Werror: a Linux first-configure should surface warnings, not fail.
@@ -136,6 +151,8 @@ list(FILTER GAME_SOURCES EXCLUDE REGEX "/sys/cartridge_offsets\\.c$")
 
 add_library(gdiffuser_game OBJECT ${GAME_SOURCES}
     "${CMAKE_CURRENT_SOURCE_DIR}/decomp_port.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_branch.c"       # Course Edit forks: race runtime (ring 2)
+    "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_branch_editor.c" # Course Edit forks: editor hooks and tools
     "${CMAKE_CURRENT_SOURCE_DIR}/n64_sched.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/n64_vi.c"
     "${DECOMP}/src/libultra/io/devmgr.c"                  # outside the glob: PORT PI manager, host-backed DMA completion
@@ -159,6 +176,8 @@ if(GDX_EXPANSION_KIT)
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_native.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_undo.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_split_tex.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_insert_tex.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_link_tex.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/n64_leo.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gen/EkAssetBindings.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gen/EkLinkStubs.c"
@@ -261,6 +280,9 @@ add_subdirectory(third_party/lua EXCLUDE_FROM_ALL)
 # Ogg Vorbis, FLAC and WAV decoders for the streamed BGM replacement (gdx_music_stream.cpp).
 add_subdirectory(third_party/music_decoders EXCLUDE_FROM_ALL)
 
+# gdx-update, the self-update helper both game executables ship beside them.
+add_subdirectory(updater)
+
 add_executable(G-Diffuser
     main.cpp
     gdx_discord.cpp
@@ -321,6 +343,11 @@ add_executable(G-Diffuser
                                    # staging (op slot 30 in decomp/src/sys/disk/75000.c)
     gdx_content_pack.cpp           # .gdxp share packages: zip of a .gdxc, its sidecars and songs
     gdx_course_registry.c          # Course Edit element registry + GXE1 sidecar codec (pure C)
+    gdx_course_branch_format.c     # Course forks: GdxBranchSet model, GXB1 block and GBS1 file (pure C)
+    gdx_course_branch_view.c       # Course forks: the active set in plain types for global.h code
+    gdx_course_branch_edit.c       # Course forks: editor fork set, path B view swap, undo state (pure C)
+    gdx_update.cpp                 # Update check, verified download, and the gdx-update handoff
+    gdx_update_ui.cpp              # Launch update check, update notice, About page Updates block
     gdx_rom_courses.c              # W2 ROM course table reader; converts ROM courses (including
                                    # FZEP hack courses) into CRSD payloads for the same import chain
     gdx_mfs_image.c                # A2 read-only MFS over foreign .ndd/.ram images; feeds the
@@ -373,7 +400,7 @@ endif()
 target_compile_definitions(G-Diffuser PRIVATE
     ${GDX_DEV_TOOLS_DEFS}
     ${GDX_JP_INPUT_DEFS}
-    GDX_VERSION_STRING="${GDX_DISPLAY_VERSION}")
+    ${GDX_BUILD_DEFS})
 
 if(APPLE)
     # Objective-C++ source for macOS-native UI (NSOpenPanel file picker, NSAlert dialogs).
@@ -564,7 +591,16 @@ target_include_directories(G-Diffuser PRIVATE
     "${DECOMP}/include"
     "${DECOMP}/src"
     "${CMAKE_CURRENT_SOURCE_DIR}/../torch/lib/libmio0"  # mio0.h + utils.h for mio0_wrap.c and mio0.c
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/discord-rpc/thirdparty"  # rapidjson for gdx_update.cpp
 )
+
+# Ship gdx-update beside the game; the release workflows build only the G-Diffuser target.
+add_dependencies(G-Diffuser gdx-update)
+add_custom_command(TARGET G-Diffuser POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:gdx-update>"
+            "$<TARGET_FILE_DIR:G-Diffuser>/gdx-update${CMAKE_EXECUTABLE_SUFFIX}"
+    VERBATIM)
 
 target_link_libraries(G-Diffuser PRIVATE cxd4_rsp)
 target_link_libraries(G-Diffuser PRIVATE discord-rpc)
@@ -572,8 +608,9 @@ target_link_libraries(G-Diffuser PRIVATE gdx_lua)
 target_link_libraries(G-Diffuser PRIVATE gdx_music_decoders)
 
 if(WIN32)
-    # user32: MessageBox; Comdlg32: ROM picker; Comctl32: extraction progress marquee.
-    target_link_libraries(G-Diffuser PRIVATE user32 Comdlg32 Comctl32)
+    # user32: MessageBox; Comdlg32: ROM picker; Comctl32: extraction progress marquee;
+    # winhttp: the update check and download.
+    target_link_libraries(G-Diffuser PRIVATE user32 Comdlg32 Comctl32 winhttp)
 else()
     # pthread for the fiber backend + audio thread; dl for dladdr in n64_gfx_bridge.cpp
     # (needed on older glibc, harmless on newer).
@@ -726,6 +763,52 @@ if(MSVC)
 elseif(GDX_PORT_WARN_FLAGS)
     target_compile_options(gdx_course_registry_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
 endif()
+
+# Course forks: GdxBranchSet validation, index shifting, GXB1 and GBS1 codecs. Standalone pure C
+# (reuses the CRC-32 in gdx_course_registry.c).
+add_executable(gdx_course_branch_format_tests
+    tests/gdx_course_branch_format_tests.c
+    gdx_course_branch_format.c
+    gdx_course_registry.c)
+if(MSVC)
+    target_compile_options(gdx_course_branch_format_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_course_branch_format_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+
+# Course fork editing: split, link, ring hooks, path B view swap and undo state. Standalone pure C.
+add_executable(gdx_course_branch_edit_tests
+    tests/gdx_course_branch_edit_tests.c
+    gdx_course_branch_edit.c
+    gdx_course_branch_format.c
+    gdx_course_registry.c)
+if(MSVC)
+    target_compile_options(gdx_course_branch_edit_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_course_branch_edit_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+
+# Updater: version compare, SUMS parsing and SHA-256 in gdx_update.cpp, built without libultraship.
+add_executable(gdx_update_tests
+    tests/gdx_update_tests.cpp
+    gdx_update.cpp)
+target_compile_definitions(gdx_update_tests PRIVATE
+    GDX_UPDATE_TESTS_STANDALONE=1
+    GDX_VERSION_STRING="1.1.0" GDX_BUILD_CHANNEL="dev" GDX_BUILD_COMMIT="")
+target_include_directories(gdx_update_tests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/discord-rpc/thirdparty")
+if(WIN32)
+    target_link_libraries(gdx_update_tests PRIVATE winhttp)
+else()
+    target_link_libraries(gdx_update_tests PRIVATE ${CMAKE_DL_LIBS})
+endif()
+
+# gdx-update core: path checks, payload list, ustar parser and the swap plan (no libzip or zlib).
+add_executable(gdx_update_apply_tests
+    tests/gdx_update_apply_tests.cpp
+    updater/gdx_update_apply.cpp)
+target_include_directories(gdx_update_apply_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/updater")
 
 # Composed Expansion Kit names and number badges: standalone pure C.
 add_executable(gdx_ek_text_tests
@@ -975,6 +1058,8 @@ if(GDX_BUILD_JP)
     # binding/stub files differ.
     add_library(gdiffuser_game_jp OBJECT ${GAME_SOURCES}
         "${CMAKE_CURRENT_SOURCE_DIR}/decomp_port.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_branch.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_branch_editor.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/n64_sched.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/n64_vi.c"
         "${DECOMP}/src/libultra/io/devmgr.c"
@@ -987,6 +1072,8 @@ if(GDX_BUILD_JP)
             "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_native.c"
             "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_undo.c"
             "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_split_tex.c"
+            "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_insert_tex.c"
+            "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_link_tex.c"
             "${CMAKE_CURRENT_SOURCE_DIR}/n64_leo.c"
             "${CMAKE_CURRENT_SOURCE_DIR}/gen/EkAssetBindings.c"   # US-EK bindings reused; jp/ek TODO
             "${CMAKE_CURRENT_SOURCE_DIR}/gen/EkLinkStubs.c"
@@ -1086,6 +1173,11 @@ if(GDX_BUILD_JP)
         gdx_content_import.c
         gdx_content_pack.cpp
         gdx_course_registry.c
+        gdx_course_branch_format.c
+        gdx_course_branch_view.c
+        gdx_course_branch_edit.c
+        gdx_update.cpp
+        gdx_update_ui.cpp
         gdx_rom_courses.c
         gdx_mfs_image.c
         gdx_hackmods.cpp
@@ -1122,7 +1214,7 @@ if(GDX_BUILD_JP)
         ${GDX_DEV_TOOLS_DEFS}
         PORT=1 GDIFFUSER_PORT=1 F3DEX_GBI_2=1 _LANGUAGE_C=1 VERSION_JP=1
         GDX_ALLOW_JP_INPUTS=1
-        GDX_VERSION_STRING="${GDX_DISPLAY_VERSION}"
+        ${GDX_BUILD_DEFS}
         ASSET_VERSION=jp ASSET_REVISION=rev0)
 
     if(GDX_EXPANSION_KIT)
@@ -1151,7 +1243,8 @@ if(GDX_BUILD_JP)
         "${DECOMP}/include"
         "${DECOMP}/src"
         "${CMAKE_CURRENT_SOURCE_DIR}/../include"
-        "${CMAKE_CURRENT_SOURCE_DIR}/../torch/lib/libmio0")
+        "${CMAKE_CURRENT_SOURCE_DIR}/../torch/lib/libmio0"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/discord-rpc/thirdparty")
 
     target_link_libraries(G-Diffuser-JP PRIVATE cxd4_rsp)
     target_link_libraries(G-Diffuser-JP PRIVATE discord-rpc)
@@ -1159,7 +1252,7 @@ if(GDX_BUILD_JP)
     target_link_libraries(G-Diffuser-JP PRIVATE gdx_music_decoders)
 
     if(WIN32)
-        target_link_libraries(G-Diffuser-JP PRIVATE user32 Comdlg32 Comctl32)
+        target_link_libraries(G-Diffuser-JP PRIVATE user32 Comdlg32 Comctl32 winhttp)
     else()
         find_package(Threads REQUIRED)
         target_link_libraries(G-Diffuser-JP PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
@@ -1197,10 +1290,11 @@ if(GDX_BUILD_JP)
 
     # Deploy engine archive + extractor + recipe tree (US rev0 AND JP rev0 so one binary can
     # build either profile's archive).
-    add_dependencies(G-Diffuser-JP gdiffuser_engine_o2r gdx_extract_ext)
+    add_dependencies(G-Diffuser-JP gdiffuser_engine_o2r gdx_extract_ext gdx-update)
     add_custom_command(TARGET G-Diffuser-JP POST_BUILD
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${GDIFFUSER_ENGINE_O2R}" "$<TARGET_FILE_DIR:G-Diffuser-JP>/gdiffuser.o2r"
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${GDX_EXTRACT_EXE}" "$<TARGET_FILE_DIR:G-Diffuser-JP>/gdx-extract${CMAKE_EXECUTABLE_SUFFIX}"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:gdx-update>" "$<TARGET_FILE_DIR:G-Diffuser-JP>/gdx-update${CMAKE_EXECUTABLE_SUFFIX}"
         VERBATIM)
     add_custom_command(TARGET G-Diffuser-JP POST_BUILD
         COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:G-Diffuser-JP>/decomp-recipes/assets/yaml/us"
