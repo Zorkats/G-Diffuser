@@ -222,7 +222,6 @@ static void load_rom_next_to_exe(void) {
         return;
     }
     slash[1] = '\0'; // keep trailing separator
-#endif
 
     const char* candidates[] = {
         "baserom.us.rev0.z64",
