@@ -38,10 +38,12 @@ $stage = Join-Path $stageRoot "G-Diffuser"
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
 
 # Everything a fresh install needs. gdx-extract and decomp-recipes/ are what turn the user's ROM
-# into generic.o2r on first boot; without them the game starts and then has no assets.
+# into generic.o2r on first boot; without them the game starts and then has no assets. gdx-update is
+# the helper that replaces the build later, so it has to ship with the thing it updates.
 $payload = @(
     "G-Diffuser.exe",
     "gdx-extract.exe",
+    "gdx-update.exe",
     "gdiffuser.o2r",
     "gamecontrollerdb.txt",
     "fonts",
@@ -60,7 +62,7 @@ foreach ($item in $payload) {
 }
 
 python (Join-Path $repoRoot "tools\check_windows_deps.py") `
-    (Join-Path $stage "G-Diffuser.exe") (Join-Path $stage "gdx-extract.exe")
+    (Join-Path $stage "G-Diffuser.exe") (Join-Path $stage "gdx-extract.exe") (Join-Path $stage "gdx-update.exe")
 if ($LASTEXITCODE -ne 0) {
     Write-Error "packaging refused: the executables are not self-contained"
 }

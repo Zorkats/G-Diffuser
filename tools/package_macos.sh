@@ -62,9 +62,11 @@ mkdir -p "$stage"
 
 # Everything a fresh install needs. gdx-extract and decomp-recipes/ are what turn the user's
 # ROM into generic.o2r on first boot; without them the game starts and then has no assets.
+# gdx-update is the helper that replaces the build later, so it ships with what it updates.
 payload=(
     G-Diffuser
     gdx-extract
+    gdx-update
     gdiffuser.o2r
     gamecontrollerdb.txt
     fonts
@@ -81,9 +83,9 @@ for item in "${payload[@]}"; do
     fi
     cp -R "$binary_dir/$item" "$stage/"
 done
-chmod +x "$stage/G-Diffuser" "$stage/gdx-extract"
+chmod +x "$stage/G-Diffuser" "$stage/gdx-extract" "$stage/gdx-update"
 
-executables=("$stage/G-Diffuser" "$stage/gdx-extract")
+executables=("$stage/G-Diffuser" "$stage/gdx-extract" "$stage/gdx-update")
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
 

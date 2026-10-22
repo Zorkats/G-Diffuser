@@ -1,0 +1,93 @@
+name: Release
+
+# A v* tag push builds every platform and opens a draft GitHub release with the packages and the
+# SHA256SUMS the in-game updater checks every download against. Publishing the draft stays a human
+# step: until then the release is invisible to players and to the update check.
+#
+# The builds are the release workflows themselves, called rather than copied, the same way
+# nightly.yml does it. Nothing is drafted unless every platform built.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+    steps:
+      - name: Resolve version
+        id: version
+        run: echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+  windows:
+    needs: gate
+    uses: ./.github/workflows/release-windows.yml
+    with:
+      version: ${{ needs.gate.outputs.version }}
+
+  linux:
+    needs: gate
+    uses: ./.github/workflows/release-linux.yml
+    with:
+      version: ${{ needs.gate.outputs.version }}
+
+  macos:
+    needs: gate
+    uses: ./.github/workflows/release-macos.yml
+    with:
+      version: ${{ needs.gate.outputs.version }}
+
+  draft:
+    needs: [gate, windows, linux, macos]
+    runs-on: ubuntu-latest
+    # The only job that can write: it creates the draft release and uploads its assets.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: G-Diffuser-v${{ needs.gate.outputs.version }}-*
+          path: dist
+          merge-multiple: true
+
+      - name: Draft the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          assets=(dist/*.zip dist/*.tar.gz)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "::error::No packages were downloaded for $VERSION."
+            exit 1
+          fi
+          # The in-game updater refuses any download it cannot check against this file.
+          (cd dist && sha256sum -- *.zip *.tar.gz) > dist/SHA256SUMS
+          assets+=(dist/SHA256SUMS)
+
+          # A release candidate stays a prerelease, which the stable update check never offers.
+          flags=(--draft --verify-tag)
+          case "$VERSION" in
+            *-*) flags+=(--prerelease) ;;
+          esac
+
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            # A rerun of the same tag: replace the assets, keep the notes someone may have edited.
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" "${flags[@]}" \
+              --title "G-Diffuser $VERSION" --generate-notes
+          fi

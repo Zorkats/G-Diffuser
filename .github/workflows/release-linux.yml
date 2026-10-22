@@ -5,14 +5,11 @@ name: Release (Linux)
 # were invisible on the build machine, so the build environment is pinned here rather than
 # inherited: see tools/check_linux_abi.py for what is enforced and why.
 #
-# The tarball is published as a workflow artifact, not attached to the release. Uploading it
-# to a release stays a manual step. nightly.yml calls this same workflow, so nightlies pass the
-# same portability check as tagged releases.
+# The tarball is published as a workflow artifact. release.yml (a v* tag) and nightly.yml call this
+# same workflow and attach the artifacts to their release, so tagged releases and nightlies pass the
+# same portability check.
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_call:
     inputs:
       version:
@@ -127,23 +124,38 @@ jobs:
           cmake --build build-libzip --target install
           ldconfig
 
-      - name: Build
-        run: |
-          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --target G-Diffuser
-
       - name: Resolve version
         id: version
+        # Resolved before the build: the version, channel and commit are compiled in for the update
+        # check (port/gdx_update.cpp). A nightly version carries "-nightly."; a v* tag push is
+        # stable; anything else, such as a manual test run, is dev and never offers updates.
         # Through the environment rather than inline, so the dispatch input cannot be read as
         # shell syntax.
         env:
           REQUESTED_VERSION: ${{ inputs.version }}
         run: |
           if [ -n "$REQUESTED_VERSION" ]; then
-            echo "value=$REQUESTED_VERSION" >> "$GITHUB_OUTPUT"
+            value="$REQUESTED_VERSION"
           else
-            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+            value="${GITHUB_REF_NAME#v}"
           fi
+          case "$value" in
+            *-nightly.*) channel=nightly ;;
+            *) if [ "$GITHUB_REF_TYPE" = tag ]; then channel=stable; else channel=dev; fi ;;
+          esac
+          echo "value=$value" >> "$GITHUB_OUTPUT"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "commit=$(printf '%s' "$GITHUB_SHA" | cut -c1-7)" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+          CHANNEL: ${{ steps.version.outputs.channel }}
+          COMMIT: ${{ steps.version.outputs.commit }}
+        run: |
+          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release \
+            "-DGDX_DISPLAY_VERSION=$VERSION" "-DGDX_BUILD_CHANNEL=$CHANNEL" "-DGDX_BUILD_COMMIT=$COMMIT"
+          cmake --build build --target G-Diffuser
 
       - name: Package and verify portability
         # package_linux.sh runs check_linux_abi.py before it writes the tarball, so a binary
@@ -251,23 +263,38 @@ jobs:
           cmake --build build-libzip --target install
           ldconfig
 
-      - name: Build
-        run: |
-          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --target G-Diffuser
-
       - name: Resolve version
         id: version
+        # Resolved before the build: the version, channel and commit are compiled in for the update
+        # check (port/gdx_update.cpp). A nightly version carries "-nightly."; a v* tag push is
+        # stable; anything else, such as a manual test run, is dev and never offers updates.
         # Through the environment rather than inline, so the dispatch input cannot be read as
         # shell syntax.
         env:
           REQUESTED_VERSION: ${{ inputs.version }}
         run: |
           if [ -n "$REQUESTED_VERSION" ]; then
-            echo "value=$REQUESTED_VERSION" >> "$GITHUB_OUTPUT"
+            value="$REQUESTED_VERSION"
           else
-            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+            value="${GITHUB_REF_NAME#v}"
           fi
+          case "$value" in
+            *-nightly.*) channel=nightly ;;
+            *) if [ "$GITHUB_REF_TYPE" = tag ]; then channel=stable; else channel=dev; fi ;;
+          esac
+          echo "value=$value" >> "$GITHUB_OUTPUT"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "commit=$(printf '%s' "$GITHUB_SHA" | cut -c1-7)" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+          CHANNEL: ${{ steps.version.outputs.channel }}
+          COMMIT: ${{ steps.version.outputs.commit }}
+        run: |
+          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release \
+            "-DGDX_DISPLAY_VERSION=$VERSION" "-DGDX_BUILD_CHANNEL=$CHANNEL" "-DGDX_BUILD_COMMIT=$COMMIT"
+          cmake --build build --target G-Diffuser
 
       - name: Package and verify portability
         # package_linux.sh runs check_linux_abi.py before it writes the tarball, so a binary
