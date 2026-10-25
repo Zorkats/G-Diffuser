@@ -485,17 +485,18 @@ void GdxContentWindow::DrawElement() {
         ImGui::TextDisabled("No tracks or machines on the disk yet.");
         ImGui::TextWrapped("Save a course in Course Edit or a machine in Create Machine, then refresh.");
     } else {
-        // Card grid: 3 columns, wrapping. Each card is a fixed-width child.
-        const float totalW    = ImGui::GetContentRegionAvail().x;
-        const int   gridCols  = 3;
-        const float gapX      = ImGui::GetStyle().ItemSpacing.x;
-        const float fileCardW = (totalW - gapX * (gridCols - 1)) / gridCols;
+        const int   gridCols = 6;
         const float fileCardH = 90.0f;
 
         // Scrolling region for the grid.
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
         if (ImGui::BeginChild("LibraryGrid", ImVec2(0.0f, 280.0f), ImGuiChildFlags_None,
                               ImGuiWindowFlags_None)) {
+            // Compute card width INSIDE the child so it uses the child's actual content width
+            // (which is narrower than the parent when a vertical scrollbar is present).
+            const float gapX      = st.ItemSpacing.x;
+            const float gapY      = st.ItemSpacing.y;
+            const float fileCardW = (ImGui::GetContentRegionAvail().x - gapX * (gridCols - 1)) / gridCols;
             int visibleCol = 0;
             for (int i = 0; i < mEntryCount; i++) {
                 GdxContentEntry& entry = mEntries[i];
@@ -513,10 +514,6 @@ void GdxContentWindow::DrawElement() {
                     }
                 }
 
-                if (visibleCol % gridCols != 0) {
-                    ImGui::SameLine(0.0f, gapX);
-                }
-
                 ImGui::PushID(i);
 
                 // Is this card the currently-selected picker track?
@@ -530,45 +527,63 @@ void GdxContentWindow::DrawElement() {
                     }
                 }
 
-                // Card border: blue = selected (being placed), gold = already in deck.
+                // Dimming: unselected, non-deck cards fade to ~15% opacity to recede visually.
+                // Selected (being placed) and in-deck cards render at full opacity.
+                const bool prominent = isSelected || inSlot >= 0;
+                const float dimAlpha = prominent ? 1.0f : 0.15f;
+
+                // Card border colour.
                 ImVec4 fcBorder = st.Colors[ImGuiCol_Border];
+                fcBorder.w *= dimAlpha;
                 if (isSelected) {
-                    fcBorder = ImVec4(0.25f, 0.55f, 1.0f, 1.0f);   // blue — currently selected
+                    fcBorder = ImVec4(0.25f, 0.55f, 1.0f, 1.0f);   // blue — selected
                 } else if (inSlot >= 0) {
-                    fcBorder = ImVec4(0.75f, 0.65f, 0.15f, 0.70f); // gold dim — in deck already
+                    fcBorder = ImVec4(0.75f, 0.65f, 0.15f, 0.70f); // gold — in deck
                 }
+
+                // Card background.
                 ImVec4 fcBg = st.Colors[ImGuiCol_FrameBg];
                 if (isSelected) {
-                    fcBg = ImVec4(0.12f, 0.22f, 0.42f, 1.0f); // blue tint
+                    fcBg = ImVec4(0.12f, 0.22f, 0.42f, 1.0f);
+                } else {
+                    fcBg.w *= dimAlpha;
+                }
+
+                // Place cards side-by-side; SameLine for every card after the first in a row.
+                if (visibleCol % gridCols != 0) {
+                    ImGui::SameLine(0.0f, gapX);
                 }
 
                 ImGui::PushStyleColor(ImGuiCol_Border,  fcBorder);
                 ImGui::PushStyleColor(ImGuiCol_ChildBg, fcBg);
                 ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 5.0f);
 
-                bool cardBodyClicked = false;
-                if (ImGui::BeginChild("##fc", ImVec2(fileCardW, fileCardH), ImGuiChildFlags_Borders,
+                bool cardClicked = false;
+                bool cardHovered = false;
+                if (ImGui::BeginChild("##fc", ImVec2(fileCardW, fileCardH),
+                                      ImGuiChildFlags_Borders,
                                       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
                     char title[GDX_COURSE_TITLE_MAX + 1];
                     const bool hasTitle = SessionTitle(entry.name, entry.extension, title, sizeof(title));
-                    const char* displayName = hasTitle ? title : (entry.name[0] != '\0' ? entry.name : "(unnamed)");
+                    const char* displayName = hasTitle ? title
+                                            : (entry.name[0] != '\0' ? entry.name : "(unnamed)");
 
-                    // Main name line
-                    ImGui::TextUnformatted(displayName);
-                    if (hasTitle) {
-                        ImGui::SameLine();
-                        ImGui::TextDisabled("(%s)", entry.name);
+                    // Name line.
+                    if (isSelected) {
+                        ImGui::TextColored(ImVec4(0.55f, 0.80f, 1.0f, 1.0f), "%s", displayName);
+                    } else {
+                        ImGui::TextUnformatted(displayName);
                     }
 
-                    // Type + "in slot N" badge
+                    // Type + slot badge.
                     if (inSlot >= 0) {
                         ImGui::TextColored(ImVec4(0.85f, 0.72f, 0.20f, 1.0f),
-                                           "%s  \xe2\x80\xa2 Slot %d", GdxContentTypeLabel(entry), inSlot + 1);
+                                           "%s \xe2\x80\xa2 Slot %d", GdxContentTypeLabel(entry), inSlot + 1);
                     } else {
                         ImGui::TextDisabled("%s", GdxContentTypeLabel(entry));
                     }
 
-                    // Action row: Export | Add to Cup (for editable tracks)
+                    // Export button.
                     ImGui::BeginDisabled(busy);
                     if (ImGui::SmallButton(ICON_FA_UPLOAD " Export")) {
                         char path[1024];
@@ -581,44 +596,28 @@ void GdxContentWindow::DrawElement() {
                                      gdx_content_error_string(rc));
                         }
                     }
-                    if (editableTrack) {
-                        ImGui::SameLine();
-                        // Toggle selection — clicking the selected card deselects it.
-                        if (isSelected) {
-                            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.25f, 0.45f, 0.85f, 1.0f));
-                        }
-                        if (ImGui::SmallButton(isSelected ? ICON_FA_CHECK " Selected" : ICON_FA_PLUS " Add to Cup")) {
-                            if (isSelected) {
-                                mCupPickerTrack = -1;
-                                mCupArmedSlot = -1;
-                                mCupArmedUnregister = -1;
-                            } else {
-                                mCupPickerTrack = i;
-                                mCupArmedSlot = -1;
-                                mCupArmedUnregister = -1;
-                                RefreshCupSlots();
-                            }
-                        }
-                        if (isSelected) {
-                            ImGui::PopStyleColor();
-                        }
-                    }
                     ImGui::EndDisabled();
 
-                    // Invisible full-card click area to also select (for the card body, not buttons)
+                    // Full-card invisible click target layered on top (drawn last so buttons above
+                    // still receive their own clicks first via ImGui's last-item priority).
                     ImGui::SetCursorPos(ImVec2(0.0f, 0.0f));
                     ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1,1,1,0.04f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1,1,1,0.08f));
-                    cardBodyClicked = ImGui::InvisibleButton("##card", ImVec2(fileCardW, fileCardH));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1,1,1,0.06f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1,1,1,0.10f));
+                    ImGui::InvisibleButton("##hit", ImVec2(fileCardW, fileCardH));
+                    cardClicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
+                    cardHovered = ImGui::IsItemHovered();
                     ImGui::PopStyleColor(3);
                 }
                 ImGui::EndChild();
-                ImGui::PopStyleVar();
-                ImGui::PopStyleColor(2);
+                // IsItemHovered on the child itself — covers the whole card including the border.
+                cardHovered = cardHovered || ImGui::IsItemHovered();
 
-                // Card body click selects (or deselects) the track as the cup picker.
-                if (cardBodyClicked && editableTrack) {
+                ImGui::PopStyleVar();    // FrameRounding
+                ImGui::PopStyleColor(2); // Border, ChildBg
+
+                // Card click: toggle selection for cup assignment (editable tracks only).
+                if (cardClicked && editableTrack) {
                     if (mCupPickerTrack == i) {
                         mCupPickerTrack = -1;
                         mCupArmedSlot = -1;
@@ -629,6 +628,13 @@ void GdxContentWindow::DrawElement() {
                         mCupArmedUnregister = -1;
                         RefreshCupSlots();
                     }
+                }
+
+                // Tooltip for non-editable entries.
+                if (cardHovered && !editableTrack) {
+                    ImGui::BeginTooltip();
+                    ImGui::TextDisabled("Machines and locked tracks cannot be added to the Edit Cup.");
+                    ImGui::EndTooltip();
                 }
 
                 ImGui::PopID();
