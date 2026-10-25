@@ -370,7 +370,7 @@ void GdxContentWindow::DrawElement() {
         // The whole card is a clickable child region.
         bool cardClicked = false;
         ImGui::PushStyleColor(ImGuiCol_ChildBg, bgCol);
-        if (ImGui::BeginChild("##slot", cardSize, ImGuiChildFlags_Borders)) {
+        if (ImGui::BeginChild("##slot", cardSize, ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
             // Slot label (top-left, small/muted)
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.60f, 0.65f, 1.0f));
             ImGui::TextUnformatted(slot == 0 ? "Slot 1" : slot == 1 ? "Slot 2" :
