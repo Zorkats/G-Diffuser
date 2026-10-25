@@ -35,7 +35,6 @@ class GdxContentWindow : public Ship::GuiWindow {
     int RefreshLibrary();
     void RefreshImports();
     void RefreshCupSlots();
-    void DrawCupPicker(bool busy, bool inGameplay);
     void DrawImportSection(bool busy, bool inGameplay);
     void OpenDiskImage(const char* path);
     void CloseDiskImage();
@@ -86,4 +85,7 @@ class GdxContentWindow : public Ship::GuiWindow {
     double mNextAutoRefresh = 0.0;
     double mAutoRefreshDeadline = 0.0;
     char mStatus[512] = {};
+    // UX: search filter for the local-files table; help section toggle.
+    char mFilterBuf[128] = {};
+    bool mHelpOpen = false;
 };
