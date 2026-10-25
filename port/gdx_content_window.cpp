@@ -298,12 +298,10 @@ void GdxContentWindow::DrawElement() {
 
     // ── Edit Cup Deck — 6-slot card grid (3 × 2) ────────────────────────────────────────────────
     //
-    // Interaction model (Clash Royale-style):
-    //   • Select a track from the library grid below (sets mCupPickerTrack).
-    //   • The deck shows which slot already holds it (green border).
-    //   • Clicking an empty slot: registers in one click.
-    //   • Clicking an occupied slot: arms it for a confirm click (R6).
-    //   • Clicking the armed slot again: confirms overwrite.
+    // Interaction model: select a track then a slot, or select a slot then a track.
+    //   • Clicking an empty slot with a track selected registers in one click.
+    //   • Clicking an occupied slot with a track selected arms it for confirmation.
+    //   • Clicking the armed slot again confirms overwrite.
     //   • The × button on an occupied card: unregister (same two-click rule).
     ImGui::Separator();
     ImGui::TextUnformatted("Edit Cup");
@@ -313,6 +311,9 @@ void GdxContentWindow::DrawElement() {
         const bool hasSelTitle = SessionTitle(sel.name, sel.extension, selTitle, sizeof(selTitle));
         ImGui::SameLine();
         ImGui::TextDisabled("— click a slot to place  \"%s\"", hasSelTitle ? selTitle : sel.name);
+    } else if (mCupPickerSlot >= 0 && mCupPickerSlot < GDX_CONTENT_CUP_SLOT_COUNT) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("— choose a track for Slot %d", mCupPickerSlot + 1);
     }
 
     const ImGuiStyle& st = ImGui::GetStyle();
@@ -344,21 +345,26 @@ void GdxContentWindow::DrawElement() {
         const bool isSelectedTrack = occupied && mCupPickerTrack >= 0 &&
                                      mCupPickerTrack < mEntryCount &&
                                      strcmp(occupant, mEntries[mCupPickerTrack].name) == 0;
+        const bool isSelectedSlot   = mCupPickerSlot == slot;
         const bool isArmedSlot     = mCupArmedSlot == slot;
         const bool isArmedUnreg    = mCupArmedUnregister == slot;
 
-        // Card border colour: gold = already holds the selected track, amber = armed for confirm,
-        // default = normal border.
+        // Card border colour: gold = already holds the selected track, blue = selected destination,
+        // amber = armed for confirm, default = normal border.
         ImVec4 borderCol = st.Colors[ImGuiCol_Border];
         if (isSelectedTrack) {
             borderCol = ImVec4(0.95f, 0.80f, 0.20f, 1.0f); // gold — "already in deck"
+        } else if (isSelectedSlot) {
+            borderCol = ImVec4(0.25f, 0.55f, 1.0f, 1.0f);  // blue — selected destination
         } else if (isArmedSlot || isArmedUnreg) {
             borderCol = ImVec4(1.0f, 0.45f, 0.15f, 1.0f);  // amber — awaiting confirm
         }
 
         // Card background: slightly lighter when a picker track is active and this slot can accept.
         ImVec4 bgCol = st.Colors[ImGuiCol_FrameBg];
-        if (!occupied && mCupPickerTrack >= 0) {
+        if (isSelectedSlot) {
+            bgCol = ImVec4(0.12f, 0.22f, 0.42f, 1.0f);
+        } else if (!occupied && mCupPickerTrack >= 0) {
             bgCol = ImVec4(bgCol.x + 0.06f, bgCol.y + 0.06f, bgCol.z + 0.06f, bgCol.w);
         }
 
@@ -417,11 +423,12 @@ void GdxContentWindow::DrawElement() {
                 ImGui::TextDisabled("Empty");
             }
 
-            // Invisible overlay button spanning the whole card captures the "assign" click.
-            // We skip it when no picker track is active or the slot is already ours.
-            const bool canAssign = mCupPickerTrack >= 0 && mCupPickerTrack < mEntryCount &&
-                                   !isSelectedTrack && !opsDisabled;
-            if (canAssign) {
+            // The card selects a destination when no track is selected, or assigns the selected
+            // track to this slot. The unregister button above retains priority over this hit target.
+            const bool canInteract = !opsDisabled &&
+                ((mCupPickerTrack >= 0 && mCupPickerTrack < mEntryCount && !isSelectedTrack) ||
+                 mCupPickerTrack < 0);
+            if (canInteract) {
                 ImGui::SetCursorPos(ImVec2(0.0f, 0.0f));
                 ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1,1,1,0.07f));
@@ -437,7 +444,12 @@ void GdxContentWindow::DrawElement() {
 
         // Handle the assign click outside the child context.
         if (cardClicked) {
-            if (occupied && !isArmedSlot) {
+            if (mCupPickerTrack < 0 || mCupPickerTrack >= mEntryCount) {
+                // Select a destination first; clicking a library track will complete the assignment.
+                mCupPickerSlot = slot;
+                mCupArmedSlot = -1;
+                mCupArmedUnregister = -1;
+            } else if (occupied && !isArmedSlot) {
                 // First click on occupied: arm for confirm (R6).
                 mCupArmedSlot = slot;
                 mCupArmedUnregister = -1;
@@ -472,10 +484,11 @@ void GdxContentWindow::DrawElement() {
     // Filter bar + "select track to assign" hint side by side
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.40f);
     ImGui::InputTextWithHint("##filter", ICON_FA_SEARCH " Search / Filter...", mFilterBuf, sizeof(mFilterBuf));
-    if (mCupPickerTrack >= 0) {
+    if (mCupPickerTrack >= 0 || mCupPickerSlot >= 0) {
         ImGui::SameLine();
         if (ImGui::SmallButton(ICON_FA_TIMES " Clear selection")) {
             mCupPickerTrack = -1;
+            mCupPickerSlot = -1;
             mCupArmedSlot = -1;
             mCupArmedUnregister = -1;
         }
@@ -616,14 +629,27 @@ void GdxContentWindow::DrawElement() {
                 ImGui::PopStyleVar();    // FrameRounding
                 ImGui::PopStyleColor(2); // Border, ChildBg
 
-                // Card click: toggle selection for cup assignment (editable tracks only).
-                if (cardClicked && editableTrack) {
-                    if (mCupPickerTrack == i) {
+                // Card click: either complete a slot-first assignment or select this track.
+                if (cardClicked && editableTrack && !opsDisabled) {
+                    if (mCupPickerSlot >= 0 && mCupPickerSlot < GDX_CONTENT_CUP_SLOT_COUNT &&
+                        (mCupPickerTrack < 0 || mCupPickerTrack >= mEntryCount)) {
+                        const int targetSlot = mCupPickerSlot;
+                        int rc = gdx_content_cup_register_begin(entry.name, targetSlot);
+                        if (rc == GDX_CONTENT_OK) {
+                            mCupWaiting = true;
+                            mCupPickerSlot = -1;
+                        } else {
+                            snprintf(mStatus, sizeof(mStatus), "Cup registration failed: %s.",
+                                     gdx_content_error_string(rc));
+                        }
+                    } else if (mCupPickerTrack == i) {
                         mCupPickerTrack = -1;
+                        mCupPickerSlot = -1;
                         mCupArmedSlot = -1;
                         mCupArmedUnregister = -1;
                     } else {
                         mCupPickerTrack = i;
+                        mCupPickerSlot = -1;
                         mCupArmedSlot = -1;
                         mCupArmedUnregister = -1;
                         RefreshCupSlots();

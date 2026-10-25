@@ -52,6 +52,7 @@ class GdxContentWindow : public Ship::GuiWindow {
     bool mImportWaiting = false; // an install was enqueued; poll for its completion
     char mCupSlots[GDX_CONTENT_CUP_SLOT_COUNT][GDX_CONTENT_CUP_NAME_MAX + 1] = {};
     int mCupPickerTrack = -1;    // library row whose Edit-Cup slot picker is open
+    int mCupPickerSlot = -1;     // destination slot selected before choosing a library track
     int mCupArmedSlot = -1;      // slot primed for an overwrite confirm
     int mCupArmedUnregister = -1; // slot primed for an unregister confirm
     bool mCupWaiting = false;    // a register/unregister was enqueued; poll for its completion
