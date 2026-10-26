@@ -445,8 +445,8 @@ void GdxContentWindow::DrawElement() {
         // Handle the assign click outside the child context.
         if (cardClicked) {
             if (mCupPickerTrack < 0 || mCupPickerTrack >= mEntryCount) {
-                // Select a destination first; clicking a library track will complete the assignment.
-                mCupPickerSlot = slot;
+                // Select a destination first; clicking it again cancels the selection.
+                mCupPickerSlot = mCupPickerSlot == slot ? -1 : slot;
                 mCupArmedSlot = -1;
                 mCupArmedUnregister = -1;
             } else if (occupied && !isArmedSlot) {
