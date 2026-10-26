@@ -147,10 +147,12 @@ int GdxContentWindow::RefreshLibrary() {
 
 void GdxContentWindow::LoadTrackPreview(int row) {
     mTrackPreviewCount = 0;
+    mTrackPreviewRow = -1;
     if (row < 0 || row >= mEntryCount || mEntries[row].contentType != GDX_CONTENT_TYPE_TRACK ||
         mEntries[row].extension[3] != 'D') {
         return;
     }
+    mTrackPreviewRow = row;
 
     uint8_t payload[GDX_CONTENT_TRACK_PAYLOAD_SIZE];
     if (gdx_content_load_track_payload(mEntries[row].name, payload, sizeof(payload)) != GDX_CONTENT_OK) {
@@ -176,8 +178,8 @@ void GdxContentWindow::LoadTrackPreview(int row) {
 
 void GdxContentWindow::DrawTrackPreview() {
     ImGui::TextUnformatted("Track preview");
-    if (mCupPickerTrack >= 0 && mCupPickerTrack < mEntryCount) {
-        const GdxContentEntry& selected = mEntries[mCupPickerTrack];
+    if (mTrackPreviewRow >= 0 && mTrackPreviewRow < mEntryCount) {
+        const GdxContentEntry& selected = mEntries[mTrackPreviewRow];
         char title[GDX_COURSE_TITLE_MAX + 1];
         const bool hasTitle = SessionTitle(selected.name, selected.extension, title, sizeof(title));
         ImGui::SameLine();
@@ -185,8 +187,8 @@ void GdxContentWindow::DrawTrackPreview() {
     }
 
     if (mTrackPreviewCount < 2) {
-        ImGui::TextDisabled(mCupPickerTrack >= 0 ? "Track layout preview unavailable."
-                                                 : "Select a track to preview its layout.");
+        ImGui::TextDisabled(mTrackPreviewRow >= 0 ? "Track layout preview unavailable."
+                                                 : "Select a track or occupied deck slot to preview its layout.");
         return;
     }
 
@@ -228,6 +230,19 @@ void GdxContentWindow::RefreshCupSlots() {
     // Busy / no-disk are transient here; the picker simply shows empty slots until the next
     // refresh. mStatus is left alone: this runs on every refresh, not just user actions.
     gdx_content_cup_list(mCupSlots);
+    if (mCupPickerTrack >= 0 && mCupPickerTrack < mEntryCount) {
+        return;
+    }
+    if (mCupPickerSlot >= 0 && mCupPickerSlot < GDX_CONTENT_CUP_SLOT_COUNT && mCupSlots[mCupPickerSlot][0] != '\0') {
+        for (int i = 0; i < mEntryCount; i++) {
+            if (mEntries[i].contentType == GDX_CONTENT_TYPE_TRACK &&
+                strcmp(mEntries[i].name, mCupSlots[mCupPickerSlot]) == 0) {
+                LoadTrackPreview(i);
+                return;
+            }
+        }
+    }
+    LoadTrackPreview(-1);
 }
 
 void GdxContentWindow::RefreshImports() {
@@ -532,6 +547,7 @@ void GdxContentWindow::DrawElement() {
             if (mCupPickerTrack < 0 || mCupPickerTrack >= mEntryCount) {
                 // Select a destination first; clicking it again cancels the selection.
                 mCupPickerSlot = mCupPickerSlot == slot ? -1 : slot;
+                LoadTrackPreview(mCupPickerSlot == slot ? occupantLibIdx : -1);
                 mCupArmedSlot = -1;
                 mCupArmedUnregister = -1;
             } else if (occupied && !isArmedSlot) {
