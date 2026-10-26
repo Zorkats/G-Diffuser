@@ -193,26 +193,6 @@ void GdxContentWindow::UpdateElement() {
 }
 
 void GdxContentWindow::DrawElement() {
-    // ── Help / How it works ──────────────────────────────────────────────────────────────────────
-    {
-        float btnW = ImGui::CalcTextSize("? Help").x + ImGui::GetStyle().FramePadding.x * 2.0f;
-        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - btnW);
-        if (ImGui::Button("? Help")) {
-            mHelpOpen = !mHelpOpen;
-        }
-    }
-    if (mHelpOpen) {
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.13f, 0.15f, 0.19f, 1.0f));
-        if (ImGui::BeginChild("HelpBanner", ImVec2(0.0f, 0.0f), ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_Borders)) {
-            ImGui::TextWrapped(
-                "Tracks and machines stored on the 64DD disk. "
-                "Export writes one file to the exports/ folder next to the executable: "
-                "a .gdxp package for a track (with its custom music) or a .gdxc for a machine. "
-                "Share that file, and the other player imports it from the Import section below.");
-        }
-        ImGui::EndChild();
-        ImGui::PopStyleColor();
-    }
 
     const bool busy = gdx_content_mfs_busy() != 0;
     const bool inGameplay = gdx_input_in_gameplay() != 0;
@@ -287,6 +267,27 @@ void GdxContentWindow::DrawElement() {
         }
         ImGui::EndPopup();
     }
+
+    // Keep Help on the primary toolbar row, aligned to the window's right edge.
+    ImGui::SameLine();
+    const float helpButtonWidth = ImGui::CalcTextSize("? Help").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - helpButtonWidth);
+    if (ImGui::Button("? Help")) {
+        mHelpOpen = !mHelpOpen;
+    }
+    if (mHelpOpen) {
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.13f, 0.15f, 0.19f, 1.0f));
+        if (ImGui::BeginChild("HelpBanner", ImVec2(0.0f, 0.0f), ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_Borders)) {
+            ImGui::TextWrapped(
+                "Tracks and machines stored on the 64DD disk. "
+                "Export writes one file to the exports/ folder next to the executable: "
+                "a .gdxp package for a track (with its custom music) or a .gdxc for a machine. "
+                "Share that file, and the other player imports it from the Import section below.");
+        }
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+    }
+
     if (busy) {
         ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f),
                            "Disk operation in flight; export and import are paused.");
