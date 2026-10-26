@@ -43,9 +43,14 @@ class GdxContentWindow : public Ship::GuiWindow {
     void CloseRomCourses();
     void ValidateRomRow(int row);
     void DrawRomImportSection(bool busy, bool inGameplay);
+    void LoadTrackPreview(int row);
+    void DrawTrackPreview();
 
     GdxContentEntry mEntries[GDX_CONTENT_MAX_ENTRIES] = {};
     int mEntryCount = 0;
+    float mTrackPreviewX[64] = {};
+    float mTrackPreviewZ[64] = {};
+    int mTrackPreviewCount = 0;
     GdxContentImportEntry mImports[GDX_CONTENT_IMPORT_MAX] = {};
     int mImportCount = 0;
     int mImportArmed = -1;      // row index whose overwrite/twin confirmation is primed

@@ -9,6 +9,7 @@
 #include "gdx_course_registry.h" // GDX_COURSE_EXT_ERR_* names for the sidecar status line
 
 #include <cstdarg>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -125,6 +126,8 @@ int GdxContentWindow::RefreshLibrary() {
     int count = gdx_content_list(mEntries, GDX_CONTENT_MAX_ENTRIES);
     if (count < 0) {
         mEntryCount = 0;
+        mCupPickerTrack = -1;
+        LoadTrackPreview(-1);
         snprintf(mStatus, sizeof(mStatus), "Could not list disk content: %s.", gdx_content_error_string(count));
         return count;
     }
@@ -135,8 +138,89 @@ int GdxContentWindow::RefreshLibrary() {
     mEntryCount = count;
     if (mCupPickerTrack >= mEntryCount) {
         mCupPickerTrack = -1;
+        LoadTrackPreview(-1);
+    } else if (mCupPickerTrack >= 0) {
+        LoadTrackPreview(mCupPickerTrack);
     }
     return count;
+}
+
+void GdxContentWindow::LoadTrackPreview(int row) {
+    mTrackPreviewCount = 0;
+    if (row < 0 || row >= mEntryCount || mEntries[row].contentType != GDX_CONTENT_TYPE_TRACK ||
+        mEntries[row].extension[3] != 'D') {
+        return;
+    }
+
+    uint8_t payload[GDX_CONTENT_TRACK_PAYLOAD_SIZE];
+    if (gdx_content_load_track_payload(mEntries[row].name, payload, sizeof(payload)) != GDX_CONTENT_OK) {
+        return;
+    }
+
+    // CourseData stores count at byte 1 and its control-point array at 0x20. Each point begins
+    // with its 3D position (three floats) and has a 0x14-byte stride in the on-disk context.
+    const int count = static_cast<int8_t>(payload[1]);
+    if (count < 2 || count > 64) {
+        return;
+    }
+    for (int i = 0; i < count; i++) {
+        const size_t pointOffset = 0x20u + static_cast<size_t>(i) * 0x14u;
+        memcpy(&mTrackPreviewX[i], payload + pointOffset, sizeof(float));
+        memcpy(&mTrackPreviewZ[i], payload + pointOffset + 8u, sizeof(float));
+        if (!std::isfinite(mTrackPreviewX[i]) || !std::isfinite(mTrackPreviewZ[i])) {
+            return;
+        }
+    }
+    mTrackPreviewCount = count;
+}
+
+void GdxContentWindow::DrawTrackPreview() {
+    ImGui::TextUnformatted("Track preview");
+    if (mCupPickerTrack >= 0 && mCupPickerTrack < mEntryCount) {
+        const GdxContentEntry& selected = mEntries[mCupPickerTrack];
+        char title[GDX_COURSE_TITLE_MAX + 1];
+        const bool hasTitle = SessionTitle(selected.name, selected.extension, title, sizeof(title));
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", hasTitle ? title : selected.name);
+    }
+
+    if (mTrackPreviewCount < 2) {
+        ImGui::TextDisabled(mCupPickerTrack >= 0 ? "Track layout preview unavailable."
+                                                 : "Select a track to preview its layout.");
+        return;
+    }
+
+    float minX = mTrackPreviewX[0];
+    float maxX = minX;
+    float minZ = mTrackPreviewZ[0];
+    float maxZ = minZ;
+    for (int i = 1; i < mTrackPreviewCount; i++) {
+        if (mTrackPreviewX[i] < minX) minX = mTrackPreviewX[i];
+        if (mTrackPreviewX[i] > maxX) maxX = mTrackPreviewX[i];
+        if (mTrackPreviewZ[i] < minZ) minZ = mTrackPreviewZ[i];
+        if (mTrackPreviewZ[i] > maxZ) maxZ = mTrackPreviewZ[i];
+    }
+
+    const ImVec2 canvas = ImGui::GetCursorScreenPos();
+    const ImVec2 avail = ImGui::GetContentRegionAvail();
+    const float rangeX = maxX - minX > 1.0f ? maxX - minX : 1.0f;
+    const float rangeZ = maxZ - minZ > 1.0f ? maxZ - minZ : 1.0f;
+    const float width = avail.x > 16.0f ? avail.x - 16.0f : 1.0f;
+    const float height = avail.y > 8.0f ? avail.y - 8.0f : 1.0f;
+    const float scale = (width / rangeX < height / rangeZ) ? width / rangeX : height / rangeZ;
+    const ImVec2 center(canvas.x + avail.x * 0.5f, canvas.y + height * 0.5f);
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    for (int i = 0; i < mTrackPreviewCount; i++) {
+        const int next = (i + 1) % mTrackPreviewCount;
+        const ImVec2 a(center.x + (mTrackPreviewX[i] - (minX + maxX) * 0.5f) * scale,
+                       center.y - (mTrackPreviewZ[i] - (minZ + maxZ) * 0.5f) * scale);
+        const ImVec2 b(center.x + (mTrackPreviewX[next] - (minX + maxX) * 0.5f) * scale,
+                       center.y - (mTrackPreviewZ[next] - (minZ + maxZ) * 0.5f) * scale);
+        draw->AddLine(a, b, IM_COL32(90, 185, 255, 255), 3.0f);
+    }
+    const ImVec2 start(center.x + (mTrackPreviewX[0] - (minX + maxX) * 0.5f) * scale,
+                       center.y - (mTrackPreviewZ[0] - (minZ + maxZ) * 0.5f) * scale);
+    draw->AddCircleFilled(start, 4.0f, IM_COL32(120, 230, 150, 255));
 }
 
 void GdxContentWindow::RefreshCupSlots() {
@@ -489,28 +573,32 @@ void GdxContentWindow::DrawElement() {
         ImGui::SameLine();
         if (ImGui::SmallButton(ICON_FA_TIMES " Clear selection")) {
             mCupPickerTrack = -1;
+            LoadTrackPreview(-1);
             mCupPickerSlot = -1;
             mCupArmedSlot = -1;
             mCupArmedUnregister = -1;
         }
     }
 
-    if (mEntryCount == 0) {
-        ImGui::TextDisabled("No tracks or machines on the disk yet.");
-        ImGui::TextWrapped("Save a course in Course Edit or a machine in Create Machine, then refresh.");
-    } else {
-        const int   gridCols = 6;
-        const float fileCardH = 90.0f;
+    const int gridCols = 4;
+    const float fileCardH = 90.0f;
+    const float gapX = st.ItemSpacing.x;
+    const float availableWidth = ImGui::GetContentRegionAvail().x;
+    const float oldGridScrollbar = mEntryCount > 12 ? st.ScrollbarSize : 0.0f;
+    const float fileCardW = (availableWidth - st.WindowPadding.x * 2.0f - oldGridScrollbar - gapX * 5.0f) / 6.0f;
+    const float newGridScrollbar = mEntryCount > 8 ? st.ScrollbarSize : 0.0f;
+    const float selectorWidth = fileCardW * gridCols + gapX * (gridCols - 1) +
+                                st.WindowPadding.x * 2.0f + newGridScrollbar;
 
-        // Scrolling region for the grid.
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
-        if (ImGui::BeginChild("LibraryGrid", ImVec2(0.0f, 280.0f), ImGuiChildFlags_None,
-                              ImGuiWindowFlags_None)) {
-            // Compute card width INSIDE the child so it uses the child's actual content width
-            // (which is narrower than the parent when a vertical scrollbar is present).
-            const float gapX      = st.ItemSpacing.x;
-            const float gapY      = st.ItemSpacing.y;
-            const float fileCardW = (ImGui::GetContentRegionAvail().x - gapX * (gridCols - 1)) / gridCols;
+    // Keep each card at the former six-column width and reserve the remaining width for preview.
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+    if (ImGui::BeginChild("LibraryGrid", ImVec2(selectorWidth, 280.0f), ImGuiChildFlags_None,
+                          ImGuiWindowFlags_None)) {
+        if (mEntryCount == 0) {
+            ImGui::TextDisabled("No tracks or machines on the disk yet.");
+            ImGui::TextWrapped("Save a course in Course Edit or a machine in Create Machine, then refresh.");
+        } else {
+            const float gapY = st.ItemSpacing.y;
             int visibleCol = 0;
             for (int i = 0; i < mEntryCount; i++) {
                 GdxContentEntry& entry = mEntries[i];
@@ -645,11 +733,13 @@ void GdxContentWindow::DrawElement() {
                         }
                     } else if (mCupPickerTrack == i) {
                         mCupPickerTrack = -1;
+                        LoadTrackPreview(-1);
                         mCupPickerSlot = -1;
                         mCupArmedSlot = -1;
                         mCupArmedUnregister = -1;
                     } else {
                         mCupPickerTrack = i;
+                        LoadTrackPreview(i);
                         mCupPickerSlot = -1;
                         mCupArmedSlot = -1;
                         mCupArmedUnregister = -1;
@@ -668,9 +758,15 @@ void GdxContentWindow::DrawElement() {
                 visibleCol++;
             }
         }
-        ImGui::EndChild();
-        ImGui::PopStyleColor(); // outer ChildBg transparent wrapper
     }
+    ImGui::EndChild();
+    ImGui::PopStyleColor(); // outer ChildBg transparent wrapper
+    ImGui::SameLine(0.0f, gapX);
+    if (ImGui::BeginChild("TrackPreviewPanel", ImVec2(0.0f, 280.0f), ImGuiChildFlags_Borders,
+                          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
+        DrawTrackPreview();
+    }
+    ImGui::EndChild();
 
     DrawImportSection(busy, inGameplay);
 
