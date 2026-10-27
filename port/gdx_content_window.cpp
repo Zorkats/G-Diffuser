@@ -656,7 +656,7 @@ void GdxContentWindow::DrawElement() {
                 if (isSelected) {
                     fcBorder = ImVec4(0.25f, 0.55f, 1.0f, 1.0f);   // blue — selected
                 } else if (inSlot >= 0) {
-                    fcBorder = ImVec4(0.75f, 0.65f, 0.15f, 0.70f); // gold — in deck
+                    fcBorder = st.Colors[ImGuiCol_Border]; // default color — in deck
                 }
 
                 // Card background.
@@ -695,8 +695,7 @@ void GdxContentWindow::DrawElement() {
 
                     // Type + slot badge.
                     if (inSlot >= 0) {
-                        ImGui::TextColored(ImVec4(0.85f, 0.72f, 0.20f, 1.0f),
-                                           "%s \xe2\x80\xa2 Slot %d", GdxContentTypeLabel(entry), inSlot + 1);
+                        ImGui::TextDisabled("%s \xe2\x80\xa2 Slot %d", GdxContentTypeLabel(entry), inSlot + 1);
                     } else {
                         ImGui::TextDisabled("%s", GdxContentTypeLabel(entry));
                     }
