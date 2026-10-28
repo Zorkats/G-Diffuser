@@ -35,7 +35,6 @@ class GdxContentWindow : public Ship::GuiWindow {
     int RefreshLibrary();
     void RefreshImports();
     void RefreshCupSlots();
-    void DrawCupPicker(bool busy, bool inGameplay);
     void DrawImportSection(bool busy, bool inGameplay);
     void OpenDiskImage(const char* path);
     void CloseDiskImage();
@@ -44,15 +43,22 @@ class GdxContentWindow : public Ship::GuiWindow {
     void CloseRomCourses();
     void ValidateRomRow(int row);
     void DrawRomImportSection(bool busy, bool inGameplay);
+    void LoadTrackPreview(int row);
+    void DrawTrackPreview();
 
     GdxContentEntry mEntries[GDX_CONTENT_MAX_ENTRIES] = {};
     int mEntryCount = 0;
+    float mTrackPreviewX[64] = {};
+    float mTrackPreviewZ[64] = {};
+    int mTrackPreviewCount = 0;
+    int mTrackPreviewRow = -1;
     GdxContentImportEntry mImports[GDX_CONTENT_IMPORT_MAX] = {};
     int mImportCount = 0;
     int mImportArmed = -1;      // row index whose overwrite/twin confirmation is primed
     bool mImportWaiting = false; // an install was enqueued; poll for its completion
     char mCupSlots[GDX_CONTENT_CUP_SLOT_COUNT][GDX_CONTENT_CUP_NAME_MAX + 1] = {};
     int mCupPickerTrack = -1;    // library row whose Edit-Cup slot picker is open
+    int mCupPickerSlot = -1;     // destination slot selected before choosing a library track
     int mCupArmedSlot = -1;      // slot primed for an overwrite confirm
     int mCupArmedUnregister = -1; // slot primed for an unregister confirm
     bool mCupWaiting = false;    // a register/unregister was enqueued; poll for its completion
@@ -86,4 +92,7 @@ class GdxContentWindow : public Ship::GuiWindow {
     double mNextAutoRefresh = 0.0;
     double mAutoRefreshDeadline = 0.0;
     char mStatus[512] = {};
+    // UX: search filter for the local-files table; help section toggle.
+    char mFilterBuf[128] = {};
+    bool mHelpOpen = false;
 };

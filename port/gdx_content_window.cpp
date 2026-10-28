@@ -1,11 +1,15 @@
 #include "gdx_content_window.h"
 
 #include <imgui.h>
+#include <imgui_internal.h> // ImStristr — case-insensitive substring search for the filter
+
+#include "ship/window/gui/IconsFontAwesome4.h" // ICON_FA_FOLDER for accordion headers
 
 #include "rom_buffer.h" // gdx_rom_path: the clean ROM baseline for W2 course comparison
 #include "gdx_course_registry.h" // GDX_COURSE_EXT_ERR_* names for the sidecar status line
 
 #include <cstdarg>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -122,6 +126,8 @@ int GdxContentWindow::RefreshLibrary() {
     int count = gdx_content_list(mEntries, GDX_CONTENT_MAX_ENTRIES);
     if (count < 0) {
         mEntryCount = 0;
+        mCupPickerTrack = -1;
+        LoadTrackPreview(-1);
         snprintf(mStatus, sizeof(mStatus), "Could not list disk content: %s.", gdx_content_error_string(count));
         return count;
     }
@@ -132,8 +138,91 @@ int GdxContentWindow::RefreshLibrary() {
     mEntryCount = count;
     if (mCupPickerTrack >= mEntryCount) {
         mCupPickerTrack = -1;
+        LoadTrackPreview(-1);
+    } else if (mCupPickerTrack >= 0) {
+        LoadTrackPreview(mCupPickerTrack);
     }
     return count;
+}
+
+void GdxContentWindow::LoadTrackPreview(int row) {
+    mTrackPreviewCount = 0;
+    mTrackPreviewRow = -1;
+    if (row < 0 || row >= mEntryCount || mEntries[row].contentType != GDX_CONTENT_TYPE_TRACK ||
+        mEntries[row].extension[3] != 'D') {
+        return;
+    }
+    mTrackPreviewRow = row;
+
+    uint8_t payload[GDX_CONTENT_TRACK_PAYLOAD_SIZE];
+    if (gdx_content_load_track_payload(mEntries[row].name, payload, sizeof(payload)) != GDX_CONTENT_OK) {
+        return;
+    }
+
+    // CourseData stores count at byte 1 and its control-point array at 0x20. Each point begins
+    // with its 3D position (three floats) and has a 0x14-byte stride in the on-disk context.
+    const int count = static_cast<int8_t>(payload[1]);
+    if (count < 2 || count > 64) {
+        return;
+    }
+    for (int i = 0; i < count; i++) {
+        const size_t pointOffset = 0x20u + static_cast<size_t>(i) * 0x14u;
+        memcpy(&mTrackPreviewX[i], payload + pointOffset, sizeof(float));
+        memcpy(&mTrackPreviewZ[i], payload + pointOffset + 8u, sizeof(float));
+        if (!std::isfinite(mTrackPreviewX[i]) || !std::isfinite(mTrackPreviewZ[i])) {
+            return;
+        }
+    }
+    mTrackPreviewCount = count;
+}
+
+void GdxContentWindow::DrawTrackPreview() {
+    ImGui::TextUnformatted("Track preview");
+    if (mTrackPreviewRow >= 0 && mTrackPreviewRow < mEntryCount) {
+        const GdxContentEntry& selected = mEntries[mTrackPreviewRow];
+        char title[GDX_COURSE_TITLE_MAX + 1];
+        const bool hasTitle = SessionTitle(selected.name, selected.extension, title, sizeof(title));
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", hasTitle ? title : selected.name);
+    }
+
+    if (mTrackPreviewCount < 2) {
+        ImGui::TextDisabled(mTrackPreviewRow >= 0 ? "Track layout preview unavailable."
+                                                 : "Select a track or occupied deck slot to preview its layout.");
+        return;
+    }
+
+    float minX = mTrackPreviewX[0];
+    float maxX = minX;
+    float minZ = mTrackPreviewZ[0];
+    float maxZ = minZ;
+    for (int i = 1; i < mTrackPreviewCount; i++) {
+        if (mTrackPreviewX[i] < minX) minX = mTrackPreviewX[i];
+        if (mTrackPreviewX[i] > maxX) maxX = mTrackPreviewX[i];
+        if (mTrackPreviewZ[i] < minZ) minZ = mTrackPreviewZ[i];
+        if (mTrackPreviewZ[i] > maxZ) maxZ = mTrackPreviewZ[i];
+    }
+
+    const ImVec2 canvas = ImGui::GetCursorScreenPos();
+    const ImVec2 avail = ImGui::GetContentRegionAvail();
+    const float rangeX = maxX - minX > 1.0f ? maxX - minX : 1.0f;
+    const float rangeZ = maxZ - minZ > 1.0f ? maxZ - minZ : 1.0f;
+    const float width = avail.x > 16.0f ? avail.x - 16.0f : 1.0f;
+    const float height = avail.y > 8.0f ? avail.y - 8.0f : 1.0f;
+    const float scale = (width / rangeX < height / rangeZ) ? width / rangeX : height / rangeZ;
+    const ImVec2 center(canvas.x + avail.x * 0.5f, canvas.y + height * 0.5f);
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    for (int i = 0; i < mTrackPreviewCount; i++) {
+        const int next = (i + 1) % mTrackPreviewCount;
+        const ImVec2 a(center.x + (mTrackPreviewX[i] - (minX + maxX) * 0.5f) * scale,
+                       center.y - (mTrackPreviewZ[i] - (minZ + maxZ) * 0.5f) * scale);
+        const ImVec2 b(center.x + (mTrackPreviewX[next] - (minX + maxX) * 0.5f) * scale,
+                       center.y - (mTrackPreviewZ[next] - (minZ + maxZ) * 0.5f) * scale);
+        draw->AddLine(a, b, IM_COL32(90, 185, 255, 255), 3.0f);
+    }
+    const ImVec2 start(center.x + (mTrackPreviewX[0] - (minX + maxX) * 0.5f) * scale,
+                       center.y - (mTrackPreviewZ[0] - (minZ + maxZ) * 0.5f) * scale);
+    draw->AddCircleFilled(start, 4.0f, IM_COL32(120, 230, 150, 255));
 }
 
 void GdxContentWindow::RefreshCupSlots() {
@@ -141,6 +230,19 @@ void GdxContentWindow::RefreshCupSlots() {
     // Busy / no-disk are transient here; the picker simply shows empty slots until the next
     // refresh. mStatus is left alone: this runs on every refresh, not just user actions.
     gdx_content_cup_list(mCupSlots);
+    if (mCupPickerTrack >= 0 && mCupPickerTrack < mEntryCount) {
+        return;
+    }
+    if (mCupPickerSlot >= 0 && mCupPickerSlot < GDX_CONTENT_CUP_SLOT_COUNT && mCupSlots[mCupPickerSlot][0] != '\0') {
+        for (int i = 0; i < mEntryCount; i++) {
+            if (mEntries[i].contentType == GDX_CONTENT_TYPE_TRACK &&
+                strcmp(mEntries[i].name, mCupSlots[mCupPickerSlot]) == 0) {
+                LoadTrackPreview(i);
+                return;
+            }
+        }
+    }
+    LoadTrackPreview(-1);
 }
 
 void GdxContentWindow::RefreshImports() {
@@ -190,31 +292,10 @@ void GdxContentWindow::UpdateElement() {
 }
 
 void GdxContentWindow::DrawElement() {
-    ImGui::TextWrapped("Tracks and machines stored on the 64DD disk. Export writes one file to the exports/ "
-                       "folder next to the executable: a .gdxp package for a track (with its custom music) or a "
-                       ".gdxc for a machine. Share that file, and the other player imports it from the Import "
-                       "section below.");
-
-    // E3b: the strip toggle lives next to the export buttons, not buried in the settings menu
-    // (risk R5: author ghosts and records travel inside tracks by default).
-    bool includeGhosts = CVarGetInteger("gEnhancements.Content.ExportIncludeGhosts", 0) != 0;
-    if (ImGui::Checkbox("Include author ghosts and time records in track exports", &includeGhosts)) {
-        CVarSetInteger("gEnhancements.Content.ExportIncludeGhosts", includeGhosts ? 1 : 0);
-    }
-    if (includeGhosts) {
-        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
-                           "Track exports currently INCLUDE your author ghosts and time records.");
-    } else {
-        ImGui::TextDisabled("Track exports strip author ghosts and time records (default).");
-    }
 
     const bool busy = gdx_content_mfs_busy() != 0;
-    if (busy) {
-        ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f),
-                           "Disk operation in flight; export and import are paused.");
-    }
-
     const bool inGameplay = gdx_input_in_gameplay() != 0;
+    const bool opsDisabled = busy || inGameplay || mCupWaiting || gdx_content_import_pending() != 0;
 
     // E3 completion poll: on the port the disk-thread handoff is synchronous, so a begun op has
     // normally already finished; the poll keeps the UI honest if scheduling ever changes.
@@ -235,14 +316,12 @@ void GdxContentWindow::DrawElement() {
         RefreshCupSlots();
     }
 
-    if (ImGui::Button("Refresh")) {
-        // Stale results from a previous action (e.g. an early no-disk failure) must not
-        // outlive a successful refresh.
+    // ── Primary Toolbar ──────────────────────────────────────────────────────────────────────────
+    if (ImGui::Button(ICON_FA_REFRESH " Refresh")) {
         mStatus[0] = '\0';
         if (RefreshLibrary() >= 0) {
             mAutoRefreshDone = true;
         } else {
-            // The disk still is not up; keep the auto-retry alive so it self-heals.
             mAutoRefreshDone = false;
             mNextAutoRefresh = 0.0;
             mAutoRefreshDeadline = ImGui::GetTime() + 15.0;
@@ -254,11 +333,10 @@ void GdxContentWindow::DrawElement() {
         }
     }
     ImGui::SameLine();
-    ImGui::TextDisabled("%d file%s on disk", mEntryCount, mEntryCount == 1 ? "" : "s");
-
-    // E4: whole-cup export. Empty cups are refused by the export call itself.
+    ImGui::TextDisabled("(%d file%s on disk)", mEntryCount, mEntryCount == 1 ? "" : "s");
+    ImGui::SameLine();
     ImGui::BeginDisabled(busy);
-    if (ImGui::Button("Export Edit Cup as bundle")) {
+    if (ImGui::Button(ICON_FA_ARCHIVE " Export Edit Cup as bundle")) {
         char path[1024];
         int rc = gdx_content_export_bundle(path, sizeof(path));
         if (rc == GDX_CONTENT_OK) {
@@ -272,121 +350,213 @@ void GdxContentWindow::DrawElement() {
     }
     ImGui::EndDisabled();
     ImGui::SameLine();
-    ImGui::TextDisabled("CENT + its tracks and music -> exports/edit-cup.gdxp");
-    ImGui::Separator();
-
-    if (mEntryCount == 0) {
-        ImGui::TextDisabled("No tracks or machines on the disk yet.");
-        ImGui::TextWrapped("Save a course in Course Edit or a machine in Create Machine, then refresh.");
-    } else if (ImGui::BeginTable("GdxContentTable", 4,
-                                 ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
-                                     ImGuiTableFlags_SizingFixedFit,
-                                 ImVec2(0.0f, 280.0f))) {
-        ImGui::TableSetupColumn("Name");
-        ImGui::TableSetupColumn("Type");
-        ImGui::TableSetupColumn("Size");
-        ImGui::TableSetupColumn("");
-        ImGui::TableHeadersRow();
-
-        for (int i = 0; i < mEntryCount; i++) {
-            GdxContentEntry& entry = mEntries[i];
-            const bool editableTrack =
-                entry.contentType == GDX_CONTENT_TYPE_TRACK && entry.extension[3] == 'D'; // CRSD only (E3)
-            ImGui::PushID(i);
-            ImGui::TableNextRow();
-
-            ImGui::TableNextColumn();
-            {
-                char title[GDX_COURSE_TITLE_MAX + 1];
-                if (SessionTitle(entry.name, entry.extension, title, sizeof(title))) {
-                    ImGui::TextUnformatted(title);
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("(%s)", entry.name);
-                } else {
-                    ImGui::TextUnformatted(entry.name[0] != '\0' ? entry.name : "(unnamed)");
-                }
-            }
-            ImGui::TableNextColumn();
-            ImGui::TextUnformatted(GdxContentTypeLabel(entry));
-            ImGui::TableNextColumn();
-            ImGui::Text("%d B", entry.fileSize);
-            ImGui::TableNextColumn();
-            ImGui::BeginDisabled(busy);
-            if (ImGui::SmallButton("Export")) {
-                char path[1024];
-                int rc = gdx_content_export(&entry, path, sizeof(path));
-                if (rc == GDX_CONTENT_OK) {
-                    snprintf(mStatus, sizeof(mStatus), "Exported to %s", path);
-                    RefreshImports();
-                } else {
-                    snprintf(mStatus, sizeof(mStatus), "Export of '%s' failed: %s.", entry.name,
-                             gdx_content_error_string(rc));
-                }
-            }
-            // CRSE tracks are ineligible for the Edit Cup, mirroring the editor UI
-            // (course_edit/19C470.c:457-461).
-            if (editableTrack) {
-                ImGui::SameLine();
-                if (ImGui::SmallButton(mCupPickerTrack == i ? "Close Cup" : "Edit Cup")) {
-                    mCupPickerTrack = (mCupPickerTrack == i) ? -1 : i;
-                    mCupArmedSlot = -1;
-                    mCupArmedUnregister = -1;
-                    RefreshCupSlots();
-                }
-            }
-            ImGui::EndDisabled();
-            ImGui::PopID();
+    if (ImGui::Button(ICON_FA_COG " Options")) {
+        ImGui::OpenPopup("ContentOptions");
+    }
+    if (ImGui::BeginPopup("ContentOptions")) {
+        bool includeGhosts = CVarGetInteger("gEnhancements.Content.ExportIncludeGhosts", 0) != 0;
+        if (ImGui::Checkbox("Include author ghosts and time records in track exports", &includeGhosts)) {
+            CVarSetInteger("gEnhancements.Content.ExportIncludeGhosts", includeGhosts ? 1 : 0);
         }
-        ImGui::EndTable();
-    }
-
-    DrawCupPicker(busy, inGameplay);
-    DrawImportSection(busy, inGameplay);
-    DrawImageImportSection(busy, inGameplay);
-    DrawRomImportSection(busy, inGameplay);
-
-    if (mStatus[0] != '\0') {
-        ImGui::Separator();
-        ImGui::TextWrapped("%s", mStatus);
-    }
-}
-
-void GdxContentWindow::DrawCupPicker(bool busy, bool inGameplay) {
-    if (mCupPickerTrack < 0 || mCupPickerTrack >= mEntryCount) {
-        return;
-    }
-    const GdxContentEntry& track = mEntries[mCupPickerTrack];
-
-    char title[GDX_COURSE_TITLE_MAX + 1];
-    const bool hasTitle = SessionTitle(track.name, track.extension, title, sizeof(title));
-    ImGui::Separator();
-    ImGui::Text("Edit Cup: register '%s':", hasTitle ? title : track.name);
-    if (inGameplay) {
-        ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "Edit Cup changes are unavailable while a race is live.");
-    }
-
-    const bool opsDisabled = busy || inGameplay || mCupWaiting || gdx_content_import_pending() != 0;
-    for (int slot = 0; slot < GDX_CONTENT_CUP_SLOT_COUNT; slot++) {
-        const char* occupant = mCupSlots[slot];
-        const bool occupied = occupant[0] != '\0';
-        const bool alreadyMine = occupied && strcmp(occupant, track.name) == 0;
-        char occupantTitle[GDX_COURSE_TITLE_MAX + 1];
-        ImGui::PushID(2000 + slot);
-        if (occupied && SessionTitle(occupant, "CRSD", occupantTitle, sizeof(occupantTitle))) {
-            ImGui::Text("%d: %s (%s)", slot + 1, occupantTitle, occupant);
+        if (includeGhosts) {
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
+                               "Track exports INCLUDE your author ghosts and time records.");
         } else {
-            ImGui::Text("%d: %s", slot + 1, occupied ? occupant : "(empty)");
+            ImGui::TextDisabled("Track exports strip author ghosts and time records (default).");
         }
+        ImGui::EndPopup();
+    }
+
+    // Keep Help on the primary toolbar row, aligned to the window's right edge.
+    ImGui::SameLine();
+    const float helpButtonWidth = ImGui::CalcTextSize("? Help").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - helpButtonWidth);
+    if (ImGui::Button("? Help")) {
+        mHelpOpen = !mHelpOpen;
+    }
+    if (mHelpOpen) {
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.13f, 0.15f, 0.19f, 1.0f));
+        if (ImGui::BeginChild("HelpBanner", ImVec2(0.0f, 0.0f), ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_Borders)) {
+            ImGui::TextWrapped(
+                "Tracks and machines stored on the 64DD disk. "
+                "Export writes one file to the exports/ folder next to the executable: "
+                "a .gdxp package for a track (with its custom music) or a .gdxc for a machine. "
+                "Share that file, and the other player imports it from the Import section below.");
+        }
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+    }
+
+    if (busy) {
+        ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f),
+                           "Disk operation in flight; export and import are paused.");
+    }
+    if (inGameplay) {
+        ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f),
+                           "Edit Cup changes are unavailable while a race is live.");
+    }
+
+    // ── Edit Cup Deck — 6-slot card grid (3 × 2) ────────────────────────────────────────────────
+    //
+    // Interaction model: select a track then a slot, or select a slot then a track.
+    //   • Clicking an empty slot with a track selected registers in one click.
+    //   • Clicking an occupied slot with a track selected arms it for confirmation.
+    //   • Clicking the armed slot again confirms overwrite.
+    //   • The × button on an occupied card: unregister (same two-click rule).
+    ImGui::Separator();
+    ImGui::TextUnformatted("Edit Cup");
+    if (mCupPickerTrack >= 0 && mCupPickerTrack < mEntryCount) {
+        const GdxContentEntry& sel = mEntries[mCupPickerTrack];
+        char selTitle[GDX_COURSE_TITLE_MAX + 1];
+        const bool hasSelTitle = SessionTitle(sel.name, sel.extension, selTitle, sizeof(selTitle));
         ImGui::SameLine();
-        ImGui::BeginDisabled(opsDisabled || alreadyMine);
-        // R6: overwriting an occupied slot is a two-click confirm; an empty slot registers in one.
-        const bool armed = mCupArmedSlot == slot;
-        if (ImGui::SmallButton(!occupied ? "Register" : (armed ? "Confirm overwrite" : "Register..."))) {
-            if (occupied && !armed) {
+        ImGui::TextDisabled("— click a slot to place  \"%s\"", hasSelTitle ? selTitle : sel.name);
+    } else if (mCupPickerSlot >= 0 && mCupPickerSlot < GDX_CONTENT_CUP_SLOT_COUNT) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("— choose a track for Slot %d", mCupPickerSlot + 1);
+    }
+
+    const ImGuiStyle& st = ImGui::GetStyle();
+    // 6×1 row: divide full available width evenly across all 6 slots.
+    const float deckGapX    = st.ItemSpacing.x;
+    const float deckCardW   = (ImGui::GetContentRegionAvail().x - deckGapX * (GDX_CONTENT_CUP_SLOT_COUNT - 1))
+                              / GDX_CONTENT_CUP_SLOT_COUNT;
+    const ImVec2 cardSize(deckCardW, 72.0f);
+
+    for (int slot = 0; slot < GDX_CONTENT_CUP_SLOT_COUNT; slot++) {
+        if (slot != 0) {
+            ImGui::SameLine(0.0f, deckGapX);
+        }
+
+        const char* occupant = mCupSlots[slot];
+        const bool occupied  = occupant[0] != '\0';
+
+        // Which track (if any) in the library is this slot's current occupant?
+        int occupantLibIdx = -1;
+        if (occupied) {
+            for (int k = 0; k < mEntryCount; k++) {
+                if (strcmp(mEntries[k].name, occupant) == 0) {
+                    occupantLibIdx = k;
+                    break;
+                }
+            }
+        }
+
+        const bool isSelectedTrack = occupied && mCupPickerTrack >= 0 &&
+                                     mCupPickerTrack < mEntryCount &&
+                                     strcmp(occupant, mEntries[mCupPickerTrack].name) == 0;
+        const bool isSelectedSlot   = mCupPickerSlot == slot;
+        const bool isArmedSlot     = mCupArmedSlot == slot;
+        const bool isArmedUnreg    = mCupArmedUnregister == slot;
+
+        // Card border colour: gold = already holds the selected track, blue = selected destination,
+        // amber = armed for confirm, default = normal border.
+        ImVec4 borderCol = st.Colors[ImGuiCol_Border];
+        if (isSelectedTrack) {
+            borderCol = ImVec4(0.95f, 0.80f, 0.20f, 1.0f); // gold — "already in deck"
+        } else if (isSelectedSlot) {
+            borderCol = ImVec4(0.25f, 0.55f, 1.0f, 1.0f);  // blue — selected destination
+        } else if (isArmedSlot || isArmedUnreg) {
+            borderCol = ImVec4(1.0f, 0.45f, 0.15f, 1.0f);  // amber — awaiting confirm
+        }
+
+        // Card background: slightly lighter when a picker track is active and this slot can accept.
+        ImVec4 bgCol = st.Colors[ImGuiCol_FrameBg];
+        if (isSelectedSlot) {
+            bgCol = ImVec4(0.12f, 0.22f, 0.42f, 1.0f);
+        } else if (!occupied && mCupPickerTrack >= 0) {
+            bgCol = ImVec4(bgCol.x + 0.06f, bgCol.y + 0.06f, bgCol.z + 0.06f, bgCol.w);
+        }
+
+        ImGui::PushID(2000 + slot);
+        ImGui::PushStyleColor(ImGuiCol_Border,  borderCol);
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, bgCol);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
+
+        // The whole card is a clickable child region.
+        bool cardClicked = false;
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, bgCol);
+        if (ImGui::BeginChild("##slot", cardSize, ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
+            // Slot label (top-left, small/muted)
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.60f, 0.65f, 1.0f));
+            ImGui::TextUnformatted(slot == 0 ? "Slot 1" : slot == 1 ? "Slot 2" :
+                                   slot == 2 ? "Slot 3" : slot == 3 ? "Slot 4" :
+                                   slot == 4 ? "Slot 5" : "Slot 6");
+            ImGui::PopStyleColor();
+
+            if (occupied) {
+                char occTitle[GDX_COURSE_TITLE_MAX + 1];
+                const char* displayName = occupant;
+                if (occupantLibIdx >= 0 &&
+                    SessionTitle(mEntries[occupantLibIdx].name, mEntries[occupantLibIdx].extension,
+                                 occTitle, sizeof(occTitle))) {
+                    displayName = occTitle;
+                }
+                if (isSelectedTrack) {
+                    ImGui::TextColored(ImVec4(0.95f, 0.80f, 0.20f, 1.0f), "%s", displayName);
+                } else {
+                    ImGui::TextUnformatted(displayName);
+                }
+                // Unregister button: small × pinned to bottom-right of the card.
+                const char* unregLabel = isArmedUnreg ? "OK?" : ICON_FA_TIMES;
+                float xBtnW = ImGui::CalcTextSize(unregLabel).x + st.FramePadding.x * 2.0f;
+                ImGui::SetCursorPos(ImVec2(cardSize.x - xBtnW - st.WindowPadding.x,
+                                           cardSize.y - ImGui::GetFrameHeight() - st.WindowPadding.y));
+                ImGui::BeginDisabled(opsDisabled);
+                if (ImGui::SmallButton(unregLabel)) {
+                    if (!isArmedUnreg) {
+                        mCupArmedUnregister = slot;
+                        mCupArmedSlot = -1;
+                    } else {
+                        int rc = gdx_content_cup_unregister_begin(slot);
+                        mCupArmedUnregister = -1;
+                        if (rc == GDX_CONTENT_OK) {
+                            mCupWaiting = true;
+                        } else {
+                            snprintf(mStatus, sizeof(mStatus), "Cup unregister failed: %s.",
+                                     gdx_content_error_string(rc));
+                        }
+                    }
+                }
+                ImGui::EndDisabled();
+            } else {
+                ImGui::TextDisabled("Empty");
+            }
+
+            // The card selects a destination when no track is selected, or assigns the selected
+            // track to this slot. The unregister button above retains priority over this hit target.
+            const bool canInteract = !opsDisabled &&
+                ((mCupPickerTrack >= 0 && mCupPickerTrack < mEntryCount && !isSelectedTrack) ||
+                 mCupPickerTrack < 0);
+            if (canInteract) {
+                ImGui::SetCursorPos(ImVec2(0.0f, 0.0f));
+                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1,1,1,0.07f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1,1,1,0.12f));
+                cardClicked = ImGui::InvisibleButton("##assign", cardSize);
+                ImGui::PopStyleColor(3);
+            }
+        }
+        ImGui::EndChild();
+        ImGui::PopStyleColor(); // ChildBg
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor(2); // Border, FrameBg
+
+        // Handle the assign click outside the child context.
+        if (cardClicked) {
+            if (mCupPickerTrack < 0 || mCupPickerTrack >= mEntryCount) {
+                // Select a destination first; clicking it again cancels the selection.
+                mCupPickerSlot = mCupPickerSlot == slot ? -1 : slot;
+                LoadTrackPreview(mCupPickerSlot == slot ? occupantLibIdx : -1);
+                mCupArmedSlot = -1;
+                mCupArmedUnregister = -1;
+            } else if (occupied && !isArmedSlot) {
+                // First click on occupied: arm for confirm (R6).
                 mCupArmedSlot = slot;
                 mCupArmedUnregister = -1;
             } else {
-                int rc = gdx_content_cup_register_begin(track.name, slot);
+                // Empty slot, or second click on armed occupied slot: register.
+                int rc = gdx_content_cup_register_begin(mEntries[mCupPickerTrack].name, slot);
                 mCupArmedSlot = -1;
                 if (rc == GDX_CONTENT_OK) {
                     mCupWaiting = true;
@@ -396,29 +566,232 @@ void GdxContentWindow::DrawCupPicker(bool busy, bool inGameplay) {
                 }
             }
         }
-        ImGui::EndDisabled();
-        if (occupied) {
-            ImGui::SameLine();
-            ImGui::BeginDisabled(opsDisabled);
-            const bool armedUnreg = mCupArmedUnregister == slot;
-            if (ImGui::SmallButton(armedUnreg ? "Confirm unregister" : "Unregister")) {
-                if (!armedUnreg) {
-                    mCupArmedUnregister = slot;
-                    mCupArmedSlot = -1;
-                } else {
-                    int rc = gdx_content_cup_unregister_begin(slot);
-                    mCupArmedUnregister = -1;
-                    if (rc == GDX_CONTENT_OK) {
-                        mCupWaiting = true;
-                    } else {
-                        snprintf(mStatus, sizeof(mStatus), "Cup unregister failed: %s.",
-                                 gdx_content_error_string(rc));
+        // Tooltip: show full occupant name and confirm-overwrite hint.
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && occupied) {
+            ImGui::BeginTooltip();
+            ImGui::TextUnformatted(occupant);
+            if (isArmedSlot) {
+                ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.15f, 1.0f), "Click again to confirm overwrite");
+            }
+            ImGui::EndTooltip();
+        }
+
+        ImGui::PopID();
+    }
+
+    // ── Local Files on Disk — card grid ─────────────────────────────────────────────────────────
+    ImGui::Separator();
+
+    // Filter bar + "select track to assign" hint side by side
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.40f);
+    ImGui::InputTextWithHint("##filter", ICON_FA_SEARCH " Search / Filter...", mFilterBuf, sizeof(mFilterBuf));
+    if (mCupPickerTrack >= 0 || mCupPickerSlot >= 0) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton(ICON_FA_TIMES " Clear selection")) {
+            mCupPickerTrack = -1;
+            LoadTrackPreview(-1);
+            mCupPickerSlot = -1;
+            mCupArmedSlot = -1;
+            mCupArmedUnregister = -1;
+        }
+    }
+
+    const int gridCols = 4;
+    const float fileCardH = 90.0f;
+    const float gapX = st.ItemSpacing.x;
+    const float availableWidth = ImGui::GetContentRegionAvail().x;
+    const float oldGridScrollbar = mEntryCount > 12 ? st.ScrollbarSize : 0.0f;
+    const float fileCardW = (availableWidth - st.WindowPadding.x * 2.0f - oldGridScrollbar - gapX * 5.0f) / 6.0f;
+    const float newGridScrollbar = mEntryCount > 8 ? st.ScrollbarSize : 0.0f;
+    const float selectorWidth = fileCardW * gridCols + gapX * (gridCols - 1) +
+                                st.WindowPadding.x * 2.0f + newGridScrollbar;
+
+    // Keep each card at the former six-column width and reserve the remaining width for preview.
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+    if (ImGui::BeginChild("LibraryGrid", ImVec2(selectorWidth, 280.0f), ImGuiChildFlags_None,
+                          ImGuiWindowFlags_None)) {
+        if (mEntryCount == 0) {
+            ImGui::TextDisabled("No tracks or machines on the disk yet.");
+            ImGui::TextWrapped("Save a course in Course Edit or a machine in Create Machine, then refresh.");
+        } else {
+            const float gapY = st.ItemSpacing.y;
+            int visibleCol = 0;
+            for (int i = 0; i < mEntryCount; i++) {
+                GdxContentEntry& entry = mEntries[i];
+                const bool editableTrack =
+                    entry.contentType == GDX_CONTENT_TYPE_TRACK && entry.extension[3] == 'D';
+
+                // Search filter (case-insensitive).
+                if (mFilterBuf[0] != '\0') {
+                    char ftitle[GDX_COURSE_TITLE_MAX + 1];
+                    bool hasFTitle = SessionTitle(entry.name, entry.extension, ftitle, sizeof(ftitle));
+                    const char* nm = entry.name[0] != '\0' ? entry.name : "(unnamed)";
+                    if (ImStristr(nm, nullptr, mFilterBuf, nullptr) == nullptr &&
+                        (!hasFTitle || ImStristr(ftitle, nullptr, mFilterBuf, nullptr) == nullptr)) {
+                        continue;
                     }
                 }
+
+                ImGui::PushID(i);
+
+                // Is this card the currently-selected picker track?
+                const bool isSelected = (mCupPickerTrack == i);
+                // Is this track already in at least one cup slot?
+                int inSlot = -1;
+                for (int s = 0; s < GDX_CONTENT_CUP_SLOT_COUNT; s++) {
+                    if (mCupSlots[s][0] != '\0' && strcmp(mCupSlots[s], entry.name) == 0) {
+                        inSlot = s;
+                        break;
+                    }
+                }
+
+                // Dimming: unselected, non-deck cards fade to ~15% opacity to recede visually.
+                // Selected (being placed) and in-deck cards render at full opacity.
+                const bool prominent = isSelected || inSlot >= 0;
+                const float dimAlpha = prominent ? 1.0f : 0.15f;
+
+                // Card border colour.
+                ImVec4 fcBorder = st.Colors[ImGuiCol_Border];
+                fcBorder.w *= dimAlpha;
+                if (isSelected) {
+                    fcBorder = ImVec4(0.25f, 0.55f, 1.0f, 1.0f);   // blue — selected
+                } else if (inSlot >= 0) {
+                    fcBorder = st.Colors[ImGuiCol_Border]; // default color — in deck
+                }
+
+                // Card background.
+                ImVec4 fcBg = st.Colors[ImGuiCol_FrameBg];
+                if (isSelected) {
+                    fcBg = ImVec4(0.12f, 0.22f, 0.42f, 1.0f);
+                } else {
+                    fcBg.w *= dimAlpha;
+                }
+
+                // Place cards side-by-side; SameLine for every card after the first in a row.
+                if (visibleCol % gridCols != 0) {
+                    ImGui::SameLine(0.0f, gapX);
+                }
+
+                ImGui::PushStyleColor(ImGuiCol_Border,  fcBorder);
+                ImGui::PushStyleColor(ImGuiCol_ChildBg, fcBg);
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 5.0f);
+
+                bool cardClicked = false;
+                bool cardHovered = false;
+                if (ImGui::BeginChild("##fc", ImVec2(fileCardW, fileCardH),
+                                      ImGuiChildFlags_Borders,
+                                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
+                    char title[GDX_COURSE_TITLE_MAX + 1];
+                    const bool hasTitle = SessionTitle(entry.name, entry.extension, title, sizeof(title));
+                    const char* displayName = hasTitle ? title
+                                            : (entry.name[0] != '\0' ? entry.name : "(unnamed)");
+
+                    // Name line.
+                    if (isSelected) {
+                        ImGui::TextColored(ImVec4(0.55f, 0.80f, 1.0f, 1.0f), "%s", displayName);
+                    } else {
+                        ImGui::TextUnformatted(displayName);
+                    }
+
+                    // Type + slot badge.
+                    if (inSlot >= 0) {
+                        ImGui::TextDisabled("%s \xe2\x80\xa2 Slot %d", GdxContentTypeLabel(entry), inSlot + 1);
+                    } else {
+                        ImGui::TextDisabled("%s", GdxContentTypeLabel(entry));
+                    }
+
+                    // Export button.
+                    ImGui::BeginDisabled(busy);
+                    if (ImGui::SmallButton(ICON_FA_UPLOAD " Export")) {
+                        char path[1024];
+                        int rc = gdx_content_export(&entry, path, sizeof(path));
+                        if (rc == GDX_CONTENT_OK) {
+                            snprintf(mStatus, sizeof(mStatus), "Exported to %s", path);
+                            RefreshImports();
+                        } else {
+                            snprintf(mStatus, sizeof(mStatus), "Export of '%s' failed: %s.", entry.name,
+                                     gdx_content_error_string(rc));
+                        }
+                    }
+                    ImGui::EndDisabled();
+
+                    // Full-card invisible click target layered on top (drawn last so buttons above
+                    // still receive their own clicks first via ImGui's last-item priority).
+                    ImGui::SetCursorPos(ImVec2(0.0f, 0.0f));
+                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1,1,1,0.06f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1,1,1,0.10f));
+                    ImGui::InvisibleButton("##hit", ImVec2(fileCardW, fileCardH));
+                    cardClicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
+                    cardHovered = ImGui::IsItemHovered();
+                    ImGui::PopStyleColor(3);
+                }
+                ImGui::EndChild();
+                // IsItemHovered on the child itself — covers the whole card including the border.
+                cardHovered = cardHovered || ImGui::IsItemHovered();
+
+                ImGui::PopStyleVar();    // FrameRounding
+                ImGui::PopStyleColor(2); // Border, ChildBg
+
+                // Card click: either complete a slot-first assignment or select this track.
+                if (cardClicked && editableTrack && !opsDisabled) {
+                    if (mCupPickerSlot >= 0 && mCupPickerSlot < GDX_CONTENT_CUP_SLOT_COUNT &&
+                        (mCupPickerTrack < 0 || mCupPickerTrack >= mEntryCount)) {
+                        const int targetSlot = mCupPickerSlot;
+                        int rc = gdx_content_cup_register_begin(entry.name, targetSlot);
+                        if (rc == GDX_CONTENT_OK) {
+                            mCupWaiting = true;
+                            mCupPickerSlot = -1;
+                        } else {
+                            snprintf(mStatus, sizeof(mStatus), "Cup registration failed: %s.",
+                                     gdx_content_error_string(rc));
+                        }
+                    } else if (mCupPickerTrack == i) {
+                        mCupPickerTrack = -1;
+                        LoadTrackPreview(-1);
+                        mCupPickerSlot = -1;
+                        mCupArmedSlot = -1;
+                        mCupArmedUnregister = -1;
+                    } else {
+                        mCupPickerTrack = i;
+                        LoadTrackPreview(i);
+                        mCupPickerSlot = -1;
+                        mCupArmedSlot = -1;
+                        mCupArmedUnregister = -1;
+                        RefreshCupSlots();
+                    }
+                }
+
+                // Tooltip for non-editable entries.
+                if (cardHovered && !editableTrack) {
+                    ImGui::BeginTooltip();
+                    ImGui::TextDisabled("Machines and locked tracks cannot be added to the Edit Cup.");
+                    ImGui::EndTooltip();
+                }
+
+                ImGui::PopID();
+                visibleCol++;
             }
-            ImGui::EndDisabled();
         }
-        ImGui::PopID();
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleColor(); // outer ChildBg transparent wrapper
+    ImGui::SameLine(0.0f, gapX);
+    if (ImGui::BeginChild("TrackPreviewPanel", ImVec2(0.0f, 280.0f), ImGuiChildFlags_Borders,
+                          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
+        DrawTrackPreview();
+    }
+    ImGui::EndChild();
+
+    DrawImportSection(busy, inGameplay);
+
+    // ── Advanced Sources (collapsible accordions) ────────────────────────────────────────────────
+    DrawImageImportSection(busy, inGameplay);
+    DrawRomImportSection(busy, inGameplay);
+
+    if (mStatus[0] != '\0') {
+        ImGui::Separator();
+        ImGui::TextWrapped("%s", mStatus);
     }
 }
 
@@ -541,6 +914,11 @@ void GdxContentWindow::DrawImportSection(bool busy, bool inGameplay) {
     if (inGameplay) {
         ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "Import is unavailable while a race is live.");
     }
+
+    // Helper banner — overwrite warning (R4 risk communication).
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
+    ImGui::TextWrapped("Importing will overwrite existing files with matching names.");
+    ImGui::PopStyleColor();
 
     if (mImportCount == 0) {
         ImGui::TextDisabled("Drop a .gdxp or .gdxc file into the exports/ folder next to the executable, then refresh.");
@@ -809,7 +1187,11 @@ void GdxContentWindow::OpenRomCourses(const char* path) {
 
 void GdxContentWindow::DrawRomImportSection(bool busy, bool inGameplay) {
     ImGui::Separator();
-    ImGui::TextUnformatted("Import courses from a ROM (EXPERIMENTAL)");
+    // Advanced source: collapsible accordion so it does not crowd the main library view.
+    if (!ImGui::CollapsingHeader(ICON_FA_FOLDER " Import courses from a ROM (EXPERIMENTAL)")) {
+        return;
+    }
+
     ImGui::TextWrapped("A course inside an F-Zero X ROM and a Course Edit track are the same structure, so a "
                        "course-table ROM hack (FZEP tracks, New Lap, and the like) can be read straight into your "
                        "Content Library — no ROM swap, no separate save. Patch your own clean ROM with any "
@@ -981,7 +1363,11 @@ void GdxContentWindow::DrawRomImportSection(bool busy, bool inGameplay) {
 
 void GdxContentWindow::DrawImageImportSection(bool busy, bool inGameplay) {
     ImGui::Separator();
-    ImGui::TextUnformatted("Import from a disk image (EXPERIMENTAL)");
+    // Advanced source: collapsible accordion so it does not crowd the main library view.
+    if (!ImGui::CollapsingHeader(ICON_FA_FOLDER " Import from a 64DD Disk Image (EXPERIMENTAL)")) {
+        return;
+    }
+
     ImGui::TextWrapped("Reads tracks and machines straight out of a 64DD disk dump from an emulator or console "
                        "— no .gdxc conversion step needed. Accepts .ndd, .ndr, .d6r and .n64dd (Project64, "
                        "Mupen64Plus, RMG, ares, 64DD Dump Tool), .disk and .disk_save (ares, MAME, RetroArch), "
