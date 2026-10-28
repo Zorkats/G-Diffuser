@@ -182,8 +182,9 @@ void DrawSegmentLines(int createOption) {
     }
     if (gDesignStyleOption == 10 /* TRACK_DESIGN_STYLE_SPLIT */) {
         ImGui::TextColored(title, "Split");
-        ImGui::TextUnformatted("Click a segment: fork it into path A and path B");
-        ImGui::TextDisabled("Split again on a fork to switch between path A and path B");
+        ImGui::TextUnformatted("Click the first segment of the fork, then its last");
+        ImGui::TextUnformatted("Path B is built beside path A. The same segment twice forks just it");
+        ImGui::TextDisabled("Click a fork to switch between path A and path B");
         return;
     }
     if (gDesignStyleOption == 11 /* TRACK_DESIGN_STYLE_LINK */) {

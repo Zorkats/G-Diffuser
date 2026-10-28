@@ -269,6 +269,11 @@ void gdx_branch_edit_on_insert(int newIndex, const GdxBranchEditPoint* ring, int
             !(fork->flags & GDX_BRANCH_FLAG_SYMMETRIC)) {
             continue;
         }
+        /* A point added to path B is that path's own: path A keeps its points. */
+        if (sLive.viewB) {
+            fork->flags &= (uint8_t) ~GDX_BRANCH_FLAG_SYMMETRIC;
+            continue;
+        }
         /* The new interior point gets a partner on the other path, halfway between its neighbors there. */
         k = newIndex - fork->forkPoint - 1;
         if ((ring == NULL) || (fork->mergePoint >= ringCount) || (k > fork->nodeCount) ||
@@ -436,22 +441,94 @@ int gdx_branch_edit_split_check(int segment, int ringCount, char* reason, int ca
 }
 
 int gdx_branch_edit_split_commit(int segment, const GdxBranchEditPoint* nodeB) {
-    GdxBranchFork* fork;
+    return gdx_branch_edit_span_commit(segment, segment + 2, nodeB, 1);
+}
 
-    if ((nodeB == NULL) || (sLive.set.forkCount >= GDX_BRANCH_MAX_FORKS)) {
+int gdx_branch_edit_span_check(int forkPoint, int mergePoint, int ringCount, char* reason, int cap) {
+    int interior = mergePoint - forkPoint - 1;
+    int f;
+
+    edit_reason(reason, cap, "");
+    if (sLive.viewB) {
+        edit_reason(reason, cap, "Split: show path A first (Split on a fork)");
+        return GDX_BRANCH_ERR_ARGS;
+    }
+    if (forkPoint < 1) {
+        edit_reason(reason, cap, "Split: not on the start segment");
+        return GDX_BRANCH_ERR_SPAN;
+    }
+    if (mergePoint > ringCount - 1) {
+        edit_reason(reason, cap, "Split: not on the last segment");
+        return GDX_BRANCH_ERR_SPAN;
+    }
+    if (interior < 1) {
+        edit_reason(reason, cap, "Split: path A needs a point between the ends");
+        return GDX_BRANCH_ERR_SPAN;
+    }
+    if (interior > GDX_BRANCH_MAX_NODES) {
+        edit_reason(reason, cap, "Split: a path holds at most 32 points");
+        return GDX_BRANCH_ERR_COUNT;
+    }
+    /* Two forks may meet at a point, never share a segment. */
+    for (f = 0; f < sLive.set.forkCount; f++) {
+        if ((forkPoint < sLive.set.forks[f].mergePoint) && (sLive.set.forks[f].forkPoint < mergePoint)) {
+            edit_reason(reason, cap, "Split: it would cross another fork");
+            return GDX_BRANCH_ERR_OVERLAP;
+        }
+    }
+    if (sLive.set.forkCount >= GDX_BRANCH_MAX_FORKS) {
+        edit_reason(reason, cap, "Split: a course has at most 4 forks");
+        return GDX_BRANCH_ERR_COUNT;
+    }
+    if (ringCount + edit_total_nodes() + interior > GDX_BRANCH_MAX_TOTAL_POINTS) {
+        edit_reason(reason, cap, "Split: the course and its forks would pass 64 points");
+        return GDX_BRANCH_ERR_TOTAL;
+    }
+    return GDX_BRANCH_OK;
+}
+
+int gdx_branch_edit_span_commit(int forkPoint, int mergePoint, const GdxBranchEditPoint* nodesB, int count) {
+    GdxBranchSet set;
+    GdxBranchFork* fork;
+    int i;
+
+    if ((nodesB == NULL) || (count < 1) || (count > GDX_BRANCH_MAX_NODES) ||
+        (sLive.set.forkCount >= GDX_BRANCH_MAX_FORKS)) {
         return GDX_BRANCH_ERR_FULL;
     }
-    fork = &sLive.set.forks[sLive.set.forkCount];
+    set = sLive.set;
+    fork = &set.forks[set.forkCount];
     memset(fork, 0, sizeof(*fork));
-    fork->forkPoint = (uint8_t) segment;
-    fork->mergePoint = (uint8_t) (segment + 2);
-    fork->flags = GDX_BRANCH_FLAG_SYMMETRIC;
-    fork->nodeCount = 1;
-    point_to_node(nodeB, &fork->nodes[0]);
-    sLive.set.forkCount++;
+    fork->forkPoint = (uint8_t) forkPoint;
+    fork->mergePoint = (uint8_t) mergePoint;
+    fork->flags = (count == mergePoint - forkPoint - 1) ? GDX_BRANCH_FLAG_SYMMETRIC : 0;
+    fork->nodeCount = (uint8_t) count;
+    for (i = 0; i < count; i++) {
+        point_to_node(&nodesB[i], &fork->nodes[i]);
+    }
+    set.forkCount++;
+    sLive.set = set;
     edit_sort();
     edit_publish();
     return GDX_BRANCH_OK;
+}
+
+int gdx_branch_edit_fork_shape(int f, int* forkPoint, int* mergePoint, float (*pos)[3], int cap) {
+    const GdxBranchFork* fork;
+    int i;
+
+    if ((f < 0) || (f >= sLive.set.forkCount)) {
+        return -1;
+    }
+    fork = &sLive.set.forks[f];
+    *forkPoint = fork->forkPoint;
+    *mergePoint = fork->mergePoint;
+    for (i = 0; (i < fork->nodeCount) && (i < cap); i++) {
+        pos[i][0] = fork->nodes[i].pos[0];
+        pos[i][1] = fork->nodes[i].pos[1];
+        pos[i][2] = fork->nodes[i].pos[2];
+    }
+    return fork->nodeCount;
 }
 
 int gdx_branch_edit_link(int fork, int newMerge, int ringCount) {

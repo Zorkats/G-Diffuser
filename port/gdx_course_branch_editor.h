@@ -21,6 +21,24 @@ void gdx_course_branch_editor_new_course(void);
 void gdx_course_branch_editor_tools(void);
 void gdx_course_branch_editor_active_label(char* out, int cap);
 
+/* Marks the editor overlay (port/gdx_course_edit_mouse.cpp) draws over the course, in world space: the
+ * segment a first Split press picked, and for each fork its fork point, the nodes of the path not showing and
+ * its merge point. Marks sharing a chain are joined by a line, in order. Returns how many were written. */
+#define GDX_BRANCH_MARK_PICK 0
+#define GDX_BRANCH_MARK_END 1
+#define GDX_BRANCH_MARK_NODE 2
+
+typedef struct GdxBranchMark {
+    float pos[3];
+    int kind;
+    int chain;
+} GdxBranchMark;
+
+int gdx_course_branch_editor_marks(GdxBranchMark* out, int cap);
+
+/* 0 when the course has no forks, else 1 while path A shows and 2 while path B shows. */
+int gdx_course_branch_editor_path_showing(void);
+
 #ifdef __cplusplus
 }
 #endif

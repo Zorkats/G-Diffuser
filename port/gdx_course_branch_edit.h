@@ -55,7 +55,13 @@ int gdx_branch_edit_fork_at(int segment);
  * point count. A fork whose ring interior is empty cannot swap and is removed; *dropped counts them. */
 int gdx_branch_edit_swap(GdxBranchEditPoint* ring, int ringCount, int cap, int* dropped);
 
-/* Ring change hooks, called after the editor ring changed. */
+/* Fork f's fork and merge points, and the positions of its stored nodes (the path not showing), up to cap of
+ * them. Returns the stored node count, or -1 when f is not a fork. */
+int gdx_branch_edit_fork_shape(int f, int* forkPoint, int* mergePoint, float (*pos)[3], int cap);
+
+/* Ring change hooks, called after the editor ring changed. An insert inside a symmetric fork in the A view
+ * pairs the new point with a B node; an insert in the B view adds to path B only and makes its fork
+ * asymmetric. */
 void gdx_branch_edit_on_insert(int newIndex, const GdxBranchEditPoint* ring, int ringCount);
 void gdx_branch_edit_on_delete(int deletedIndex);
 void gdx_branch_edit_on_rotate(int newStart, int ringCount);
@@ -71,6 +77,12 @@ int gdx_branch_edit_sync(int ringCount);
  * segment is inside a fork, which the Split tool uses to switch the view. */
 int gdx_branch_edit_split_check(int segment, int ringCount, char* reason, int cap);
 int gdx_branch_edit_split_commit(int segment, const GdxBranchEditPoint* nodeB);
+
+/* Split over ring points forkPoint..mergePoint, whose interior (forkPoint+1..mergePoint-1) is path A as it
+ * stands. span_check returns 0 when a fork with one B node per interior point fits, else a negative code
+ * with reason filled. span_commit adds that fork, symmetric, with nodesB as path B. */
+int gdx_branch_edit_span_check(int forkPoint, int mergePoint, int ringCount, char* reason, int cap);
+int gdx_branch_edit_span_commit(int forkPoint, int mergePoint, const GdxBranchEditPoint* nodesB, int count);
 
 /* Link: fork's path B now merges at ring point newMerge. Returns 0, or a negative code when the fork
  * would break (the editor shows "Travel path broken"). */

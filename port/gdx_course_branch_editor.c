@@ -36,6 +36,8 @@ extern void gdx_course_branch_build_editor(void);
 
 static GdxBranchEditPoint sPoints[GDX_BRANCH_EDIT_MAX_POINTS];
 static s32 sLinkFork = -1;
+/* The segment a first Split press picked, or -1. */
+static s32 sSplitStart = -1;
 
 static void editor_export(void) {
     CourseData* courseData = &COURSE_CONTEXT()->courseData;
@@ -149,8 +151,9 @@ void gdx_course_branch_editor_rebuilt(void) {
     if (gInCourseEditTestRun) {
         return;
     }
-    /* The ring changed, so a fork picked by a first Link press may now be another fork. */
+    /* The ring changed, so a fork or segment picked by a first Link or Split press may now be another. */
     sLinkFork = -1;
+    sSplitStart = -1;
     if (gdx_branch_edit_sync(D_802CB6D0.controlPointCount) != 0) {
         gdx_course_edit_flash_message("Fork removed: the course no longer fits it");
     }
@@ -186,6 +189,7 @@ void gdx_course_branch_editor_loaded(void) {
     char courseId[32];
 
     sLinkFork = -1;
+    sSplitStart = -1;
     if (gdx_course_state_edit_file_id(courseId, sizeof(courseId))) {
         gdx_branch_edit_select(courseId, D_802CB6D0.controlPointCount);
     } else {
@@ -196,6 +200,7 @@ void gdx_course_branch_editor_loaded(void) {
 /* The editor started a new course: it has no forks. */
 void gdx_course_branch_editor_new_course(void) {
     sLinkFork = -1;
+    sSplitStart = -1;
     gdx_branch_edit_clear();
 }
 
@@ -211,9 +216,114 @@ static void editor_refuse(const char* text) {
     Audio_TriggerSystemSE(NA_SE_32);
 }
 
-/* SPLIT design: forks segment (s, s+1) into two paths, one point each, offset to either side of the
- * curve midpoint. On a segment of a fork it switches the editor between path A and path B. */
-static void editor_split(void) {
+/* Least distance between neighboring points, the stock editor's spacing rule (func_xk2_800F07A4). */
+#define SPLIT_MIN_SPACING 498.0f
+
+static f32 editor_distance(const f32* a, const f32* b) {
+    return sqrtf(SQ(a[0] - b[0]) + SQ(a[1] - b[1]) + SQ(a[2] - b[2]));
+}
+
+static void editor_ring_pos(s32 index, f32* out) {
+    out[0] = D_802CB6D0.unk_0000[index].pos.x;
+    out[1] = D_802CB6D0.unk_0000[index].pos.y;
+    out[2] = D_802CB6D0.unk_0000[index].pos.z;
+}
+
+static f32 editor_ring_width(s32 index) {
+    return D_802CB6D0.unk_0000[index].radiusLeft + D_802CB6D0.unk_0000[index].radiusRight;
+}
+
+/* Path B for a split over forkPoint..mergePoint: each path A interior point moved sideways (side 1 left of
+ * travel, -1 right) by a road width and a quarter, so the two roads run side by side. Writes the nodes to
+ * nodesB and returns the smallest margin left by the spacing rule and by the roads of the rest of the course,
+ * other forks included. A negative margin means the new path crowds a point or touches a road. */
+static f32 editor_place_path_b(s32 forkPoint, s32 mergePoint, f32 side, GdxBranchEditPoint* nodesB) {
+    static f32 sOther[GDX_BRANCH_EDIT_MAX_POINTS][3];
+    CourseData* courseData = &COURSE_CONTEXT()->courseData;
+    s32 count = D_802CB6D0.controlPointCount;
+    s32 interior = mergePoint - forkPoint - 1;
+    f32 margin = 1.0e9f;
+    f32 prev[3];
+    f32 here[3];
+    f32 ringPos[3];
+    f32 sideX;
+    f32 sideZ;
+    f32 length;
+    f32 width;
+    s32 otherFork;
+    s32 otherMerge;
+    s32 nodes;
+    s32 f;
+    s32 i;
+    s32 j;
+    s32 k;
+
+    for (i = 0; i < interior; i++) {
+        s32 point = forkPoint + 1 + i;
+        GdxBranchEditPoint* node = &nodesB[i];
+
+        editor_ring_pos(point - 1, prev);
+        editor_ring_pos(point + 1, here);
+        sideX = -(here[2] - prev[2]);
+        sideZ = here[0] - prev[0];
+        length = sqrtf(SQ(sideX) + SQ(sideZ));
+        if (length < 1.0f) {
+            return -1.0f;
+        }
+        width = editor_ring_width(point);
+        editor_ring_pos(point, ringPos);
+        node->pos[0] = Math_Round(ringPos[0] + side * sideX / length * width * 1.25f);
+        node->pos[1] = ringPos[1];
+        node->pos[2] = Math_Round(ringPos[2] + side * sideZ / length * width * 1.25f);
+        node->radiusLeft = D_802CB6D0.unk_0000[point].radiusLeft;
+        node->radiusRight = D_802CB6D0.unk_0000[point].radiusRight;
+        node->trackSegmentInfo = D_802CB6D0.unk_0000[point].trackSegmentInfo;
+        node->bankAngle = courseData->bankAngle[point];
+        for (k = 0; k < GDX_BRANCH_EDIT_PARTS; k++) {
+            node->parts[k] = 0;
+        }
+    }
+
+    for (i = 0; i <= interior; i++) {
+        if (i == 0) {
+            editor_ring_pos(forkPoint, prev);
+        } else {
+            prev[0] = nodesB[i - 1].pos[0];
+            prev[1] = nodesB[i - 1].pos[1];
+            prev[2] = nodesB[i - 1].pos[2];
+        }
+        if (i == interior) {
+            editor_ring_pos(mergePoint, here);
+        } else {
+            here[0] = nodesB[i].pos[0];
+            here[1] = nodesB[i].pos[1];
+            here[2] = nodesB[i].pos[2];
+        }
+        margin = MIN(margin, editor_distance(prev, here) - SPLIT_MIN_SPACING);
+    }
+
+    for (i = 0; i < interior; i++) {
+        width = nodesB[i].radiusLeft + nodesB[i].radiusRight;
+        for (j = 0; j < count; j++) {
+            if ((j == forkPoint) || (j == mergePoint)) {
+                continue;
+            }
+            editor_ring_pos(j, ringPos);
+            margin = MIN(margin, editor_distance(nodesB[i].pos, ringPos) - (width + editor_ring_width(j)) * 0.5f);
+        }
+        for (f = 0; f < gdx_branch_edit_fork_count(); f++) {
+            nodes = gdx_branch_edit_fork_shape(f, &otherFork, &otherMerge, sOther, GDX_BRANCH_EDIT_MAX_POINTS);
+            for (k = 0; k < nodes; k++) {
+                margin = MIN(margin, editor_distance(nodesB[i].pos, sOther[k]) - width);
+            }
+        }
+    }
+    return margin;
+}
+
+/* SPLIT design, one segment: forks segment (s, s+1) into two paths, one point each, offset to either side of
+ * the curve midpoint. */
+static void editor_split_segment(s32 segment) {
     CourseData* courseData = &COURSE_CONTEXT()->courseData;
     CourseSegment newSeg;
     CourseSegment* activeSeg;
@@ -227,22 +337,14 @@ static void editor_split(void) {
     f32 sideZ;
     f32 length;
     f32 offset;
-    s32 segment = D_800D6CA0.unk_0C;
     s32 count = D_802CB6D0.controlPointCount;
     s32 bankAverage;
     s32 rc;
     s32 i;
 
     rc = gdx_branch_edit_split_check(segment, count, reason, sizeof(reason));
-    if (rc == 1) {
-        if (editor_swap()) {
-            Audio_TriggerSystemSE(NA_SE_39);
-            gdx_course_edit_flash_message(gdx_branch_edit_view_b() ? "Showing path B" : "Showing path A");
-        }
-        return;
-    }
     if (rc != 0) {
-        editor_refuse(reason);
+        editor_refuse((rc == 1) ? "Split: this segment is already a fork" : reason);
         return;
     }
     if (count < 4) {
@@ -276,10 +378,10 @@ static void editor_split(void) {
     pathB.x = Math_Round(mid.x - sideX / length * offset);
     pathB.y = pathA.y;
     pathB.z = Math_Round(mid.z - sideZ / length * offset);
-    if ((Math_VectorGetDistance(activeSeg->pos, pathA) < 498.0f) ||
-        (Math_VectorGetDistance(pathA, nextSeg->pos) < 498.0f) ||
-        (Math_VectorGetDistance(activeSeg->pos, pathB) < 498.0f) ||
-        (Math_VectorGetDistance(pathB, nextSeg->pos) < 498.0f)) {
+    if ((Math_VectorGetDistance(activeSeg->pos, pathA) < SPLIT_MIN_SPACING) ||
+        (Math_VectorGetDistance(pathA, nextSeg->pos) < SPLIT_MIN_SPACING) ||
+        (Math_VectorGetDistance(activeSeg->pos, pathB) < SPLIT_MIN_SPACING) ||
+        (Math_VectorGetDistance(pathB, nextSeg->pos) < SPLIT_MIN_SPACING)) {
         editor_refuse("Split: this segment is too short");
         return;
     }
@@ -313,6 +415,78 @@ static void editor_split(void) {
     func_i2_800BE8BC(gCurrentCourseInfo);
     func_80074CE4(gCurrentCourseInfo);
     D_xk2_800F7040 = 3;
+}
+
+/* SPLIT design, several segments: path A keeps its points from forkPoint to mergePoint and path B is built
+ * beside it, on whichever side leaves more room. */
+static void editor_split_span(s32 forkPoint, s32 mergePoint) {
+    static GdxBranchEditPoint sLeft[GDX_BRANCH_EDIT_MAX_POINTS];
+    static GdxBranchEditPoint sRight[GDX_BRANCH_EDIT_MAX_POINTS];
+    char reason[EDITOR_LABEL_CAP];
+    f32 leftMargin;
+    f32 rightMargin;
+    s32 count = D_802CB6D0.controlPointCount;
+
+    if (count < 4) {
+        editor_refuse("Split: the course needs 4 or more points");
+        return;
+    }
+    if (gdx_branch_edit_span_check(forkPoint, mergePoint, count, reason, sizeof(reason)) != 0) {
+        editor_refuse(reason);
+        return;
+    }
+    leftMargin = editor_place_path_b(forkPoint, mergePoint, 1.0f, sLeft);
+    rightMargin = editor_place_path_b(forkPoint, mergePoint, -1.0f, sRight);
+    if ((leftMargin < 0.0f) && (rightMargin < 0.0f)) {
+        editor_refuse("Split: no room for path B beside path A");
+        return;
+    }
+
+    gdx_course_edit_undo_set_pending_label(GDX_COURSE_EDIT_UNDO_LABEL_SPLIT);
+    func_xk2_800EF78C();
+    gdx_branch_edit_span_commit(forkPoint, mergePoint, (leftMargin >= rightMargin) ? sLeft : sRight,
+                                mergePoint - forkPoint - 1);
+    Audio_TriggerSystemSE(NA_SE_39);
+    gdx_course_edit_flash_message("Split: path B added");
+    D_xk2_800F7040 = 3;
+}
+
+/* SPLIT design: the first press picks the fork's first segment, the second press its last, which may be the
+ * same segment. A first press on a segment of a fork switches the editor between path A and path B. */
+static void editor_split(void) {
+    char reason[EDITOR_LABEL_CAP];
+    s32 segment = D_800D6CA0.unk_0C;
+    s32 first;
+    s32 last;
+    s32 rc;
+
+    if (sSplitStart < 0) {
+        rc = gdx_branch_edit_split_check(segment, D_802CB6D0.controlPointCount, reason, sizeof(reason));
+        if (rc == 1) {
+            if (editor_swap()) {
+                Audio_TriggerSystemSE(NA_SE_39);
+                gdx_course_edit_flash_message(gdx_branch_edit_view_b() ? "Showing path B" : "Showing path A");
+            }
+            return;
+        }
+        if (rc != 0) {
+            editor_refuse(reason);
+            return;
+        }
+        sSplitStart = segment;
+        Audio_TriggerSystemSE(NA_SE_39);
+        gdx_course_edit_flash_message("Split: choose the last segment of the fork");
+        return;
+    }
+
+    first = MIN(sSplitStart, segment);
+    last = MAX(sSplitStart, segment);
+    sSplitStart = -1;
+    if (first == last) {
+        editor_split_segment(first);
+    } else {
+        editor_split_span(first, last + 1);
+    }
 }
 
 /* LINK design: the first press picks a fork (its path B end), the second press picks the ring point
@@ -359,6 +533,9 @@ void gdx_course_branch_editor_tools(void) {
     if (!((gCreateOption == CREATE_OPTION_DESIGN) && (gDesignStyleOption == TRACK_DESIGN_STYLE_LINK))) {
         sLinkFork = -1;
     }
+    if (!((gCreateOption == CREATE_OPTION_DESIGN) && (gDesignStyleOption == TRACK_DESIGN_STYLE_SPLIT))) {
+        sSplitStart = -1;
+    }
     if (editor_tool_pressed(TRACK_DESIGN_STYLE_SPLIT)) {
         editor_split();
     } else if (editor_tool_pressed(TRACK_DESIGN_STYLE_LINK)) {
@@ -375,4 +552,59 @@ void gdx_course_branch_editor_active_label(char* out, int cap) {
         return;
     }
     gdx_branch_edit_label(D_800D6CA0.unk_0C, out, cap);
+}
+
+static s32 editor_mark(GdxBranchMark* out, s32 written, s32 cap, const f32* pos, s32 kind, s32 chain) {
+    if (written >= cap) {
+        return written;
+    }
+    out[written].pos[0] = pos[0];
+    out[written].pos[1] = pos[1];
+    out[written].pos[2] = pos[2];
+    out[written].kind = kind;
+    out[written].chain = chain;
+    return written + 1;
+}
+
+int gdx_course_branch_editor_marks(GdxBranchMark* out, int cap) {
+    static f32 sNodes[GDX_BRANCH_EDIT_MAX_POINTS][3];
+    s32 count = D_802CB6D0.controlPointCount;
+    s32 written = 0;
+    s32 forkPoint;
+    s32 mergePoint;
+    s32 nodes;
+    s32 f;
+    s32 i;
+    f32 pos[3];
+
+    if ((out == NULL) || gInCourseEditTestRun || (count < 4)) {
+        return 0;
+    }
+    for (f = 0; f < gdx_branch_edit_fork_count(); f++) {
+        nodes = gdx_branch_edit_fork_shape(f, &forkPoint, &mergePoint, sNodes, GDX_BRANCH_EDIT_MAX_POINTS);
+        if ((nodes < 0) || (mergePoint >= count)) {
+            continue;
+        }
+        editor_ring_pos(forkPoint, pos);
+        written = editor_mark(out, written, cap, pos, GDX_BRANCH_MARK_END, f);
+        for (i = 0; i < nodes; i++) {
+            written = editor_mark(out, written, cap, sNodes[i], GDX_BRANCH_MARK_NODE, f);
+        }
+        editor_ring_pos(mergePoint, pos);
+        written = editor_mark(out, written, cap, pos, GDX_BRANCH_MARK_END, f);
+    }
+    if ((sSplitStart >= 0) && (sSplitStart < count)) {
+        editor_ring_pos(sSplitStart, pos);
+        written = editor_mark(out, written, cap, pos, GDX_BRANCH_MARK_PICK, GDX_BRANCH_EDIT_MAX_POINTS);
+        editor_ring_pos((sSplitStart + 1) % count, pos);
+        written = editor_mark(out, written, cap, pos, GDX_BRANCH_MARK_PICK, GDX_BRANCH_EDIT_MAX_POINTS);
+    }
+    return written;
+}
+
+int gdx_course_branch_editor_path_showing(void) {
+    if (gdx_branch_edit_fork_count() == 0) {
+        return 0;
+    }
+    return gdx_branch_edit_view_b() ? 2 : 1;
 }

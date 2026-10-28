@@ -28,6 +28,7 @@
 #include "ship/window/gui/GuiWindow.h"
 #include "fast/Fast3dWindow.h"
 #include "fast/Fast3dGui.h"
+#include "gdx_course_branch_editor.h"
 #include "gdx_course_edit_input.h"
 #include "gdx_course_edit_undo.h"
 #include <imgui.h>
@@ -1642,6 +1643,63 @@ void CourseEditDrawLineUpPreview(void) {
     }
 }
 
+// Course forks (port/gdx_course_branch_editor.c): green fork and merge points joined through the nodes of the path
+// not showing, the segment a first Split press picked, and which path the editor shows. Drawn in the editor screens
+// whether or not the mouse drive is on, since the controller has no other way to see the hidden path.
+void CourseEditDrawForkMarks(void) {
+    std::shared_ptr<Fast::Fast3dWindow> wnd = CourseEditMouseWindow();
+    if (!CourseEditEditorActive() || CourseEditMouseInSubMenu() || gCreateOption < 1 || gCreateOption > 3 ||
+        wnd == nullptr || wnd->GetGui()->GetMenuOrMenubarVisible()) {
+        return;
+    }
+    const int showing = gdx_course_branch_editor_path_showing();
+    GdxBranchMark marks[160];
+    const int count = gdx_course_branch_editor_marks(marks, static_cast<int>(sizeof(marks) / sizeof(marks[0])));
+    if (showing == 0 && count == 0) {
+        return;
+    }
+
+    const ImU32 green = IM_COL32(70, 230, 110, 255);
+    const ImU32 line = IM_COL32(70, 230, 110, 150);
+    const ImU32 node = IM_COL32(235, 245, 235, 230);
+    ImDrawList* draw = ImGui::GetForegroundDrawList();
+    ImVec2 last(0.0f, 0.0f);
+    bool haveLast = false;
+    for (int i = 0; i < count; i++) {
+        ImVec2 at(0.0f, 0.0f);
+        const Vec3f pos = { marks[i].pos[0], marks[i].pos[1], marks[i].pos[2] };
+        const bool visible = CourseEditWorldToWindow(pos, &at);
+        if (visible && haveLast && marks[i].chain == marks[i - 1].chain) {
+            draw->AddLine(last, at, line, 2.0f);
+        }
+        if (visible) {
+            if (marks[i].kind == GDX_BRANCH_MARK_NODE) {
+                draw->AddCircleFilled(at, 3.5f, node);
+            } else {
+                draw->AddCircleFilled(at, 6.0f, green);
+                draw->AddCircle(at, 6.0f, IM_COL32(255, 255, 255, 230), 0, 1.5f);
+            }
+        }
+        last = at;
+        haveLast = visible;
+    }
+
+    ImVec2 corner(0.0f, 0.0f);
+    if (showing != 0 && CourseEditGameToWindow(312.0f, 60.0f, &corner)) {
+        const char* title = showing == 2 ? "Path B showing" : "Path A showing";
+        const char* hint = "Split on a fork switches paths";
+        const ImVec2 titleSize = ImGui::CalcTextSize(title);
+        const ImVec2 hintSize = ImGui::CalcTextSize(hint);
+        const float width = (std::max)(titleSize.x, hintSize.x) + 12.0f;
+        const ImVec2 a(corner.x - width, corner.y);
+        const ImVec2 b(corner.x, corner.y + titleSize.y + hintSize.y + 8.0f);
+        draw->AddRectFilled(a, b, IM_COL32(10, 13, 20, 190), 4.0f);
+        draw->AddRect(a, b, IM_COL32(70, 230, 110, 120), 4.0f);
+        draw->AddText(ImVec2(a.x + 6.0f, a.y + 4.0f), showing == 2 ? IM_COL32(120, 200, 255, 255) : green, title);
+        draw->AddText(ImVec2(a.x + 6.0f, a.y + 4.0f + titleSize.y), IM_COL32(190, 190, 190, 255), hint);
+    }
+}
+
 // Shift-drag selection rectangle in window pixels, the same space as the press and release samples. Drawn on the
 // foreground list so it sits above the editor windows, and only while a box select is in progress.
 void CourseEditDrawSelectionBox(void) {
@@ -1664,6 +1722,7 @@ public:
         : Ship::GuiWindow("gOpenWindows.CourseEditDeleteOverlay", true, "Course Edit Delete Overlay") {}
 
     void Draw() override {
+        CourseEditDrawForkMarks();
         GdxCourseEditDrawHintStrip();
         CourseEditDrawSelectionBox();
         CourseEditDrawDeleteHover();

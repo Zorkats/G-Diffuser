@@ -188,6 +188,64 @@ static void test_delete_rotate_reverse(void) {
     CHECK(gdx_branch_edit_sync(sCount + 3) == 1, "a ring count the hooks missed drops the forks");
 }
 
+static void test_span_split(void) {
+    GdxBranchEditPoint nodesB[4];
+    char reason[96];
+    float pos[GDX_BRANCH_EDIT_MAX_POINTS][3];
+    int forkPoint;
+    int mergePoint;
+    int dropped;
+    int count;
+    int i;
+    const GdxBranchFork* fork;
+
+    make_ring(12);
+    gdx_branch_edit_clear();
+    gdx_branch_edit_sync(sCount);
+    CHECK(gdx_branch_edit_span_check(0, 4, sCount, reason, sizeof(reason)) < 0, "span refuses the start point");
+    CHECK(gdx_branch_edit_span_check(8, 12, sCount, reason, sizeof(reason)) < 0, "span refuses a merge at point 0");
+    CHECK(gdx_branch_edit_span_check(3, 4, sCount, reason, sizeof(reason)) < 0, "span refuses an empty path A");
+    CHECK(gdx_branch_edit_span_check(3, 7, sCount, reason, sizeof(reason)) == 0, "span accepts 3..7");
+
+    memset(nodesB, 0, sizeof(nodesB));
+    for (i = 0; i < 3; i++) {
+        nodesB[i].pos[0] = 1000.0f * (float) (4 + i);
+        nodesB[i].pos[2] = 900.0f;
+    }
+    CHECK(gdx_branch_edit_span_commit(3, 7, nodesB, 3) == 0, "span commit");
+    fork = fork_of(0);
+    CHECK((fork != NULL) && (fork->forkPoint == 3) && (fork->mergePoint == 7) && (fork->nodeCount == 3) &&
+              (fork->flags & GDX_BRANCH_FLAG_SYMMETRIC),
+          "span makes F=3 M=7 with three symmetric nodes");
+    CHECK(gdx_branch_edit_sync(sCount) == 0, "span set survives sync");
+    CHECK(gdx_branch_edit_span_check(5, 9, sCount, reason, sizeof(reason)) < 0, "span refuses crossing a fork");
+    CHECK(gdx_branch_edit_span_check(7, 9, sCount, reason, sizeof(reason)) == 0, "span may start at a merge point");
+    CHECK(gdx_branch_edit_span_check(1, 3, sCount, reason, sizeof(reason)) == 0, "span may end at a fork point");
+
+    CHECK((gdx_branch_edit_fork_shape(0, &forkPoint, &mergePoint, pos, GDX_BRANCH_EDIT_MAX_POINTS) == 3) &&
+              (forkPoint == 3) && (mergePoint == 7) && (pos[2][0] == 6000.0f) && (pos[2][2] == 900.0f),
+          "fork shape reports the ends and path B");
+    CHECK(gdx_branch_edit_fork_shape(1, &forkPoint, &mergePoint, pos, GDX_BRANCH_EDIT_MAX_POINTS) < 0,
+          "fork shape refuses a missing fork");
+
+    /* In the B view an insert grows path B only. */
+    count = gdx_branch_edit_swap(sRing, sCount, GDX_BRANCH_EDIT_MAX_POINTS, &dropped);
+    sCount = count;
+    CHECK(gdx_branch_edit_view_b() && (sRing[4].pos[2] == 900.0f), "B view shows the span's path B");
+    ring_insert(4, 4500.0f);
+    fork = fork_of(0);
+    CHECK((fork != NULL) && (fork->mergePoint == 8) && (fork->nodeCount == 3) &&
+              !(fork->flags & GDX_BRANCH_FLAG_SYMMETRIC),
+          "insert in the B view adds to path B only and makes the fork asymmetric");
+    CHECK(gdx_branch_edit_span_check(9, 10, sCount, reason, sizeof(reason)) < 0, "span refuses the B view");
+    count = gdx_branch_edit_swap(sRing, sCount, GDX_BRANCH_EDIT_MAX_POINTS, &dropped);
+    sCount = count;
+    fork = fork_of(0);
+    CHECK((count == 12) && (fork != NULL) && (fork->mergePoint == 7) && (fork->nodeCount == 4) &&
+              (fork->nodes[1].pos[0] == 4500.0f),
+          "back in the A view path A is unchanged and path B has four nodes");
+}
+
 static void test_undo_state_and_commit(void) {
     unsigned char state[GDX_BRANCH_EDIT_STATE_BYTES];
     GdxBranchEditPoint nodeB;
@@ -224,6 +282,7 @@ int main(void) {
     test_split_and_swap();
     test_link_and_asymmetric_swap();
     test_delete_rotate_reverse();
+    test_span_split();
     test_undo_state_and_commit();
     if (sFailures != 0) {
         printf("%d course branch edit test(s) failed\n", sFailures);
