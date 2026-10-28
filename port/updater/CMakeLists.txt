@@ -14,3 +14,11 @@ if(WIN32)
 elseif(GDX_PORT_WARN_FLAGS)
     target_compile_options(gdx-update PRIVATE ${GDX_PORT_WARN_FLAGS})
 endif()
+if(UNIX AND NOT APPLE)
+    # The release tarball bundles zlib into lib/ on some targets (linux-arm64), so the helper needs
+    # a $ORIGIN RUNPATH like G-Diffuser's. It runs as a copy in <install>/.update/, hence ../lib;
+    # $ORIGIN/lib covers running it from the install directory itself.
+    set_target_properties(gdx-update PROPERTIES
+        BUILD_WITH_INSTALL_RPATH TRUE
+        INSTALL_RPATH "$ORIGIN/lib;$ORIGIN/../lib")
+endif()
