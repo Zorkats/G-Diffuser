@@ -570,6 +570,9 @@ GdxMenu::GdxMenu() : Ship::GuiWindow("gOpenMenuBar", false, "G-Diffuser Menu") {
     // stock saves solely via the manual Save-Ghost prompt (menus.c Gdx_AutosaveGhostOnRecord).
     CVarRegisterInteger("gEnhancements.Gameplay.AutosaveOnRecord", 0);
     CVarRegisterInteger("gEnhancements.Gameplay.SkippableTransitions", 0);
+    // SkippableEnding: hold START ~1s to skip the GP ending ceremony and the credits (common.c
+    // Skip_UpdateHoldStart). Safe because the cup clear is saved on the GP results screen first.
+    CVarRegisterInteger("gEnhancements.Gameplay.SkippableEnding", 1);
     // LavaNoKill gates the Racer_ReceiveDamage call in racer.c when a machine is on a COURSE_EFFECT_LAVA
     // strip: off = drain can kill (stock), on = drain stops at 0.1 energy. Default off for stock parity.
     CVarRegisterInteger("gEnhancements.Gameplay.LavaNoKill", 0);
