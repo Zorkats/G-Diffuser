@@ -45,7 +45,6 @@ extern unsigned char D_i2_80106F14[];
  * BGM_SECTOR (sfx.h). */
 #define GDX_COURSE_INDEX_RAINBOW_ROAD 18u
 #define GDX_BGM_SECTOR 7u
-
 /* Storage the repointed table entries borrow for the rest of the run. */
 static char sNameStore[GDX_COURSE_STRINGS_NAME_MAX][GDX_COURSE_STRING_MAX];
 static char sSubtitleStore[GDX_COURSE_STRINGS_SUB_MAX][GDX_COURSE_STRING_MAX];
@@ -262,7 +261,6 @@ void gdx_course_strings_apply(void) {
         if ((i == GDX_COURSE_INDEX_RAINBOW_ROAD) && (sDecoded.bgm[i] == GDX_BGM_SECTOR)) {
             continue;
         }
-
         D_800CF4D8[i] = sDecoded.bgm[i];
         D_i2_80106F14[i] = sDecoded.bgm[i];
         songs++;

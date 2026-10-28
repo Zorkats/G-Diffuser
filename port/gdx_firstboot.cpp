@@ -30,6 +30,10 @@
 #include <limits.h>        // PATH_MAX
 #endif
 #endif
+#ifdef __ANDROID__
+#include "android/gdx_android_paths.h"
+#include "android/gdx_android_bridge.h"
+#endif
 
 namespace fs = std::filesystem;
 
@@ -146,7 +150,14 @@ const char* const kRomDevCandidates[] = { "baserom.us.rev0.z64", "baserom.pal.re
 
 fs::path executableDir(const char* argv0) {
     std::error_code ec;
-#ifdef _WIN32
+#if defined(__ANDROID__)
+    // /proc/self/exe is real here and useless: it names the zygote (app_process64), because the
+    // game is a shared library the runtime loaded rather than a program the kernel started. The
+    // app's external files directory is what stands in for both the install directory and the
+    // data directory on this platform -- see port/android/gdx_android_paths.h.
+    (void) argv0;
+    return fs::path(gdx_android_files_dir());
+#elif defined(_WIN32)
     wchar_t buf[MAX_PATH] = {};
     DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH);
     if (n > 0 && n < MAX_PATH) {
@@ -1195,7 +1206,7 @@ std::string GdxFirstBootDescribeMissing(const std::string& dataDirIn) {
 }
 
 bool NativeFilePickerAvailable() {
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__ANDROID__)
     return true;
 #else
     return false;
@@ -1219,6 +1230,21 @@ std::string PickIplFile() {
     fs::path p = pickFile(L"Select your 64DD IPL ROM (N64DDIPLROM.n64)",
                           L"64DD IPL ROM (*.n64;*.z64)\0*.n64;*.z64\0All files\0*.*\0");
     return p.string();
+}
+#elif defined(__ANDROID__)
+// One picker for all three, because Android's is not told what it is looking for: providers
+// report .z64/.ndd/.n64 inconsistently and a MIME filter greys out the very file being sought,
+// so the intent asks for */* and the file is judged afterwards by the same validators every
+// other acquisition path uses. The prompts differ only in the wording the setup screen already
+// shows above each row, so there is nothing left here to vary.
+std::string PickRomFile() {
+    return gdx::android::PickDocumentBlocking();
+}
+std::string PickDiskFile() {
+    return gdx::android::PickDocumentBlocking();
+}
+std::string PickIplFile() {
+    return gdx::android::PickDocumentBlocking();
 }
 #else
 std::string PickRomFile() {

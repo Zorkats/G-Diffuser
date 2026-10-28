@@ -32,6 +32,7 @@ Full prerequisites and commands are in the [README](README.md#building). The sho
 | **Clone** | `git clone --recursive` — the build needs the submodules; a plain clone will not configure |
 | **Windows** | Visual Studio 2022, CMake 3.24+, Python 3 |
 | **Linux** | CMake 3.24+, Ninja, a C++20 compiler, Python 3, and libultraship's dependencies from your distribution |
+| **Android** | `android/gradlew -p android assembleDebug`. JDK 17–25, SDK 36, NDK 30.0.15729638, CMake 3.30.3 from the SDK manager, Python 3. See [docs/ANDROID.md](docs/ANDROID.md) |
 
 **Python 3 is required, not optional.** `port/CMakeLists.txt:9` is
 `find_package(Python3 COMPONENTS Interpreter REQUIRED)` — configure fails outright without an
