@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">G-Diffuser</string>
+
+    <!-- On-screen pad -->
+    <string name="menu_button">Menu</string>
+    <string name="mods_button">Packs</string>
+    <string name="start_button">Start</string>
+    <string name="c_button">C</string>
+    <string name="dpad_description">Directional pad</string>
+    <string name="stick_description">Analog stick</string>
+
+    <!-- Manager screens -->
+    <string name="mods_title">Packs</string>
+    <string name="romhacks_title">ROM Hacks</string>
+    <string name="saves_title">Saves</string>
+
+    <!-- Launcher -->
+    <string name="launcher_choose">Choose…</string>
+    <string name="launcher_build">Build the game data</string>
+    <string name="launcher_preparing">Unpacking the bundled game files…</string>
+    <string name="launcher_verifying">Checking your %1$s…</string>
+    <string name="launcher_intro">G-Diffuser needs three files from you. Nothing is bundled with the app: your dumps stay on this device and are converted here.\n\nSupply all three, then build the game data. It happens once.</string>
+    <string name="launcher_extracting">Building the game data from your files.\n\nThis happens once and can take several minutes. Keep the screen on.</string>
+</resources>

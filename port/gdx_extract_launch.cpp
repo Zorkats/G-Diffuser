@@ -29,6 +29,12 @@
 #ifndef GDX_O2R_EXPECTED_ENTRY_COUNT
 #define GDX_O2R_EXPECTED_ENTRY_COUNT 0
 #endif
+// Emitted by the same generator for the order-independent fallback gate; an older generated
+// header predates it and falls back to the placeholder, which reads as "no golden" exactly like
+// the SHA-256 placeholder above.
+#ifndef GDX_O2R_EXPECTED_CONTENT_SHA256
+#define GDX_O2R_EXPECTED_CONTENT_SHA256 "0000000000000000000000000000000000000000000000000000000000000000"
+#endif
 
 // JP-profile golden constants. No validated JP archive exists yet, so the placeholder zeros below
 // make the JP path EXPERIMENTAL: it produces and installs fzerox-jp.o2r but SKIPS the SHA-256 /
@@ -45,6 +51,9 @@
 #endif
 #ifndef GDX_O2R_EXPECTED_ENTRY_COUNT_JP
 #define GDX_O2R_EXPECTED_ENTRY_COUNT_JP 0
+#endif
+#ifndef GDX_O2R_EXPECTED_CONTENT_SHA256_JP
+#define GDX_O2R_EXPECTED_CONTENT_SHA256_JP "0000000000000000000000000000000000000000000000000000000000000000"
 #endif
 
 // PAL-profile golden constants. No validated PAL archive exists yet, so the placeholder zeros below
@@ -109,7 +118,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <algorithm>  // std::sort, for the order-independent content digest
 #include <filesystem>
+#include <iostream>  // the forked child flushes cout/cerr by hand before _exit
 #include <string>
 #include <vector>
 #include <atomic>
@@ -189,6 +200,26 @@ constexpr const char* kExtractBinaryName = "gdx-extract.exe";
 constexpr const char* kExtractBinaryName = "gdx-extract";
 #endif
 
+// Whether this platform's extractor can reproduce the golden archive BYTE for byte.
+//
+// Leave the order-independent content gate available for a future toolchain which is explicitly
+// proven not to reproduce the container layout. The pinned Android build is bit-reproducible too:
+// its Torch target fixes the two ABI/compiler choices which used to alter FZX:COURSE payloads (see
+// port/CMakeLists.txt), and an owner-device extraction matches the desktop golden byte for byte.
+constexpr bool kArchiveIsBitReproducible = true;
+
+// Whether the extractor is compiled into this binary rather than spawned from disk. Android
+// only -- see the child branch in runExtractorPosix.
+#ifdef __ANDROID__
+constexpr bool kExtractorIsLinkedIn = true;
+
+// Torch's main(), renamed. Defined in port/android/gdx_extract_entry.cpp; declared here rather
+// than in a header of its own because this is its only caller.
+extern "C" int gdx_extract_main(int argc, char* argv[]);
+#else
+constexpr bool kExtractorIsLinkedIn = false;
+#endif
+
 // Fallback ROM SHA-1s (the keys decomp/config.yml uses). config.yml is authoritative at runtime --
 // recipes are the single source of truth -- and these are read only when it cannot be.
 constexpr const char* kExpectedRomSha1Fallback = "5f658e88ffa9de23cba6986a8fd3d3a90d7b4340";
@@ -211,6 +242,17 @@ constexpr std::uint32_t kExpectedRomCrcPal = 0u;
 // compile-time constant here, hence the conservative upper estimate.
 constexpr std::uintmax_t kEstimatedArchiveBytes = 128u * 1024u * 1024u; // ~128 MiB estimate.
 constexpr std::uintmax_t kRequiredFreeBytes = 3u * kEstimatedArchiveBytes;
+
+// How long the extractor gets before it is treated as hung. A desktop finishes in a couple of
+// seconds and 120 is already generous there; a mid-range phone doing the same work on a slower
+// core and slower storage can legitimately take minutes, and a false timeout is worse than a
+// slow first launch -- it deletes the staging directory and drops the user to the raw-ROM
+// fallback with nothing to show for the wait.
+#ifdef __ANDROID__
+constexpr int kExtractDeadlineSeconds = 900;
+#else
+constexpr int kExtractDeadlineSeconds = 120;
+#endif
 
 // ── Small helpers ────────────────────────────────────────────────────────────────────────────────
 
@@ -635,6 +677,9 @@ struct RomProfile {
     const char* archiveName;      // fzerox.o2r / fzerox-jp.o2r / fzerox-pal.o2r
     std::string expectedSha1;     // ROM SHA-1 (config.yml, else fallback constant)
     std::string goldenSha256;     // lowercase; all-zeros == no golden (experimental)
+    // Order-independent counterpart of goldenSha256, used where the archive cannot be reproduced
+    // byte for byte (see kArchiveIsBitReproducible).
+    std::string goldenContentSha256;
     long goldenEntryCount;        // 0 == unknown (experimental)
     std::uint32_t versionCrc;     // -u arg (0 == unknown)
     bool experimental;            // true when goldenSha256 is the placeholder
@@ -662,6 +707,7 @@ std::vector<RomProfile> buildRomProfiles(const fs::path& configYml) {
         us.archiveName = kArchiveName;
         us.expectedSha1 = resolveSha1(kRecipePathUs, kExpectedRomSha1Fallback);
         us.goldenSha256 = toLowerHex(std::string(GDX_O2R_EXPECTED_SHA256));
+        us.goldenContentSha256 = toLowerHex(std::string(GDX_O2R_EXPECTED_CONTENT_SHA256));
         us.goldenEntryCount = static_cast<long>(GDX_O2R_EXPECTED_ENTRY_COUNT);
         us.versionCrc = kExpectedRomCrc;
         us.experimental = isPlaceholderSha256(us.goldenSha256);
@@ -674,6 +720,7 @@ std::vector<RomProfile> buildRomProfiles(const fs::path& configYml) {
         jp.archiveName = kArchiveNameJp;
         jp.expectedSha1 = resolveSha1(kRecipePathJp, kExpectedRomSha1FallbackJp);
         jp.goldenSha256 = toLowerHex(std::string(GDX_O2R_EXPECTED_SHA256_JP));
+        jp.goldenContentSha256 = toLowerHex(std::string(GDX_O2R_EXPECTED_CONTENT_SHA256_JP));
         jp.goldenEntryCount = static_cast<long>(GDX_O2R_EXPECTED_ENTRY_COUNT_JP);
         jp.versionCrc = kExpectedRomCrcJp;
         jp.experimental = isPlaceholderSha256(jp.goldenSha256);
@@ -733,6 +780,118 @@ long zipEntryCount(const fs::path& p) {
         }
     }
     return -1;
+}
+
+// Order-independent content digest of a zip, matching o2r_common.content_digest() in the harness.
+//
+// WHY THIS EXISTS. The archive SHA-256 is the strongest gate available and stays the gate wherever
+// the archive can be reproduced byte-for-byte. A future standard-library/toolchain combination may
+// write an implementation-defined unordered-map traversal in a different sequence, making the SAME
+// assets differ only in container layout. That platform must opt into this fallback explicitly;
+// current desktop and pinned Android builds both use the stronger byte gate above.
+//
+// So this hashes what does not depend on layout: one record per central-directory entry, carrying
+// the name, the CRC-32 the zip header already stores, and the uncompressed size, sorted by the
+// formatted record so storage order cannot reach the result. It proves what the byte gate proved
+// about the archive's CONTENT -- every expected asset present, every asset's bytes hashing to the
+// expected value -- and gives up only the claim about container layout.
+//
+// Reads the central directory only: no entry is decompressed, so this costs a few milliseconds.
+// Returns an empty string if the directory cannot be parsed, which callers MUST treat as a failure
+// rather than a pass.
+std::string zipContentDigest(const fs::path& p) {
+    FILE* f = openBinary(p, "rb");
+    if (f == nullptr) {
+        return {};
+    }
+    std::fseek(f, 0, SEEK_END);
+    const long size = std::ftell(f);
+    if (size < 22) {
+        std::fclose(f);
+        return {};
+    }
+    std::vector<std::uint8_t> file(static_cast<size_t>(size));
+    std::fseek(f, 0, SEEK_SET);
+    const size_t got = std::fread(file.data(), 1, file.size(), f);
+    std::fclose(f);
+    if (got != file.size()) {
+        return {};
+    }
+
+    // Locate the EOCD, then the central directory it points at.
+    long eocd = -1;
+    const long scanFloor = size < (65535 + 22) ? 0 : size - (65535 + 22);
+    for (long i = size - 22; i >= scanFloor; --i) {
+        if (file[i] == 0x50 && file[i + 1] == 0x4b && file[i + 2] == 0x05 && file[i + 3] == 0x06) {
+            eocd = i;
+            break;
+        }
+    }
+    if (eocd < 0) {
+        return {};
+    }
+    const auto u16 = [&file](long at) {
+        return static_cast<std::uint32_t>(file[at] | (file[at + 1] << 8));
+    };
+    const auto u32 = [&file](long at) {
+        return static_cast<std::uint32_t>(file[at]) | (static_cast<std::uint32_t>(file[at + 1]) << 8) |
+               (static_cast<std::uint32_t>(file[at + 2]) << 16) |
+               (static_cast<std::uint32_t>(file[at + 3]) << 24);
+    };
+
+    const std::uint32_t records = u16(eocd + 10);
+    const std::uint32_t cdSize = u32(eocd + 12);
+    const std::uint32_t cdOffset = u32(eocd + 16);
+    if (records == 0xFFFF || cdSize == 0xFFFFFFFFu || cdOffset == 0xFFFFFFFFu) {
+        return {}; // ZIP64 — not expected for this archive, and not handled.
+    }
+    if (static_cast<long>(cdOffset) + static_cast<long>(cdSize) > size) {
+        return {};
+    }
+
+    std::vector<std::string> lines;
+    lines.reserve(records);
+    long at = static_cast<long>(cdOffset);
+    const long cdEnd = at + static_cast<long>(cdSize);
+    for (std::uint32_t i = 0; i < records; ++i) {
+        if (at + 46 > cdEnd) {
+            return {};
+        }
+        if (!(file[at] == 0x50 && file[at + 1] == 0x4b && file[at + 2] == 0x01 && file[at + 3] == 0x02)) {
+            return {};
+        }
+        const std::uint32_t crc = u32(at + 16);
+        const std::uint32_t uncompressed = u32(at + 24);
+        const std::uint32_t nameLen = u16(at + 28);
+        const std::uint32_t extraLen = u16(at + 30);
+        const std::uint32_t commentLen = u16(at + 32);
+        if (at + 46 + static_cast<long>(nameLen) > cdEnd) {
+            return {};
+        }
+        const std::string name(reinterpret_cast<const char*>(file.data()) + at + 46, nameLen);
+
+        char tail[64];
+        std::snprintf(tail, sizeof(tail), "\n%08x\n%u\n", crc, uncompressed);
+        lines.push_back(name + tail);
+
+        at += 46 + static_cast<long>(nameLen) + static_cast<long>(extraLen) + static_cast<long>(commentLen);
+    }
+    if (lines.size() != records) {
+        return {};
+    }
+
+    // Byte-wise, which is what std::string::operator< gives and what the harness matches by
+    // sorting the UTF-8 encoded records rather than Python strings.
+    std::sort(lines.begin(), lines.end());
+
+    Sha256Ctx ctx;
+    sha256Init(ctx);
+    for (const std::string& line : lines) {
+        sha256Update(ctx, reinterpret_cast<const std::uint8_t*>(line.data()), line.size());
+    }
+    std::uint8_t out[32];
+    sha256Final(ctx, out);
+    return toHex(out, sizeof(out));
 }
 
 // ── Completion sidecar: gdx_extract_state.cfg — key=value, same pattern as gdx_firstboot.cfg ─────
@@ -1134,6 +1293,12 @@ bool runExtractorPosix(const fs::path& exe, const std::vector<std::string>& args
         gdx_port_logf("[extract] ERROR: pipe() failed: %s\n", std::strerror(errno));
         return false;
     }
+    // Before the fork, not after: the child inherits a COPY of every stdio buffer, and anything
+    // sitting unflushed in this process's would be written a second time when the child flushed
+    // it down the pipe. Harmless where the child exec()s (the new image starts with empty
+    // buffers), load-bearing where it does not.
+    std::fflush(nullptr);
+
     pid_t pid = fork();
     if (pid < 0) {
         gdx_port_logf("[extract] ERROR: fork() failed: %s\n", std::strerror(errno));
@@ -1162,11 +1327,39 @@ bool runExtractorPosix(const fs::path& exe, const std::vector<std::string>& args
             argv.push_back(const_cast<char*>(a.c_str()));
         }
         argv.push_back(nullptr);
+#ifdef __ANDROID__
+        // No exec: there is no second executable to exec INTO. An APK loads native code as
+        // shared objects from a directory nothing may write to, and W^X has blocked exec() out
+        // of app-writable storage since API 29, so Torch is linked into this same library and
+        // entered directly (port/android/gdx_extract_entry.cpp).
+        //
+        // The fork above still happens, and everything downstream of it is unchanged: the child
+        // owns the pipe, produces the same stdout the progress parser reads, and returns the
+        // same exit code. What the fork buys on a phone is the peak -- extraction holds the ROM
+        // and every decoded asset at once, and _exit() hands that back to the OS instead of
+        // leaving the allocator sitting on the arena for the rest of the session.
+        // Line buffering, because the parent parses this pipe a line at a time to drive a
+        // progress bar someone is watching. A pipe is fully buffered by default, which would
+        // deliver the whole run in 4 KB bursts.
+        std::setvbuf(stdout, nullptr, _IOLBF, 0);
+
+        const int code = gdx_extract_main(static_cast<int>(argv.size()) - 1, argv.data());
+
+        // _exit rather than exit, because this child shares the parent's atexit handlers and
+        // static destructors and must run none of them. That also means nothing flushes on the
+        // way out, so the last of the extractor's output — including the lines that say why a
+        // failed run failed — has to be pushed by hand first.
+        std::cout.flush();
+        std::cerr.flush();
+        std::fflush(nullptr);
+        _exit(code);
+#else
         execv(exeStr.c_str(), argv.data());
         const int launchError = errno;
         dprintf(STDERR_FILENO, "[launcher] execv(\"%s\") failed: %s (errno=%d)\n", exeStr.c_str(),
                 std::strerror(launchError), launchError);
         _exit(127);
+#endif
     }
     // Parent: stream the child's stdout to the log (the Linux progress UX is log-only). The read is
     // bounded by a hard deadline via select(), so a child that stops producing output and never exits
@@ -1174,7 +1367,7 @@ bool runExtractorPosix(const fs::path& exe, const std::vector<std::string>& args
     close(pipefd[1]);
     std::string acc;
     char buf[4096];
-    const time_t deadline = time(nullptr) + 120;
+    const time_t deadline = time(nullptr) + kExtractDeadlineSeconds;
     bool timedOut = false;
     for (;;) {
         fd_set rfds;
@@ -1203,7 +1396,8 @@ bool runExtractorPosix(const fs::path& exe, const std::vector<std::string>& args
             }
         }
         if (time(nullptr) >= deadline) {
-            gdx_port_logf("[extract] ERROR: extractor exceeded the 120s deadline; killing child\n");
+            gdx_port_logf("[extract] ERROR: extractor exceeded the %ds deadline; killing child\n",
+                          kExtractDeadlineSeconds);
             kill(pid, SIGKILL);
             timedOut = true;
             break;
@@ -1245,7 +1439,9 @@ ExtractOutcome runExtraction(const fs::path& dataDir, const fs::path& romPath, c
 
     const fs::path extractBin = exeDir / kExtractBinaryName;
     const fs::path recipesDir = exeDir / kRecipesDirName;
-    if (!fileExists(extractBin)) {
+    // On Android the extractor is a function in this library, not a file, so there is nothing to
+    // probe for; extractBin survives only as the argv[0] the child reports itself under.
+    if (!kExtractorIsLinkedIn && !fileExists(extractBin)) {
         gdx_port_logf("[extract] extractor component missing (%s). Cannot build %s — booting from the "
                       "raw ROM. Reinstall G-Diffuser to restore the extractor.\n",
                       extractBin.string().c_str(), archiveName);
@@ -1381,7 +1577,8 @@ ExtractOutcome runExtraction(const fs::path& dataDir, const fs::path& romPath, c
                       "from the raw ROM.\n",
                       exitCode, archiveName);
         std::string failure = exitCode == 124
-                                  ? std::string("The extractor timed out (exceeded the 120s deadline).")
+                                  ? ("The extractor timed out (exceeded the " +
+                                     std::to_string(kExtractDeadlineSeconds) + "s deadline).")
                                   : ("The extractor failed (exit code " + std::to_string(exitCode) + ").");
         if (!state.failureLine.empty()) {
             failure += "\n" + state.failureLine;
@@ -1433,17 +1630,51 @@ ExtractOutcome runExtraction(const fs::path& dataDir, const fs::path& romPath, c
         // The strongest gate, and an exact match because extraction is deterministic. Being
         // byte-identical to the golden reference also transitively proves the version entry and full
         // key completeness.
-        const std::string& expectedSha = profile.goldenSha256;
-        if (archiveSha != expectedSha) {
-            gdx_port_logf("[extract] ERROR: extracted archive SHA-256 mismatch.\n"
-                          "  got:      %s\n  expected: %s\n"
-                          "The archive does not match this build's golden reference (recipe/extractor "
-                          "drift, or a corrupt build). Discarding; booting from the raw ROM.\n",
-                          archiveSha.c_str(), expectedSha.c_str());
-            gdxAsyncPublishError("The extracted archive does not match this build's golden reference "
-                                 "(recipe/extractor drift or a corrupt build).");
-            removeIfExists(tmpDir);
-            return ExtractOutcome::FailedRawFallback;
+        //
+        // If a future pinned platform is proven unable to reproduce the container layout, it can
+        // select the equivalent order-independent gate below: same content and completeness, with
+        // no claim about entry order. Current desktop and Android builds both take the full byte
+        // identity branch.
+        if (kArchiveIsBitReproducible) {
+            const std::string& expectedSha = profile.goldenSha256;
+            if (archiveSha != expectedSha) {
+                gdx_port_logf("[extract] ERROR: extracted archive SHA-256 mismatch.\n"
+                              "  got:      %s\n  expected: %s\n"
+                              "The archive does not match this build's golden reference "
+                              "(recipe/extractor drift, or a corrupt build). Discarding; booting from "
+                              "the raw ROM.\n",
+                              archiveSha.c_str(), expectedSha.c_str());
+                gdxAsyncPublishError("The extracted archive does not match this build's golden "
+                                     "reference (recipe/extractor drift or a corrupt build).");
+                removeIfExists(tmpDir);
+                return ExtractOutcome::FailedRawFallback;
+            }
+        } else {
+            const std::string contentSha = zipContentDigest(producedArchive);
+            if (contentSha.empty()) {
+                gdx_port_logf("[extract] ERROR: could not read the extracted archive's central "
+                              "directory to verify its contents. Discarding; booting from the raw "
+                              "ROM.\n");
+                gdxAsyncPublishError("The extracted archive could not be verified (unreadable zip "
+                                     "directory).");
+                removeIfExists(tmpDir);
+                return ExtractOutcome::FailedRawFallback;
+            }
+            if (contentSha != profile.goldenContentSha256) {
+                gdx_port_logf("[extract] ERROR: extracted archive content digest mismatch.\n"
+                              "  got:      %s\n  expected: %s\n"
+                              "The archive's contents do not match this build's golden reference "
+                              "(recipe/extractor drift, or a corrupt build). Discarding; booting from "
+                              "the raw ROM.\n",
+                              contentSha.c_str(), profile.goldenContentSha256.c_str());
+                gdxAsyncPublishError("The extracted archive does not match this build's golden "
+                                     "reference (recipe/extractor drift or a corrupt build).");
+                removeIfExists(tmpDir);
+                return ExtractOutcome::FailedRawFallback;
+            }
+            gdx_port_logf("[extract] archive content verified against the golden (%s); its byte layout "
+                          "differs from the desktop reference, which is expected on this platform.\n",
+                          contentSha.c_str());
         }
     }
 
@@ -1537,7 +1768,7 @@ void ensureIplArchive(const fs::path& dataDir, const fs::path& exeDir) {
     }
 
     const fs::path extractBin = exeDir / kExtractBinaryName;
-    if (!fileExists(extractBin)) {
+    if (!kExtractorIsLinkedIn && !fileExists(extractBin)) {
         gdx_port_logf("[extract-ipl] extractor component missing (%s); cannot build %s (raw-IPL "
                       "fallback).\n",
                       extractBin.string().c_str(), kIplArchiveName);
@@ -1704,7 +1935,7 @@ void ensureDiskArchive(const fs::path& dataDir, const fs::path& exeDir) {
     }
 
     const fs::path extractBin = exeDir / kExtractBinaryName;
-    if (!fileExists(extractBin)) {
+    if (!kExtractorIsLinkedIn && !fileExists(extractBin)) {
         gdx_port_logf("[extract-disk] extractor component missing (%s); cannot build %s "
                       "(managed-copy/raw fallback).\n",
                       extractBin.string().c_str(), kDiskArchiveName);
@@ -1851,14 +2082,12 @@ static ExtractOutcome ensureCartArchive(const char* dataDirC, const char* romPat
     const fs::path exeDir(exeDirC);
 
     const fs::path archive = dataDir / kArchiveName;
-    // Per-boot latch (see header): FirstBootRun's gameArchiveSatisfies already hashed this file
-    // against the recorded archive_sha256 moments ago and it passed, which implies the sidecar was
-    // already consistent, so the refresh branch below would be a no-op. Skip straight to UpToDate
-    // without re-hashing the ~15 MB archive.
-    if (fileExists(archive) && GdxExtractIsArchiveValidatedThisBoot(GdxExtractArchiveKind::Cart)) {
-        gdx_port_logf("[extract] %s already verified this boot; skipping re-hash.\n", kArchiveName);
-        return ExtractOutcome::UpToDate;
-    }
+    // Do not use the sidecar validation latch for the cartridge archive here. FirstBootRun proves
+    // only that the file matches the hash RECORDED by the previous app build; after a recipe update
+    // that can be a perfectly intact but now-stale archive. The compiled golden below is the build
+    // version gate, and hashing this ~15 MiB file once is what makes app upgrades generate newly
+    // added resources such as course_strings/gCourseStrings. The disk/IPL archives remain
+    // per-input self-consistency artifacts and can still use their latches.
 
     // ── Warm-boot check, FIRST and ROM-independent ───────────────────────────────────────────────
     // A present archive that hashes to the golden constant is valid regardless of the ROM's state, so
@@ -2066,7 +2295,9 @@ HackBuildResult GdxExtractBuildHackArchive(const char* romPathC, const char* hac
         out.message = "That ROM file does not exist.";
         return out;
     }
-    if (!fileExists(extractBin)) {
+    // Android links Torch into libmain.so and enters it in the forked child; there is no
+    // executable file to probe. Keep the desktop packaging check everywhere else.
+    if (!kExtractorIsLinkedIn && !fileExists(extractBin)) {
         out.message = "The extractor component (gdx-extract) is missing. Reinstall G-Diffuser.";
         return out;
     }

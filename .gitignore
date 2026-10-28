@@ -101,3 +101,12 @@ logs/
 # Regenerated from the user's ROM by the harness itself; never a repo input.
 /tools/o2r_harness/bless_out/
 /tools/o2r_harness/golden_out/
+# Android (Gradle). The android/ project keeps its own .gitignore too; these cover the paths a
+# build leaves outside it.
+android/.gradle/
+android/build/
+android/app/build/
+android/app/.cxx/
+android/local.properties
+android/key.properties
+android/app/release/

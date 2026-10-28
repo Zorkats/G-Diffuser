@@ -8,6 +8,9 @@
 
 #include "gdx_extract_launch.h" // GdxExtractBuildHackArchive
 
+#ifdef __ANDROID__
+#include "android/gdx_android_bridge.h"
+#endif
 #ifdef _WIN32
 #include <windows.h>
 #include <commdlg.h>
@@ -89,6 +92,14 @@ void GdxHackModsWindow::DrawBuildSection() {
     if (ImGui::Button("Browse...##hackrom")) {
         GdxPickHackRom(mRomInput, sizeof(mRomInput));
     }
+#elif defined(__ANDROID__)
+    ImGui::SameLine();
+    if (ImGui::Button("Browse...##hackrom")) {
+        const std::string picked = gdx::android::PickDocumentBlocking();
+        if (!picked.empty()) {
+            snprintf(mRomInput, sizeof(mRomInput), "%s", picked.c_str());
+        }
+    }
 #endif
 
     ImGui::InputTextWithHint("##hackname", "Name for it (this becomes the file name)...", mNameInput,
@@ -143,8 +154,18 @@ void GdxHackModsWindow::DrawElement() {
     ImGui::SameLine();
     // Installing a hack someone else built is entirely a file-copy job, so the folder should be one
     // click away rather than a path to select out of the disabled label above.
-    if (ImGui::Button("Open folder")) {
+    if (ImGui::Button(
+#ifdef __ANDROID__
+            "Manage archives"
+#else
+            "Open folder"
+#endif
+            )) {
+#ifdef __ANDROID__
+        gdx::android::OpenHackManager();
+#else
         gdxmenu::GdxOpenFolder(GdxHackModsDirectory());
+#endif
     }
 
     // Say plainly what is running right now, because the selection below is about the NEXT boot.
