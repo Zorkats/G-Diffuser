@@ -2223,6 +2223,17 @@ void GdxMenu::RegisterMenu() {
                   .ModifiedMarker()
                   .SearchTerms("wipe fade loading speed"));
 
+    // The cup clear is saved on the GP results screen before the ceremony starts, so skipping
+    // it (or the credits, which stock never lets you leave) cannot lose progress.
+    AddWidget("Enhancements", "Gameplay", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Skippable ending and credits", .cVar = "gEnhancements.Gameplay.SkippableEnding",
+                          .type = GdxUI::WIDGET_CVAR_CHECKBOX }
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(true).Tooltip(
+                      "Hold START for about a second to skip the Grand Prix ending ceremony\n"
+                      "and the credits. Your cup progress is already saved by then."))
+                  .ModifiedMarker()
+                  .SearchTerms("ending ceremony credits podium skip"));
+
     // Community request F1: stock pins AI racers to machineSkinIndex 0 in GP/Practice/Death
     // Race (func_80089800, racer.c); VS already randomizes. Hook is in the roster fill.
     AddWidget("Enhancements", "Gameplay", SECTION_COLUMN_1,
