@@ -96,8 +96,18 @@ jobs:
     with:
       version: ${{ needs.gate.outputs.version }}
 
+  # Release-signed with the project keystore (repository secrets), so a nightly APK installs over
+  # the previous one instead of being refused for a changed signature.
+  android:
+    needs: gate
+    if: needs.gate.outputs.build == 'true'
+    uses: ./.github/workflows/android.yml
+    with:
+      version: ${{ needs.gate.outputs.version }}
+    secrets: inherit
+
   publish:
-    needs: [gate, windows, linux, macos]
+    needs: [gate, windows, linux, macos, android]
     runs-on: ubuntu-latest
     # The only job that can write: it moves the `nightly` tag and replaces the release assets.
     permissions:
@@ -122,13 +132,13 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
 
-          assets=(dist/*.zip dist/*.tar.gz)
+          assets=(dist/*.zip dist/*.tar.gz dist/*.apk)
           if [ "${#assets[@]}" -eq 0 ]; then
             echo "::error::No packages were downloaded for $VERSION."
             exit 1
           fi
           # The in-game updater refuses any download it cannot check against this file.
-          (cd dist && sha256sum -- *.zip *.tar.gz) > dist/SHA256SUMS
+          (cd dist && sha256sum -- *.zip *.tar.gz *.apk) > dist/SHA256SUMS
           assets+=(dist/SHA256SUMS)
 
           previous="$(git rev-parse -q --verify 'refs/tags/nightly^{commit}' || true)"

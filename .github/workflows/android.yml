@@ -1,8 +1,26 @@
 name: Android
 
 # Android on its own, so a device test does not wait on the desktop release jobs.
-# Runs on demand, and on pushes that touch something the APK actually contains.
+# Runs on demand, and on pushes that touch something the APK actually contains; both of those
+# build the debug APK. nightly.yml calls it with a version instead, which builds the release APK
+# signed with the project keystore, so each nightly installs over the last one.
 on:
+  workflow_call:
+    inputs:
+      version:
+        description: 'Version for the APK name, without the leading v'
+        required: true
+        type: string
+    # Optional here so a missing one reaches the decode step, which says which secret to add.
+    secrets:
+      ANDROID_KEYSTORE_BASE64:
+        required: false
+      ANDROID_KEYSTORE_PASSWORD:
+        required: false
+      ANDROID_KEY_ALIAS:
+        required: false
+      ANDROID_KEY_PASSWORD:
+        required: false
   workflow_dispatch:
   push:
     paths:
@@ -22,7 +40,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: android-${{ github.ref }}
+  # Separate groups, so a push to main does not cancel the nightly's release build.
+  group: android-${{ inputs.version && 'release' || 'debug' }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -61,11 +80,46 @@ jobs:
 
       # Debug-signed and debuggable, which is what you want for sideloading a test build.
       - name: Build debug APK
+        if: ${{ !inputs.version }}
         run: android/gradlew -p android assembleDebug
 
-      - name: Check the APK carries its game data
+      # A release build without the keystore silently falls back to the debug key
+      # (build.gradle.kts), and a nightly signed that way could never be updated by one signed
+      # properly. So a missing secret fails the job instead.
+      - name: Decode the release keystore
+        if: ${{ inputs.version }}
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         run: |
-          APK=android/app/build/outputs/apk/debug/app-debug.apk
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 is not set; refusing to sign a release with the debug key."
+            exit 1
+          fi
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/gdiffuser.jks"
+          echo "KEYSTORE_FILE=$RUNNER_TEMP/gdiffuser.jks" >> "$GITHUB_ENV"
+
+      # Native code is Release in both variants; this one is not debuggable and is signed with
+      # the project key.
+      - name: Build release APK
+        if: ${{ inputs.version }}
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: android/gradlew -p android assembleRelease
+
+      - name: Check the APK carries its game data
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$VERSION" ]; then
+            APK=android/app/build/outputs/apk/release/app-release.apk
+            OUT="G-Diffuser-v$VERSION-android-arm64.apk"
+          else
+            APK=android/app/build/outputs/apk/debug/app-debug.apk
+            OUT=G-Diffuser-debug.apk
+          fi
+          echo "OUT=$OUT" >> "$GITHUB_ENV"
           ls -la "$APK" || { echo "ERROR: APK not found"; exit 1; }
 
           # Every asset GameAssets.kt opens by name, plus the library SDLActivity dlopens. An
@@ -88,9 +142,10 @@ jobs:
           unzip -Z1 /tmp/gamedata.zip | grep -q '^decomp-recipes/assets/yaml/us/rev0/' \
             || { echo "ERROR: the us/rev0 recipe tree is missing from gamedata.zip"; exit 1; }
 
-          cp "$APK" G-Diffuser-debug.apk
+          cp "$APK" "$OUT"
 
+      # The release name matches nightly.yml's G-Diffuser-v<version>-* download pattern.
       - uses: actions/upload-artifact@v4
         with:
-          name: G-Diffuser-debug-apk
-          path: G-Diffuser-debug.apk
+          name: ${{ inputs.version && format('G-Diffuser-v{0}-android-arm64', inputs.version) || 'G-Diffuser-debug-apk' }}
+          path: ${{ env.OUT }}
