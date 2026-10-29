@@ -261,10 +261,46 @@ void GdxContentWindow::DrawTrackPreview() {
         draw->AddLine(a, b, IM_COL32(90, 185, 255, 255), 3.0f);
     }
 
-    // ── Start dot: anchored to raw control node 0 (the track start/finish gate) ──
+    // ── Start arrow: dot + direction indicator at raw control node 0 ──────────
+    // The forward tangent is taken from the first spline micro-step (screen-space),
+    // so it already reflects the flipped Z mapping used above.
     const ImVec2 start(center.x + (mTrackPreviewX[0] - (minX + maxX) * 0.5f) * scale,
                        center.y + (mTrackPreviewZ[0] - (minZ + maxZ) * 0.5f) * scale);
     draw->AddCircleFilled(start, 4.0f, IM_COL32(120, 230, 150, 255));
+
+    // Tangent direction from the first two spline screen-space positions.
+    const ImVec2 s0(center.x + (mSplineX[0] - (minX + maxX) * 0.5f) * scale,
+                    center.y + (mSplineZ[0] - (minZ + maxZ) * 0.5f) * scale);
+    const ImVec2 s1(center.x + (mSplineX[1] - (minX + maxX) * 0.5f) * scale,
+                    center.y + (mSplineZ[1] - (minZ + maxZ) * 0.5f) * scale);
+    const float tdx = s1.x - s0.x;
+    const float tdz = s1.y - s0.y;
+    const float tlen = std::sqrt(tdx * tdx + tdz * tdz);
+    if (tlen > 0.0001f) {
+        // Normalised forward direction in screen space.
+        const float nx = tdx / tlen;
+        const float nz = tdz / tlen;
+
+        // Arrow stem: dot → tip (12 px).
+        constexpr float kStem     = 12.0f;
+        constexpr float kWingLen  =  6.0f;
+        // Wing angle: 140° from forward (opens behind the tip).
+        constexpr float kWingCos  = -0.766f; // cos(140°)
+        constexpr float kWingSin  =  0.643f; // sin(±140°)
+
+        const ImVec2 tip(start.x + nx * kStem, start.y + nz * kStem);
+
+        // Left and right winglet endpoints.
+        const ImVec2 wl(tip.x + (nx * kWingCos - nz *  kWingSin) * kWingLen,
+                        tip.y + (nz * kWingCos + nx *  kWingSin) * kWingLen);
+        const ImVec2 wr(tip.x + (nx * kWingCos - nz * -kWingSin) * kWingLen,
+                        tip.y + (nz * kWingCos + nx * -kWingSin) * kWingLen);
+
+        const ImU32 arrowCol = IM_COL32(120, 230, 150, 255);
+        draw->AddLine(start, tip, arrowCol, 2.0f);
+        draw->AddLine(tip, wl,   arrowCol, 2.0f);
+        draw->AddLine(tip, wr,   arrowCol, 2.0f);
+    }
 }
 
 void GdxContentWindow::RefreshCupSlots() {
