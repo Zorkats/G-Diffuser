@@ -147,6 +147,7 @@ int GdxContentWindow::RefreshLibrary() {
 
 void GdxContentWindow::LoadTrackPreview(int row) {
     mTrackPreviewCount = 0;
+    mSplineCount = 0;
     mTrackPreviewRow = -1;
     if (row < 0 || row >= mEntryCount || mEntries[row].contentType != GDX_CONTENT_TYPE_TRACK ||
         mEntries[row].extension[3] != 'D') {
@@ -174,6 +175,41 @@ void GdxContentWindow::LoadTrackPreview(int row) {
         }
     }
     mTrackPreviewCount = count;
+
+    // ── Centripetal Catmull-Rom spline generation ──────────────────────────────
+    // For each control segment i → (i+1), evaluate kSplineSteps evenly-spaced
+    // positions using the classic Catmull-Rom formula with closed-loop neighbours.
+    // The t=1 point is omitted from each segment (it becomes t=0 of the next),
+    // so the dense array is exactly count × kSplineSteps vertices.
+    int out = 0;
+    for (int i = 0; i < count; i++) {
+        const int i0 = (i - 1 + count) % count; // P0
+        const int i1 = i;                        // P1
+        const int i2 = (i + 1) % count;          // P2
+        const int i3 = (i + 2) % count;          // P3
+
+        const float p0x = mTrackPreviewX[i0], p0z = mTrackPreviewZ[i0];
+        const float p1x = mTrackPreviewX[i1], p1z = mTrackPreviewZ[i1];
+        const float p2x = mTrackPreviewX[i2], p2z = mTrackPreviewZ[i2];
+        const float p3x = mTrackPreviewX[i3], p3z = mTrackPreviewZ[i3];
+
+        for (int s = 0; s < kSplineSteps; s++) {
+            const float t  = static_cast<float>(s) / static_cast<float>(kSplineSteps);
+            const float t2 = t * t;
+            const float t3 = t2 * t;
+            // Standard Catmull-Rom basis (α = 0.5)
+            mSplineX[out] = 0.5f * ((2.0f * p1x) +
+                                    (-p0x + p2x) * t +
+                                    (2.0f * p0x - 5.0f * p1x + 4.0f * p2x - p3x) * t2 +
+                                    (-p0x + 3.0f * p1x - 3.0f * p2x + p3x) * t3);
+            mSplineZ[out] = 0.5f * ((2.0f * p1z) +
+                                    (-p0z + p2z) * t +
+                                    (2.0f * p0z - 5.0f * p1z + 4.0f * p2z - p3z) * t2 +
+                                    (-p0z + 3.0f * p1z - 3.0f * p2z + p3z) * t3);
+            out++;
+        }
+    }
+    mSplineCount = out; // == count * kSplineSteps
 }
 
 void GdxContentWindow::DrawTrackPreview() {
@@ -192,15 +228,16 @@ void GdxContentWindow::DrawTrackPreview() {
         return;
     }
 
-    float minX = mTrackPreviewX[0];
+    // ── Bounding box: computed over the dense spline cache for accurate framing ──
+    float minX = mSplineX[0];
     float maxX = minX;
-    float minZ = mTrackPreviewZ[0];
+    float minZ = mSplineZ[0];
     float maxZ = minZ;
-    for (int i = 1; i < mTrackPreviewCount; i++) {
-        if (mTrackPreviewX[i] < minX) minX = mTrackPreviewX[i];
-        if (mTrackPreviewX[i] > maxX) maxX = mTrackPreviewX[i];
-        if (mTrackPreviewZ[i] < minZ) minZ = mTrackPreviewZ[i];
-        if (mTrackPreviewZ[i] > maxZ) maxZ = mTrackPreviewZ[i];
+    for (int i = 1; i < mSplineCount; i++) {
+        if (mSplineX[i] < minX) minX = mSplineX[i];
+        if (mSplineX[i] > maxX) maxX = mSplineX[i];
+        if (mSplineZ[i] < minZ) minZ = mSplineZ[i];
+        if (mSplineZ[i] > maxZ) maxZ = mSplineZ[i];
     }
 
     const ImVec2 canvas = ImGui::GetCursorScreenPos();
@@ -212,16 +249,21 @@ void GdxContentWindow::DrawTrackPreview() {
     const float scale = (width / rangeX < height / rangeZ) ? width / rangeX : height / rangeZ;
     const ImVec2 center(canvas.x + avail.x * 0.5f, canvas.y + height * 0.5f);
     ImDrawList* draw = ImGui::GetWindowDrawList();
-    for (int i = 0; i < mTrackPreviewCount; i++) {
-        const int next = (i + 1) % mTrackPreviewCount;
-        const ImVec2 a(center.x + (mTrackPreviewX[i] - (minX + maxX) * 0.5f) * scale,
-                       center.y - (mTrackPreviewZ[i] - (minZ + maxZ) * 0.5f) * scale);
-        const ImVec2 b(center.x + (mTrackPreviewX[next] - (minX + maxX) * 0.5f) * scale,
-                       center.y - (mTrackPreviewZ[next] - (minZ + maxZ) * 0.5f) * scale);
+
+    // ── Line loop: iterate over the dense spline vertices ────────────────────
+    // The spline array is closed (last dense vertex connects back to index 0).
+    for (int i = 0; i < mSplineCount; i++) {
+        const int next = (i + 1) % mSplineCount;
+        const ImVec2 a(center.x + (mSplineX[i]    - (minX + maxX) * 0.5f) * scale,
+                       center.y + (mSplineZ[i]    - (minZ + maxZ) * 0.5f) * scale);
+        const ImVec2 b(center.x + (mSplineX[next] - (minX + maxX) * 0.5f) * scale,
+                       center.y + (mSplineZ[next] - (minZ + maxZ) * 0.5f) * scale);
         draw->AddLine(a, b, IM_COL32(90, 185, 255, 255), 3.0f);
     }
+
+    // ── Start dot: anchored to raw control node 0 (the track start/finish gate) ──
     const ImVec2 start(center.x + (mTrackPreviewX[0] - (minX + maxX) * 0.5f) * scale,
-                       center.y - (mTrackPreviewZ[0] - (minZ + maxZ) * 0.5f) * scale);
+                       center.y + (mTrackPreviewZ[0] - (minZ + maxZ) * 0.5f) * scale);
     draw->AddCircleFilled(start, 4.0f, IM_COL32(120, 230, 150, 255));
 }
 
