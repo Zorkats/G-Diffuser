@@ -48,10 +48,18 @@ class GdxContentWindow : public Ship::GuiWindow {
 
     GdxContentEntry mEntries[GDX_CONTENT_MAX_ENTRIES] = {};
     int mEntryCount = 0;
+    // Raw control nodes read from the CourseData payload (max 64 points).
     float mTrackPreviewX[64] = {};
     float mTrackPreviewZ[64] = {};
     int mTrackPreviewCount = 0;
     int mTrackPreviewRow = -1;
+    // Centripetal Catmull-Rom spline cache: 12 sub-steps per segment, closed loop.
+    // Max 64 control nodes × 12 = 768 dense vertices; rebuilt by LoadTrackPreview.
+    static constexpr int kSplineSteps = 12;
+    static constexpr int kSplineMax   = 64 * kSplineSteps;
+    float mSplineX[kSplineMax] = {};
+    float mSplineZ[kSplineMax] = {};
+    int   mSplineCount = 0;
     GdxContentImportEntry mImports[GDX_CONTENT_IMPORT_MAX] = {};
     int mImportCount = 0;
     int mImportArmed = -1;      // row index whose overwrite/twin confirmation is primed
