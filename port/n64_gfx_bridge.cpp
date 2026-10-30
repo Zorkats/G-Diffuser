@@ -7996,8 +7996,9 @@ extern "C" void gdx_vi_present_fallback(void) {
     // Full-resolution hold path: when the game renders to an offscreen framebuffer
     // (menus, pillarboxed modes such as the Expansion Kit editors) and this tick submits
     // NO gfx task, the last frame's texture is STILL in mGameFb and interp->mGfxFrameBuffer
-    // still points at it (Interpreter::StartFrame does not reset it), so Fast3dGui::DrawGame
-    // can re-composite the retained frame.
+    // still points at it, so Fast3dGui::DrawGame can re-composite the retained frame.
+    // Interpreter::StartFrame resets it only when a resize replaced that texture; this branch
+    // then fails and the mirror path below republishes.
     //
     // ROOT CAUSE (Course-Edit whole-window + ImGui strobe): the previous
     // implementation early-returned here doing NOTHING, on the assumption that "a taskless
