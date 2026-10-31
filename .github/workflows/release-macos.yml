@@ -92,7 +92,7 @@ jobs:
                   "-DCMAKE_IGNORE_PREFIX_PATH=/opt/homebrew;/usr/local")
           cd "$RUNNER_TEMP"
 
-          curl -fsSL -o sdl2.tar.gz "https://www.libsdl.org/release/SDL2-${SDL2_VERSION}.tar.gz"
+          curl -fsSL -o sdl2.tar.gz "https://github.com/libsdl-org/SDL/releases/download/release-${SDL2_VERSION}/SDL2-${SDL2_VERSION}.tar.gz"
           tar -xzf sdl2.tar.gz
           cmake -S "SDL2-${SDL2_VERSION}" -B build-sdl2 "${common[@]}" \
             -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TEST=OFF

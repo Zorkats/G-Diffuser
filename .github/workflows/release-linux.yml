@@ -91,7 +91,7 @@ jobs:
         run: |
           set -eux
           cd /tmp
-          wget -q "https://www.libsdl.org/release/SDL2-${SDL2_VERSION}.tar.gz"
+          wget -q "https://github.com/libsdl-org/SDL/releases/download/release-${SDL2_VERSION}/SDL2-${SDL2_VERSION}.tar.gz"
           tar -xzf "SDL2-${SDL2_VERSION}.tar.gz"
           cmake -S "SDL2-${SDL2_VERSION}" -B build-sdl2 -GNinja -DCMAKE_BUILD_TYPE=Release \
             -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TEST=OFF
@@ -230,7 +230,7 @@ jobs:
         run: |
           set -eux
           cd /tmp
-          wget -q "https://www.libsdl.org/release/SDL2-${SDL2_VERSION}.tar.gz"
+          wget -q "https://github.com/libsdl-org/SDL/releases/download/release-${SDL2_VERSION}/SDL2-${SDL2_VERSION}.tar.gz"
           tar -xzf "SDL2-${SDL2_VERSION}.tar.gz"
           cmake -S "SDL2-${SDL2_VERSION}" -B build-sdl2 -GNinja -DCMAKE_BUILD_TYPE=Release \
             -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TEST=OFF
