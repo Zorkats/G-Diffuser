@@ -80,7 +80,7 @@ enum DisableOption {
     DISABLE_FOR_LOW_PASS_FILTER_OFF, // the cutoff slider is inert while the filter is disabled
 
     // Game state
-    DISABLE_FOR_RACE_IN_PROGRESS, // mutating ghost state must not race the game fiber
+    DISABLE_FOR_RACE_IN_PROGRESS, // ghost state and race setup must not change under the game fiber
 
     // Input
     DISABLE_FOR_COURSE_EDIT_MOUSE_OFF, // Course Edit mouse sub-controls are inert while the master is off
