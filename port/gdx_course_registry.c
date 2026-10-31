@@ -73,7 +73,7 @@ static const GdxCourseElement sPartStyleStock[] = {
     { "part.sign", "Sign", GDX_COURSE_KIND_PART_STYLE, 8, 0 },
 };
 
-/* CourseEffects, decomp/include/fzx_racer.h:16-25, including the expansion-kit LAVA (5). */
+/* CourseEffects, decomp/include/fzx_racer.h:16-27, including the expansion-kit LAVA and magnets. */
 static const GdxCourseElement sTrackEffectStock[] = {
     { "effect.none", "None", GDX_COURSE_KIND_TRACK_EFFECT, 0, 0 },
     { "effect.pit", "Pit", GDX_COURSE_KIND_TRACK_EFFECT, 1, 0 },
@@ -81,6 +81,8 @@ static const GdxCourseElement sTrackEffectStock[] = {
     { "effect.dash", "Dash", GDX_COURSE_KIND_TRACK_EFFECT, 3, 0 },
     { "effect.ice", "Ice", GDX_COURSE_KIND_TRACK_EFFECT, 4, 0 },
     { "effect.lava", "Lava", GDX_COURSE_KIND_TRACK_EFFECT, 5, 0 },
+    { "effect.magnet_left", "Magnet Left", GDX_COURSE_KIND_TRACK_EFFECT, 6, 0 },
+    { "effect.magnet_right", "Magnet Right", GDX_COURSE_KIND_TRACK_EFFECT, 7, 0 },
 };
 
 /* ---------------------------------------------------------------------------------

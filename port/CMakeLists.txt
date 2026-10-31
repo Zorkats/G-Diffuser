@@ -7,7 +7,7 @@ endif()
 
 set(DECOMP "${CMAKE_CURRENT_SOURCE_DIR}/../decomp")
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
-set(GDX_DISPLAY_VERSION "1.1.0" CACHE STRING "Version shown in the About menu")
+set(GDX_DISPLAY_VERSION "1.2.0" CACHE STRING "Version shown in the About menu")
 # The release workflows pass the channel and commit; a local build stays "dev", which never
 # offers updates (gdx_update.cpp).
 set(GDX_BUILD_CHANNEL "dev" CACHE STRING "Update channel: stable, nightly or dev")
@@ -350,6 +350,8 @@ gdx_add_main_target(G-Diffuser
     gdx_input_actions.c        # 3A action layer: per-context N64 button tables, called from
                                # gdx_controller_poll before the dev overrides and mouse merges
     gdx_input_profiles.c       # 4A controller profiles: presets that write the 3A Race table
+    gdx_steering_curve.c       # Per-port steering exponent, called from racer.c
+    gdx_xcup_random.c          # X Cup random courses, called from course.c, cpu.c and background.c
     n64_gfx_bridge.cpp
     gdx_interp.cpp
     n64_gfx_convert.cpp
@@ -1013,6 +1015,29 @@ elseif(GDX_PORT_WARN_FLAGS)
     target_compile_options(gdx_input_profiles_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
 endif()
 
+# Steering response curve: standalone pure C, the test stubs the CVar read.
+add_executable(gdx_steering_curve_tests
+    tests/gdx_steering_curve_tests.c
+    gdx_steering_curve.c)
+if(MSVC)
+    target_compile_options(gdx_steering_curve_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_steering_curve_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+if(UNIX)
+    target_link_libraries(gdx_steering_curve_tests PRIVATE m)
+endif()
+
+# X Cup random courses: standalone pure C, the test stubs the CVar read.
+add_executable(gdx_xcup_random_tests
+    tests/gdx_xcup_random_tests.c
+    gdx_xcup_random.c)
+if(MSVC)
+    target_compile_options(gdx_xcup_random_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_xcup_random_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+
 # 6A streamed BGM: loop tags from the three decoders, the BGM key table and the loop wrap. The module
 # links with a CVar stub and a stub for the decomp fade getter, so no game code is pulled in.
 add_executable(gdx_music_stream_tests
@@ -1316,6 +1341,8 @@ if(GDX_BUILD_JP AND NOT ANDROID)
         gdx_input_script.c
         gdx_input_actions.c    # 3A action layer; input_bridge.c calls it, so this target links it too
         gdx_input_profiles.c   # 4A controller profiles; the Actions page in gdx_menu_registry.cpp calls it
+        gdx_steering_curve.c   # racer.c calls it, and the Controls page in gdx_menu_registry.cpp
+        gdx_xcup_random.c      # course.c, cpu.c and background.c call it, and the Gameplay page
         gdx_course_strings.c   # decomp game.c calls gdx_course_strings_apply() under PORT, so this
                                # is a link dependency and not an optional feature
         gdx_bg_sprites.c       # same for gdx_bg_sprites_apply()

@@ -12,7 +12,7 @@ A course file stores its venue, skybox and music as plain numbers. Those numbers
 | Skybox | 8 (IDs 0 to 7) | `skybox.` | `skybox` |
 | Music | 14 (raw IDs 0 to 13) | `bgm.` | `bgm` |
 | Part style | 9 (IDs 0 to 8) | `part.` | `part` |
-| Track effect | 6 (IDs 0 to 5) | `effect.` | `effect` |
+| Track effect | 8 (IDs 0 to 7) | `effect.` | `effect` |
 
 Music keys use the raw game IDs. The menu lists the songs in a different order, so `bgm.new_04` always means raw ID 13, whatever row the menu shows it on.
 
@@ -35,6 +35,7 @@ music:   bgm.mute_city bgm.silence bgm.sand_ocean bgm.port_town bgm.big_blue bgm
          bgm.new_01 bgm.new_04
 part:    part.pit part.dash part.dirt part.slip part.jump part.trap part.gate part.building part.sign
 effect:  effect.none effect.pit effect.dirt effect.dash effect.ice effect.lava
+         effect.magnet_left effect.magnet_right
 ```
 
 ## Packs: `mods/<pack>/elements.txt`

@@ -21,8 +21,8 @@ matching decompilation and the [Kenix3/libultraship](https://github.com/Kenix3/l
 runtime (the same engine behind Ship of Harkinian and Starship, along with other PC ports like
 Battleship). On top of the original
 game it adds true widescreen rendering, an in-game enhancement menu, quality-of-life features,
-texture-pack modding, and full support for the **64DD Expansion Kit** — Course Edit and the DD
-cups included.
+post-process shaders, mod packs, shareable tracks and machines, ROM hack support, and full
+support for the **64DD Expansion Kit**, with a much expanded Course Edit and the DD cups included.
 
 The repository ships **no** Nintendo ROM, disk, IPL, or extracted game assets. You bring your own
 legally obtained dumps; game data is extracted or loaded locally from the files you supply.
@@ -30,60 +30,150 @@ legally obtained dumps; game data is extracted or loaded locally from the files 
 
 ## Features
 
-- **True widescreen** — the game renders in 16:9 (`gEnhancements.Graphics.Widescreen`), with an
+Options live in the enhancement menu, which opens with **F1**. Editing tools are in Course Edit itself.
+
+### Graphics
+
+- **True widescreen:** the game renders in 16:9 (`gEnhancements.Graphics.Widescreen`), with an
   optional **widescreen-anchored HUD** so on-screen elements sit at the screen edges instead of
   being stretched from 4:3 (`gEnhancements.Graphics.WidescreenUI`).
-- **Ultrawide support (21:9 and wider)** — an opt-in mode widens the game's own culling so track
+- **Ultrawide support (21:9 and wider):** an opt-in mode widens the game's own culling so track
   pieces, machines, fireworks and background stars stop popping at the edges of ultrawide
   windows; the HUD anchors to the true corners (`gEnhancements.Graphics.UltrawideMode`).
-- **Black border removal** — the original game framed every screen inside the CRT overscan-safe
+- **Black border removal:** the original game framed every screen inside the CRT overscan-safe
   area, which shows as a black border on modern displays. An opt-in toggle opens the picture to
   the true edges on every screen (`gEnhancements.Graphics.RemoveBorders`), with a companion
   toggle to hide the race-intro wipe curtain (`gEnhancements.Graphics.HideRaceCurtain`).
-- **High-refresh frame interpolation** — the simulation runs at its true 60 Hz while rendering
+- **High-refresh frame interpolation:** the simulation runs at its true 60 Hz while rendering
   interpolates smoothly up to your monitor's refresh rate (144 Hz and beyond), covering the
   camera, racers, effects and UI. WARNING: NOT PERFECT: While I did my best efforts to implement this in full capacity, it might get some slowdowns rarely, especially after screen transitions. I will do my best to keep optimizing this feature in future releases.
-- **Discord Rich Presence** — off by default; when enabled it shows your mode, course, lap and
+- **Post-process shaders:** RetroArch `.slangp` presets such as CRT Royale and crt-geom, with live
+  parameter sliders and your own saved presets. Put presets in a `shaders/` folder next to the
+  game. See the [shader guide](docs/modding/SHADERS.md).
+- **Track depth test:** on by default, so a track inside a tube no longer flickers.
+- **Machine detail and lighting:** adjustable detail for machines and boosters, forced machine
+  shadows, and a preliminary Fancy lighting option. Thanks to NewGBAXL.
+- **Modern rendering knobs:** internal resolution scale, MSAA, texture filtering, VSync,
+  z-fighting mitigation, draw distance, and frame pacing.
+
+### Racing
+
+- **Continue Cup:** leave a Grand Prix between races and pick it up later from the main menu.
+- **Single Race rules in Practice:** 1 to 99 laps or unlimited, a chosen number of CPU racers, and
+  an optional random rival. These races never write records, ghosts or points. Lap digits by
+  Heebeejeebees.
+- **Race setup:** a custom starting grid and an AI aggression slider.
+- **X Cup seed codes:** share a generated course as a code, queue several codes to play them in
+  order, and copy the codes of the cup you just played.
+- **X Cup real courses:** an option that makes each X Cup course a random stock or Expansion Kit
+  course, six different ones per cup. CPU racers use that course's tuning. Seed codes are off
+  while it's on.
+- **Save an X Cup track:** after a race, save the generated course you just played as a Course
+  Edit track.
+- **Skippable ending and credits:** hold START for about a second.
+- **Ghost library:** import/export ghost replays as `.gdg` files, a per-course host-side ghost
+  library, and a **Ghost Browser** window, all alongside the game's own SRAM ghost slot.
+- **Photo mode:** hide the HUD while paused in a race for clean captures
+  (`gEnhancements.Practice.PhotoMode`).
+- **Practice lap deltas:** your last lap versus your session best, drawn in Practice mode
+  (`gEnhancements.Practice.ShowLapDeltas`).
+- **Achievements and playtime:** local achievements and playtime tracking, stored in `saves/`.
+
+### Machines and colors
+
+- **Machine stat editor:** override body, boost, grip and weight per machine.
+- **Machine palette editor:** recolor machines and keep the result.
+- **Random opponent colors:** shuffle rival machine colors each race.
+- **Effect colors:** pick the colors of boost trails, side-attack glow and ghost boost trails.
+
+### Course Edit and the 64DD
+
+- **64DD Expansion Kit:** loads the translated EK disk image and the 64DD IPL ROM to unlock the
+  **Course Edit** track editor and the DD cups.
+- **Durable 64DD save sidecar:** Course Edit saves and disk writes are journaled to a sidecar
+  file next to the game; your original `.ndd` disk image is **never** modified.
+- **Undo and redo:** with an optional History panel of the last 32 changes. Click a row to jump
+  back to it.
+- **Forks:** the Split, Insert and Link tools build a second path. Path B can span several
+  segments, split nodes show in green, and a badge shows the active path.
+- **Lava strips:** left, right, middle or both sides. They drain energy and kill at zero, and CPU
+  racers steer away from them. "Lava strips never kill" turns off the kill.
+- **Magnet traps:** thin pulsing rails on the left or right of the road that pull machines toward
+  the track edge, with their own warning sound and adjustable pull strength and range. CPU racers
+  steer away from them. They can't be placed on pipes, half-pipes or cylinders.
+- **Mouse editing:** drag point position, height, width, bank and offset, with multi-select and
+  box select. Create Machine has a mouse cursor too.
+- **Blender-style camera:** orbit and pan with a button you choose, and zoom with the wheel.
+  Sensitivity and inversion are adjustable.
+- **Shaping tools:** bank snap at 45, 90 or 180 degrees, and lining up a run of three or more
+  points.
+- **Keys and help:** number-key shortcuts, rebindable tool keys, a hint strip for the current
+  tool, and a Controls Help page showing your live bindings.
+- **Test drive:** choose the machine and engine, and drive in widescreen.
+- **Per-track options:** names up to 20 characters, custom music from `music/custom/`, and an
+  ending scene option. An experimental toggle raises the height ceiling from 5,000 to 30,000, but
+  those tracks won't load on real hardware or in other Expansion Kit tools.
+
+### Controls
+
+- **Input:** keyboard and SDL controller support (including DualSense) with rumble, plus a
+  draggable on-screen **N64 input viewer** overlay.
+- **Players 2 to 4:** assign controllers to ports, or let them assign themselves as they connect.
+- **Controller profiles:** keep separate setups and switch between them.
+- **Input actions:** remap what each button does separately in races, in Course Edit and in menus.
+- **Steering curve:** set how stick travel maps to steering for each controller port. 1.00 is
+  stock, higher is gentler near center, lower is sharper, and full lock doesn't change.
+- **Mouse steering:** steer races with the mouse, with adjustable sensitivity.
+
+### Audio
+
+- **Separate volume sliders:** master, music and sound effects.
+- **Streamed music replacement:** play your own `.ogg`, `.flac` or `.wav` for any BGM from `music/`
+  or `mods/music/`. See the [custom music guide](docs/modding/CUSTOM_MUSIC.md).
+
+### Sharing and mods
+
+- **Content Library:** a card-based view of your tracks and machines, with click-to-assign Edit Cup
+  slots and a track preview that shows the start and direction. Thanks to airon-main.
+- **Shareable files:** a track or a whole Edit Cup exports as a `.gdxp` package that carries its
+  custom music, and a machine as a `.gdxc` file. See the
+  [sharing guide](docs/modding/SHARING_TRACKS_AND_MACHINES.md).
+- **Import from a disk image (experimental):** read tracks and machines straight out of a 64DD disk
+  dump from an emulator or a console.
+- **ROM hacks (experimental):** play a hack packaged as an `.o2r` archive from `mods/~romhacks/`,
+  or build one from a patched US rev0 ROM. Each hack has its own save and its own Continue Cup,
+  and brings its courses, music, skylines, buildings and text. Only assets and courses come
+  across: anything a hack changed in code doesn't run.
+- **Texture-pack modding:** drop `.o2r` packs in a `mods/` folder to override textures
+  (`gEnhancements.Workshop.TexturePacks`), with hot reload from the menu.
+- **More mod packs:** machine models, music sequences, samples, soundfonts and Lua scripts, with a
+  load order that decides which pack wins a conflict.
+- **Course elements:** mod packs can add named venues, skyboxes, music, part styles and track
+  effects to Course Edit. See the [course elements guide](docs/modding/COURSE_ELEMENTS.md).
+- **Asset dumping:** decode named assets straight from the extracted archive, per class, from the
+  Workshop tab. See the [modding guide](docs/MODDING_GUIDE.md) to turn a dump into a pack.
+
+### Platforms and tools
+
+- **macOS and Android:** macOS on Metal thanks to FeedMana, and Android on OpenGL ES thanks to
+  izzy2lost and airon-main. See [Platforms](#platforms).
+- **In-game updater:** on Windows, Linux and macOS, with rolling nightly builds published with
+  checksums.
+- **In-game enhancement menu:** a full ImGui menu opened with **F1** (also Escape or Gamepad
+  Back), with Settings, Enhancements, Workshop, Online and Dev Tools sections, navigable with
+  keyboard or controller.
+- **Discord Rich Presence:** off by default; when enabled it shows your mode, course, lap and
   position on your Discord profile, with per-field privacy toggles so you choose exactly what is
   visible (`gEnhancements.Online.DiscordPresence`).
-- **In-game enhancement menu** — a full ImGui menu opened with **F1** (also Escape or Gamepad
-  Back). Graphics, audio, gameplay, practice, ghosts and workshop tabs, keyboard- and
-  controller-navigable.
-- **64DD Expansion Kit** — loads the translated EK disk image and the 64DD IPL ROM to unlock the
-  **Course Edit** track editor and the DD cups.
-- **Ghost library** — import/export ghost replays as `.gdg` files, a per-course host-side ghost
-  library, and a **Ghost Browser** window, all alongside the game's own SRAM ghost slot.
-- **Photo mode** — hide the HUD while paused in a race for clean captures
-  (`gEnhancements.Practice.PhotoMode`).
-- **Practice lap deltas** — your last lap versus your session best, drawn in Practice mode
-  (`gEnhancements.Practice.ShowLapDeltas`).
-- **Texture-pack modding** — drop `.o2r` packs in a `mods/` folder to override textures
-  (`gEnhancements.Workshop.TexturePacks`), with hot reload from the menu.
-- **Asset dumping** — decode named assets straight from the extracted archive, per class, from the
-  Workshop tab. See the [modding guide](docs/MODDING_GUIDE.md) to turn a dump into a pack.
-- **Durable 64DD save sidecar** — Course Edit saves and disk writes are journaled to a sidecar
-  file next to the game; your original `.ndd` disk image is **never** modified.
-- **Modern rendering knobs** — internal resolution scale, MSAA, texture filtering, VSync,
-  z-fighting mitigation, draw distance, and frame pacing.
-- **Input** — keyboard and SDL controller support (including DualSense), plus a draggable
-  on-screen **N64 input viewer** overlay.
-- **Developer tools** — live Stats, an optional top-right FPS/frame-time overlay, a command
+- **Developer tools:** live Stats, an optional top-right FPS/frame-time overlay, a command
   Console, and the Fast3D graphics debugger under **Dev Tools**.
 
 ## Planned features
 
-All of the vanilla content — cartridge and Expansion Kit — is playable from start to finish
-today. These are the next things planned for G-Diffuser:
-
-- **Mouse control in Course Edit** — point-and-click track editing instead of driving the cursor
-  with a pad.
-- **Content export and import** — share a custom track or a Create Machine vehicle as a single
-  file another player can drop in and race, author ghosts included.
-- **Better modding support** — per-tile font/atlas overrides and paletted (CI4/CI8) texture
-  encoding, the two big gaps in what packs can replace today.
-- **Players 2–4 on gamepads** — full multi-controller support for VS and split-screen.
-- **Full controller navigation** of the enhancement menu.
-- **Japanese version support** — the original JP ROM and disk as a selectable profile.
+All of the vanilla content, cartridge and Expansion Kit, is playable from start to finish today.
+The next thing planned for G-Diffuser is **Japanese version support**: the original JP ROM and disk
+as a selectable profile. Feature requests live in the forum on the
+[Discord server](https://discord.gg/gpaM8qK9NK).
 
 ## Quick Start
 
@@ -103,7 +193,9 @@ today. These are the next things planned for G-Diffuser:
    remains beside the executable so later launches boot directly into the game.
 4. **Play.** Press **F1** at any time to open the enhancement menu.
 
-**Updating.** Saves are stored in `saves/` beside the executable, and every release unpacks to a
+**Updating.** From 1.2 on, Windows, Linux and macOS builds can update themselves from the
+enhancement menu. Android installs new versions from the APK. Coming from 1.1.0 or older, update
+by hand: saves are stored in `saves/` beside the executable, and every release unpacks to a
 folder named `G-Diffuser`. To update, extract the new release into the same place as your current
 install, replacing its files: your `saves/`, ROM and game data stay where they are. On Windows,
 **Extract All** proposes a new folder named after the zip, so change the destination to the folder

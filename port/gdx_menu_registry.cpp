@@ -57,6 +57,8 @@
 #include "gdx_input_actions.h" // 3A action layer: per-context N64 button tables (extern "C" API)
 #include "gdx_single_race.h" // Single Race options: lap limit and settings migration
 #include "gdx_input_profiles.h" // 4A controller profiles: Race-table presets over the 3A layer (extern "C" API)
+#include "gdx_steering_curve.h" // Per-port steering exponent (extern "C" API)
+#include "gdx_xcup_random.h" // X Cup random course toggle CVar
 #include "gdx_achievements.h" // F10 playtime tracker + local achievements
 #include "gdx_gp_resume.h"    // Save GP in progress: saved cup record + Continue Cup (extern "C" API)
 
@@ -784,7 +786,7 @@ void GdxMenu::RegisterDisableReasons() {
 
     mDisabledInfo[GdxUI::DISABLE_FOR_RACE_IN_PROGRESS] = {
         [](GdxUI::DisabledInfo&) { return gdx_input_in_gameplay() != 0; },
-        "A race is in progress. Ghost state must not be changed alongside the running game."
+        "A race is in progress. This can't change until the race is over."
     };
 
     mDisabledInfo[GdxUI::DISABLE_FOR_COURSE_EDIT_MOUSE_OFF] = {
@@ -1808,6 +1810,29 @@ void GdxMenu::RegisterMenu() {
                       "the Input Editor."))
                   .SearchTerms("multiplayer two controllers player 2 assign port seating hotplug"));
 
+    AddWidget("Settings", "Controls", SECTION_COLUMN_2,
+              WidgetInfo{ .name = "Steering curve", .type = GdxUI::WIDGET_SEPARATOR_TEXT });
+    for (int port = 0; port < GDX_STEERING_PORT_COUNT; port++) {
+        AddWidget("Settings", "Controls", SECTION_COLUMN_2,
+                  WidgetInfo{ .name = "Port " + std::to_string(port + 1) + " steering curve",
+                              .cVar = gdx_steering_curve_cvar(port),
+                              .type = GdxUI::WIDGET_CVAR_SLIDER_FLOAT }
+                      .Options(UIWidgets::FloatSliderOptions{ .flags = ImGuiSliderFlags_AlwaysClamp }
+                                   .Min(GDX_STEERING_EXPONENT_MIN)
+                                   .Max(GDX_STEERING_EXPONENT_MAX)
+                                   .Step(0.05f)
+                                   .DefaultValue(GDX_STEERING_EXPONENT_DEFAULT)
+                                   .Format("%.2f")
+                                   .ShowButtons(false)
+                                   .LabelPosition(UIWidgets::LabelPositions::Near)
+                                   .Tooltip("How stick travel maps to steering in races, for this "
+                                            "controller port.\n1.00 = stock. Higher is gentler near "
+                                            "center, lower is sharper.\nFull lock doesn't change. "
+                                            "At 2.00, half stick steers 25%."))
+                      .ModifiedMarker()
+                      .SearchTerms("steering curve linearity sensitivity response exponent analog stick"));
+    }
+
     // 3A action layer: which N64 buttons trigger each action in races, Course Edit and menus.
     // The Input Editor (above) runs first and maps controllers to N64 buttons; these tables run after it.
     AddWidget("Settings", "Actions", SECTION_COLUMN_1,
@@ -2282,6 +2307,19 @@ void GdxMenu::RegisterMenu() {
                   .ModifiedMarker()
                   .SearchTerms("ai cpu opponent aggressive attack combat difficulty mutator"));
 
+    // Read when each X Cup course loads, so the race lockout keeps a course from changing under it.
+    AddWidget("Enhancements", "Gameplay", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "X Cup uses real courses", .cVar = GDX_XCUP_RANDOM_CVAR,
+                          .type = GdxUI::WIDGET_CVAR_CHECKBOX }
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(false).Tooltip(
+                      "Each X Cup course is a random stock or Expansion Kit course instead of a\n"
+                      "generated one, six different courses per cup. A cup resumed with Continue Cup\n"
+                      "can repeat one. CPU racers use that course's tuning.\n"
+                      "Seed codes are off while this is on."))
+                  .DisableWhen({ GdxUI::DISABLE_FOR_RACE_IN_PROGRESS })
+                  .ModifiedMarker()
+                  .SearchTerms("x cup random course real stock expansion kit shuffle cpu tuning"));
+
     // Decision M3: shareable X Cup seed codes. The pending seed is one-shot runtime state, so
     // this stays a custom block (InputText + queue button + current-code display), not a CVar.
     AddWidget("Enhancements", "Gameplay", SECTION_COLUMN_1,
@@ -2299,6 +2337,41 @@ void GdxMenu::RegisterMenu() {
                       "Off = 0 energy on lava kills, same as any damage source."))
                   .ModifiedMarker()
                   .SearchTerms("lava strip damage kill energy drain course editor"));
+
+    // Scales the sideways force in racer.c Racer_ApplyMagnetPull, which clamps to the same range.
+    AddWidget("Enhancements", "Gameplay", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Magnet pull strength", .cVar = "gEnhancements.Gameplay.MagnetPullStrength",
+                          .type = GdxUI::WIDGET_CVAR_SLIDER_FLOAT }
+                  .Options(UIWidgets::FloatSliderOptions{ .flags = ImGuiSliderFlags_AlwaysClamp }
+                               .Min(0.25f)
+                               .Max(3.0f)
+                               .Step(0.05f)
+                               .DefaultValue(1.7f)
+                               .Format("%.2f")
+                               .ShowButtons(false)
+                               .LabelPosition(UIWidgets::LabelPositions::Near)
+                               .Tooltip("How hard magnet rails pull machines toward the track edge.\n"
+                                        "1.70 = default, about as strong as a held drift."))
+                  .ModifiedMarker()
+                  .SearchTerms("magnet rail trap pull strength force course editor"));
+
+    // Read every frame by racer.c Racer_InMagnetPullRange, which clamps to the same range.
+    AddWidget("Enhancements", "Gameplay", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Magnet pull range", .cVar = "gEnhancements.Gameplay.MagnetPullRange",
+                          .type = GdxUI::WIDGET_CVAR_SLIDER_FLOAT }
+                  .Options(UIWidgets::FloatSliderOptions{ .flags = ImGuiSliderFlags_AlwaysClamp }
+                               .Min(10.0f)
+                               .Max(200.0f)
+                               .Step(5.0f)
+                               .DefaultValue(80.0f)
+                               .Format("%.0f")
+                               .ShowButtons(false)
+                               .LabelPosition(UIWidgets::LabelPositions::Near)
+                               .Tooltip("How far from the track edge magnets start pulling.\n"
+                                        "80 = default, before you reach the rails. 40 is right at the rails,\n"
+                                        "lower lets you cross them first. The middle of the road always stays free."))
+                  .ModifiedMarker()
+                  .SearchTerms("magnet rail trap pull range reach distance course editor"));
 
     // Save GP in progress: resumes the GP cup saved at the last race boundary (port/gdx_gp_resume.h).
     AddWidget("Enhancements", "Gameplay", SECTION_COLUMN_1,

@@ -64,6 +64,10 @@ extern "C" const char* SDL_GetCurrentAudioDriver(void);
 #include "gdx_console_log.h" // Console page: drains the queued port-log lines into the LUS console
 #include "gdx_ghost_io.h" // .gdg ghost import/export C API (Practice tab Export / Import buttons)
 #include "gdx_xcup_seed.h" // M3 X Cup seed codes (Gameplay tab custom block)
+#include "gdx_xcup_random.h" // X Cup random courses and the saved copy of a generated course
+#include "gdx_content_io.h" // X Cup save track: free name check and the track payload size
+#include "gdx_content_import.h" // X Cup save track: the install path a ROM course also uses
+#include "gdx_steering_curve.h" // Per-port steering exponent (extern "C" API)
 #include "gdx_gui.h"
 #include "gdx_workshop.h"    // Workshop tab: texture-pack listing, override count, reload, dump dir
 #include "gdx_lua.h"         // Workshop tab: Lua script pack status list (DrawScripts)
@@ -570,12 +574,17 @@ GdxMenu::GdxMenu() : Ship::GuiWindow("gOpenMenuBar", false, "G-Diffuser Menu") {
     // stock saves solely via the manual Save-Ghost prompt (menus.c Gdx_AutosaveGhostOnRecord).
     CVarRegisterInteger("gEnhancements.Gameplay.AutosaveOnRecord", 0);
     CVarRegisterInteger("gEnhancements.Gameplay.SkippableTransitions", 0);
+    CVarRegisterInteger(GDX_XCUP_RANDOM_CVAR, 0);
     // SkippableEnding: hold START ~1s to skip the GP ending ceremony and the credits (common.c
     // Skip_UpdateHoldStart). Safe because the cup clear is saved on the GP results screen first.
     CVarRegisterInteger("gEnhancements.Gameplay.SkippableEnding", 1);
     // LavaNoKill gates the Racer_ReceiveDamage call in racer.c when a machine is on a COURSE_EFFECT_LAVA
     // strip: off = drain can kill (stock), on = drain stops at 0.1 energy. Default off for stock parity.
     CVarRegisterInteger("gEnhancements.Gameplay.LavaNoKill", 0);
+    // MagnetPullStrength scales MAGNET_PULL_FORCE in racer.c Racer_ApplyMagnetPull.
+    CVarRegisterFloat("gEnhancements.Gameplay.MagnetPullStrength", 1.7f);
+    // MagnetPullRange moves the pull line in racer.c Racer_InMagnetPullRange. 40 is at the rails.
+    CVarRegisterFloat("gEnhancements.Gameplay.MagnetPullRange", 80.0f);
     // On by default: the node blink/checker parity and the flagged-node size pulse advance at half
     // rate, halving Course Edit's ~20 Hz strobe on modern displays (course_edit/191080.c
     // func_xk2_800E04E0, #ifdef PORT). Off is bit-identical to stock.
@@ -602,6 +611,10 @@ GdxMenu::GdxMenu() : Ship::GuiWindow("gOpenMenuBar", false, "G-Diffuser Menu") {
     CVarRegisterInteger("gEnhancements.Input.CourseEditMouse", 0);
     CVarRegisterInteger("gEnhancements.Input.MouseSteering", 0);
     CVarRegisterInteger("gEnhancements.Input.MouseSteeringSensitivity", 100);
+    // Per-port steering exponent, read by racer.c through gdx_steering_curve_for_port.
+    for (int port = 0; port < GDX_STEERING_PORT_COUNT; port++) {
+        CVarRegisterFloat(gdx_steering_curve_cvar(port), GDX_STEERING_EXPONENT_DEFAULT);
+    }
     // MouseConfineToWindow clips the OS cursor to the game window while Course Edit mouse control
     // or race mouse steering is active, so the cursor cannot drift off the game view mid-steer.
     CVarRegisterInteger("gEnhancements.Input.MouseConfineToWindow", 1);
@@ -1729,16 +1742,81 @@ void GdxMenu::DrawGhostIo() {
     }
 }
 
+// Saves the last generated X Cup course as a Course Edit track under the first free XCUP name.
+// Returns true once the install is queued. status receives the reason otherwise.
+static bool GdxSaveXCupTrack(const uint8_t* payload, char* name, size_t nameSize, char* status, size_t statusSize) {
+    int number;
+
+    for (number = 1; number <= 999; number++) {
+        snprintf(name, nameSize, "XCUP%03d", number);
+        const int crsd = gdx_content_file_exists(name, "CRSD");
+        const int crse = gdx_content_file_exists(name, "CRSE");
+        if (crsd < 0 || crse < 0) {
+            snprintf(status, statusSize, "Could not check the saved tracks. Try again in a moment.");
+            return false;
+        }
+        if (crsd == 0 && crse == 0) {
+            break;
+        }
+    }
+    if (number > 999) {
+        snprintf(status, statusSize, "Every name from XCUP001 to XCUP999 is taken.");
+        return false;
+    }
+
+    const int rc = gdx_content_import_begin_payload(name, "CRSD", GDX_CONTENT_TYPE_TRACK, payload,
+                                                    GDX_CONTENT_TRACK_PAYLOAD_SIZE);
+    if (rc == GDX_CONTENT_OK) {
+        return true;
+    }
+    if (rc == GDX_CONTENT_IMPORT_ERR_VALIDATION) {
+        GdxContentImportEntry entry;
+        gdx_content_import_validate_payload(name, "CRSD", GDX_CONTENT_TYPE_TRACK, payload,
+                                            GDX_CONTENT_TRACK_PAYLOAD_SIZE, &entry);
+        if (entry.errors & GDX_IMPORT_ERR_QUOTA_FULL) {
+            snprintf(status, statusSize, "The disk already holds as many tracks as it can.");
+        } else if (entry.errors & GDX_IMPORT_ERR_DISK_SPACE) {
+            snprintf(status, statusSize, "The disk has no room for another track.");
+        } else if (entry.errors & GDX_IMPORT_ERR_TRACK_GEOMETRY) {
+            snprintf(status, statusSize, "This course reaches past the area a saved track can use.");
+        } else {
+            snprintf(status, statusSize, "This course failed the saved track checks (0x%X).", (unsigned) entry.errors);
+        }
+        return false;
+    }
+    snprintf(status, statusSize, "Could not save the track: %s.", gdx_content_error_string(rc));
+    return false;
+}
+
 // M3 X Cup seed codes (port/gdx_xcup_seed.c). A custom block rather than a CVar widget: the
 // queue is one-shot runtime state, not persisted config, and the paste box needs a parse verdict,
 // the queue list and the current code display.
 void GdxMenu::DrawXCupSeed() {
     static char sQueueInput[4096] = { 0 };
     static char sSeedStatus[192] = { 0 };
+    static char sSavedTrackName[8] = { 0 };
+    static bool sTrackSaveWaiting = false;
     char current[GDX_XCUP_CODE_BUF_SIZE];
     char cupCodes[256];
+    const bool randomCourses = gdx_xcup_random_enabled() != 0;
 
-    if (gdx_xcup_current_seed_code(current, sizeof(current))) {
+    if (sTrackSaveWaiting && !gdx_content_import_pending()) {
+        int32_t mfsError = 0;
+        const int rc = gdx_content_import_result(&mfsError);
+        sTrackSaveWaiting = false;
+        if (rc == GDX_CONTENT_OK) {
+            snprintf(sSeedStatus, sizeof(sSeedStatus), "Saved as %s. Open it from Course Edit.", sSavedTrackName);
+        } else if (rc == GDX_CONTENT_ERR_IO) {
+            snprintf(sSeedStatus, sizeof(sSeedStatus), "Could not write the track (MFS error %d).", (int) mfsError);
+        } else {
+            snprintf(sSeedStatus, sizeof(sSeedStatus), "Could not save the track: %s.", gdx_content_error_string(rc));
+        }
+    }
+
+    if (gdx_xcup_random_active_course() >= 0) {
+        // No course name here: the request is that a random course stays a surprise until it loads.
+        ImGui::TextDisabled("This X Cup course is a real course, so it has no seed code to share or track to save.");
+    } else if (gdx_xcup_current_seed_code(current, sizeof(current))) {
         ImGui::Text("Last generated X Cup course: %s", current);
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Share this code and the other player gets the exact same track.");
@@ -1751,11 +1829,34 @@ void GdxMenu::DrawXCupSeed() {
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Copy this seed code to the clipboard.");
         }
+        ImGui::SameLine();
+        const uint8_t* generated = gdx_xcup_generated_payload();
+        const bool racing = gdx_input_in_gameplay() != 0;
+        ImGui::BeginDisabled(generated == nullptr || racing || sTrackSaveWaiting || gdx_content_mfs_busy() != 0);
+        if (ImGui::SmallButton("Save track")) {
+            sTrackSaveWaiting = GdxSaveXCupTrack(generated, sSavedTrackName, sizeof(sSavedTrackName), sSeedStatus,
+                                                 sizeof(sSeedStatus));
+        }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            if (generated == nullptr) {
+                ImGui::SetTooltip("Race a generated course in the X Cup to save it.");
+            } else if (racing) {
+                ImGui::SetTooltip("Available once the race is over, up to the next X Cup course.\n"
+                                  "Only the last generated course is kept.");
+            } else {
+                ImGui::SetTooltip("Save this course as a Course Edit track named XCUP and a number.");
+            }
+        }
     } else {
         ImGui::TextDisabled("Race an X Cup course once to see its seed code here.");
     }
 
     ImGui::Separator();
+    if (randomCourses) {
+        ImGui::TextDisabled("Seed codes are off while X Cup uses real courses. Queued codes wait until you turn it off.");
+    }
+    ImGui::BeginDisabled(randomCourses);
     ImGui::TextWrapped("Paste X Cup codes, one per line. Each newly generated X Cup course takes the next code in the queue.");
     ImGui::InputTextMultiline("##xcupqueue", sQueueInput, sizeof(sQueueInput), ImVec2(420.0f, 90.0f));
     if (ImGui::IsItemHovered()) {
@@ -1835,6 +1936,7 @@ void GdxMenu::DrawXCupSeed() {
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("One line per course, in course order. Queue them to replay this cup.");
     }
+    ImGui::EndDisabled();
     if (sSeedStatus[0] != '\0') {
         ImGui::TextWrapped("%s", sSeedStatus);
     }

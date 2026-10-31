@@ -658,11 +658,17 @@ uintptr_t Segment_GetAddress(s32 segment) {
     return (uintptr_t)gSegments[segment];
 }
 
+void Segment_LoadAssets(void);
+
 Gfx* Segment_SetTableAddresses(Gfx* gfx) {
+    // The bridge's kOpMoveword handler writes the emitted base back into gSegments[] when it
+    // translates this list, which happens after the Segment_LoadAssets call later in the frame.
+    // Refresh the venue segment first: otherwise a venue change inside a mode (a Course Edit file
+    // load or the Venue menu) is undone every frame, and the road keeps the previous venue's art
+    // until the next mode change.
+    Segment_LoadAssets();
     // Emit one gSPSegment per slot so the converted display list carries correct
-    // segment bases into the LUS interpreter's mSegmentPointers[]. The adapter's
-    // kOpMoveword handler ignores the truncated 32-bit w1 and reads gSegments[]
-    // directly, so the full 64-bit host pointers survive the 8→16-byte conversion.
+    // segment bases into the LUS interpreter's mSegmentPointers[].
     for (int i = 0; i < 16; i++) {
         gSPSegment(gfx++, i, gSegments[i]);
     }
@@ -1285,9 +1291,13 @@ void Segment_LoadOverlays(void) {
         const size_t workBufferSize = 2 * sizeof(unk_80128C94);
         size_t i;
 
+        /* Carved once and kept for the session, so it can't come from the mode arena: reopening
+         * Course Edit rewinds that arena and hands this same memory to the new mode's textures,
+         * while every frame still writes vertices and display lists here. That showed as garbled
+         * pause text and a broken sky. The console reallocates this on each entry instead, but the
+         * host-wide range below is permanent, so it must stay at one address. */
         if (D_80128C90 == NULL) {
-            D_80128C90 = (unk_80128C94*)Arena_Allocate(
-                ALLOC_FRONT, workBufferSize);
+            D_80128C90 = (unk_80128C94*)gdx_rdram_persist_alloc_raw(workBufferSize, 16u);
         }
         D_80128C94 = D_80128C90;
         if (D_80128C90 == NULL) {

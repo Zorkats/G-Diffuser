@@ -233,10 +233,10 @@ static uint32_t gdx_import_course_checksum(const GdxImportCourseData* courseData
 }
 
 #define GDX_IMPORT_PIT_MIN -1
-#define GDX_IMPORT_PIT_MAX 7 /* PIT_MAX - 1; PIT_MAX == 8 in fzx_course.h */
+#define GDX_IMPORT_PIT_MAX 9 /* PIT_MAX - 1; PIT_MAX == 10 in fzx_course.h */
 
 /* Sanitize out-of-range pit values in-place. The game's editor tables index by pit+1 with a
- * size-9 array, so values below -1 or above 7 can read past the end. Clamp to PIT_NONE (-1),
+ * size-11 array, so values below -1 or above 9 can read past the end. Clamp to PIT_NONE (-1),
  * recompute the checksum over the sanitized data (mirrors Course_CalculateChecksum), and log. */
 static int gdx_import_sanitize_course_pit(uint8_t* payload) {
     GdxImportCourseData* courseData = (GdxImportCourseData*) payload;

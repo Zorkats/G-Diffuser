@@ -60,7 +60,7 @@ typedef enum GdxCourseKind {
     GDX_COURSE_KIND_SKYBOX = 1,       /* Skybox, decomp/include/fzx_course.h:119-128 */
     GDX_COURSE_KIND_BGM = 2,          /* raw BgmId, decomp/include/sfx.h:98-115 (not the menu order) */
     GDX_COURSE_KIND_PART_STYLE = 3,   /* TrackPartStyle, decomp/include/fzx_expansion_kit.h:53-63 */
-    GDX_COURSE_KIND_TRACK_EFFECT = 4, /* CourseEffects, decomp/include/fzx_racer.h:16-25 */
+    GDX_COURSE_KIND_TRACK_EFFECT = 4, /* CourseEffects, decomp/include/fzx_racer.h:16-27 */
     GDX_COURSE_KIND_COUNT = 5
 } GdxCourseKind;
 
