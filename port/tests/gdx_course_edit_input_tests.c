@@ -138,7 +138,38 @@ static void test_drag_cancellation_keeps_other_intents(void) {
     assert(!gdx_course_edit_input_take_selection(&point, &toggle));
 }
 
+static void test_bank_snap(void) {
+    // Off leaves the bank alone.
+    assert(gdx_course_edit_bank_snap_next(7, 0, 1) == 7);
+    assert(gdx_course_edit_bank_snap_nearest(7, 0) == 7);
+
+    // Absolute angles: 7 steps to 45, not 52.
+    assert(gdx_course_edit_bank_snap_next(7, 45, 1) == 45);
+    assert(gdx_course_edit_bank_snap_next(7, 45, -1) == 0);
+    assert(gdx_course_edit_bank_snap_next(45, 45, 1) == 90);
+    assert(gdx_course_edit_bank_snap_next(45, 45, -1) == 0);
+
+    // Both directions wrap at 360.
+    assert(gdx_course_edit_bank_snap_next(0, 45, -1) == 315);
+    assert(gdx_course_edit_bank_snap_next(315, 45, 1) == 0);
+    assert(gdx_course_edit_bank_snap_next(357, 90, 1) == 0);
+    assert(gdx_course_edit_bank_snap_next(0, 180, -1) == 180);
+    assert(gdx_course_edit_bank_snap_next(180, 180, 1) == 0);
+
+    // Nearest rounds up at the halfway point and wraps.
+    assert(gdx_course_edit_bank_snap_nearest(7, 45) == 0);
+    assert(gdx_course_edit_bank_snap_nearest(21, 45) == 0);
+    assert(gdx_course_edit_bank_snap_nearest(24, 45) == 45);
+    assert(gdx_course_edit_bank_snap_nearest(350, 45) == 0);
+    assert(gdx_course_edit_bank_snap_nearest(45, 90) == 90);
+    assert(gdx_course_edit_bank_snap_nearest(89, 180) == 0);
+    assert(gdx_course_edit_bank_snap_nearest(90, 180) == 180);
+    assert(gdx_course_edit_bank_snap_nearest(269, 180) == 180);
+    assert(gdx_course_edit_bank_snap_nearest(270, 180) == 0);
+}
+
 int main(void) {
+    test_bank_snap();
     test_one_shot_actions();
     test_latest_continuous_command_wins();
     test_clear_drops_stale_commands();

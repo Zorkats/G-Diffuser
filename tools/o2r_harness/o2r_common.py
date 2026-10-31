@@ -33,6 +33,16 @@ VERSION_ENTRY_LEN = 5                  # 1 endianness byte + 4 CRC bytes
 # 4240-records / 664-duplicates / 3576-unique split described the pre-2026-07-18 archive (Windows
 # double-emit bug) and no longer applies after the Torch parity fix.
 #
+# 3613 = 3612 prior census + 1 game_text record (2026-10-31). FZX:GAME_TEXT extracts the difficulty
+# names, ending cup names, credits, ending message and two labels, compiled C data no other recipe
+# reaches, so a ROM hack could not carry its own. Strictly additive: one record added, none removed,
+# no existing payload altered. See decomp/assets/yaml/us/rev0/game_text.yaml.
+#
+# 3612 = 3611 prior census + 1 background_sprites record (2026-10-31). FZX:BG_SPRITES extracts the
+# per-course skyline sprite lists, compiled C data no other recipe reaches, so a ROM hack could not
+# carry its own. Strictly additive: one record added, none removed, no existing payload altered. See
+# decomp/assets/yaml/us/rev0/background_sprites.yaml.
+#
 # 3611 = 3610 prior census + 1 course_strings record (2026-08-29). FZX:COURSE_STRINGS extracts
 # the per-course track names, subtitles and BGM assignment, which are compiled C data no other
 # recipe reaches, so a ROM hack could not carry its own. Strictly additive: one record added,
@@ -57,7 +67,7 @@ VERSION_ENTRY_LEN = 5                  # 1 endianness byte + 4 CRC bytes
 # segment offsets. Blessed only after checking the shape of the change: the new archive is a
 # strict SUPERSET of the old one -- 4 records added, 0 removed, 0 payloads altered, each new
 # record a real 656-byte texture rather than the blank a half-populated family would produce.
-EXPECTED_ENTRY_COUNT = 3611
+EXPECTED_ENTRY_COUNT = 3613
 
 # Macro names are a frozen code-level contract with agent 1-B (C3).
 MACRO_SHA256 = "GDX_O2R_EXPECTED_SHA256"

@@ -186,6 +186,28 @@ GdxCourseEditInt32 gdx_course_edit_input_take_line_up(void) {
     return pending;
 }
 
+GdxCourseEditInt32 gdx_course_edit_bank_snap_next(GdxCourseEditInt32 bank, GdxCourseEditInt32 step,
+                                                  GdxCourseEditInt32 direction) {
+    GdxCourseEditInt32 next;
+
+    if (step == 0) {
+        return bank;
+    }
+    if (direction > 0) {
+        next = ((bank / step) + 1) * step;
+    } else {
+        next = (bank % step == 0) ? bank - step : bank - (bank % step);
+    }
+    return (next + 360) % 360;
+}
+
+GdxCourseEditInt32 gdx_course_edit_bank_snap_nearest(GdxCourseEditInt32 bank, GdxCourseEditInt32 step) {
+    if (step == 0) {
+        return bank;
+    }
+    return (((bank + (step / 2)) / step) * step) % 360;
+}
+
 void gdx_course_edit_input_clear_drag(void) {
     sDragStartPending = 0;
     sDragCommitPending = 0;

@@ -816,8 +816,9 @@ bool Combobox(const char* label, T* value, const std::unordered_map<T, const cha
     if (ImGui::BeginCombo(invisibleLabel, previewLabel, options.flags)) {
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10.0f, 10.0f));
         for (const auto& pair : comboMap) {
-            // Entries whose label is a single character are treated as hidden/placeholder rows.
-            if (strlen(pair.second) > 1) {
+            // FIX: upstream hid labels of one character too, which removed the 3, 5, 7 and 9 lap rows.
+            // Only an empty label is a hidden/placeholder row.
+            if (strlen(pair.second) > 0) {
                 const bool isSelected = pair.first == *value;
                 if (ImGui::Selectable(pair.second, isSelected)) {
                     *value = pair.first;
@@ -911,7 +912,7 @@ bool Combobox(const char* label, T* value, const std::vector<const char*>& combo
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10.0f, 10.0f));
         for (size_t i = 0; i < comboVector.size(); ++i) {
             auto newValue = static_cast<T>(i);
-            if (strlen(comboVector.at(i)) > 1) {
+            if (strlen(comboVector.at(i)) > 0) { // FIX: see the map overload above
                 const bool isSelected = newValue == *value;
                 if (ImGui::Selectable(comboVector.at(i), isSelected)) {
                     *value = newValue;
@@ -1004,7 +1005,7 @@ bool Combobox(const char* label, T* value, const std::vector<std::string>& combo
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10.0f, 10.0f));
         for (size_t i = 0; i < comboVector.size(); ++i) {
             auto newValue = static_cast<T>(i);
-            if (comboVector.at(i).length() > 1) {
+            if (comboVector.at(i).length() > 0) { // FIX: see the map overload above
                 const bool isSelected = newValue == *value;
                 if (ImGui::Selectable(comboVector.at(i).c_str(), isSelected)) {
                     *value = newValue;
@@ -1096,7 +1097,7 @@ bool Combobox(const char* label, T* value, const char* (&comboArray)[N], const C
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10.0f, 10.0f));
         for (size_t i = 0; i < N; ++i) {
             auto newValue = static_cast<T>(i);
-            if (strlen(comboArray[i]) > 1) {
+            if (strlen(comboArray[i]) > 0) { // FIX: see the map overload above
                 const bool isSelected = newValue == *value;
                 if (ImGui::Selectable(comboArray[i], isSelected)) {
                     *value = newValue;

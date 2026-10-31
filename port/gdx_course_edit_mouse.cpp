@@ -40,6 +40,7 @@
 // decomp controller.h is not C++-clean under MSVC; the N64 button masks are stable ABI bits.
 #define GDX_BTN_A 0x8000
 #define GDX_BTN_B 0x4000
+#define GDX_BTN_Z 0x2000
 
 // Decomp globals. Plain int is ABI-identical to the decomp's int32_t on this target (same idiom as
 // port/input_bridge.c); gInCourseEditTestRun is a decomp bool. GET_MODE masks the F3D-variant
@@ -80,6 +81,7 @@ std::shared_ptr<Fast::Fast3dWindow> CourseEditMouseWindow() {
 
 bool CourseEditMouseOverChrome(int32_t x, int32_t y);
 bool CourseEditMouseInSubMenu(void);
+bool CourseEditCtrlHeld(void);
 
 // S3: point-drag state machine. Declared early so CourseEditMouseModeActive can allow an
 // active mouse transaction to run while native grab state is set.
@@ -432,6 +434,9 @@ int GdxOrbitSensitivity(void) {
 int GdxPanSensitivity(void) {
     return CVarGetInteger("gEnhancements.Input.EditorMousePanSensitivity", 100);
 }
+float GdxInvertSign(const char* cvar) {
+    return CVarGetInteger(cvar, 0) != 0 ? -1.0f : 1.0f;
+}
 int GdxZoomSensitivity(void) {
     return CVarGetInteger("gEnhancements.Input.EditorMouseZoomSensitivity", 100);
 }
@@ -590,14 +595,14 @@ void CourseEditMouseCameraTick(void) {
         g.shift = shift;
     }
     if (shift) {
-        const float scale = GdxPanSensitivity() / 100.0f;
+        const float scale = GdxPanSensitivity() / 100.0f * GdxInvertSign("gEnhancements.Input.EditorMouseInvertPan");
         g.panDx += dx * scale;
         g.panDy += dy * scale;
     } else {
         // Signs match the D-pad: a drag right yaws like BTN_RIGHT, a drag up pitches like BTN_UP.
         const float scale = kOrbitDegreesPerPixel * GdxOrbitSensitivity() / 100.0f;
-        g.orbitYawDeg -= dx * scale;
-        g.orbitPitchDeg -= dy * scale;
+        g.orbitYawDeg -= dx * scale * GdxInvertSign("gEnhancements.Input.EditorMouseInvertOrbitX");
+        g.orbitPitchDeg -= dy * scale * GdxInvertSign("gEnhancements.Input.EditorMouseInvertOrbitY");
     }
 }
 
@@ -823,7 +828,10 @@ extern "C" int gdx_course_edit_mouse_buttons(void) {
 
     int buttons = 0;
     if (wnd->GetMouseState(Ship::LUS_MOUSE_BTN_LEFT)) {
-        buttons |= GDX_BTN_A;
+        // Ctrl+click is the controller's Z, the stock segment pick outside point mode. It selects without applying.
+        const bool pickSegment = CourseEditEditorActive() && gCreateOption != 1 && !CourseEditMouseInSubMenu() &&
+                                 !CourseEditMouseOverChrome(x, y) && CourseEditCtrlHeld();
+        buttons |= pickSegment ? GDX_BTN_Z : GDX_BTN_A;
     }
     if (wnd->GetMouseState(Ship::LUS_MOUSE_BTN_RIGHT)) {
         buttons |= GDX_BTN_B;

@@ -68,6 +68,13 @@ GdxCourseEditInt32 gdx_course_edit_input_take_scalar_target(GdxCourseEditInt32* 
 void gdx_course_edit_input_request_line_up(void);
 GdxCourseEditInt32 gdx_course_edit_input_take_line_up(void);
 
+// Bank snap. Banks are 0 to 359 degrees. A step of 0 means snap is off and returns the bank unchanged.
+// The next multiple of step strictly past bank, in the direction of the sign of direction.
+GdxCourseEditInt32 gdx_course_edit_bank_snap_next(GdxCourseEditInt32 bank, GdxCourseEditInt32 step,
+                                                  GdxCourseEditInt32 direction);
+// The multiple of step closest to bank. A bank halfway between two rounds up.
+GdxCourseEditInt32 gdx_course_edit_bank_snap_nearest(GdxCourseEditInt32 bank, GdxCourseEditInt32 step);
+
 void gdx_course_edit_input_clear(void);
 void gdx_course_edit_input_clear_drag(void);
 void gdx_course_edit_native_update(void);

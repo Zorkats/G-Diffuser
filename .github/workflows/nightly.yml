@@ -66,10 +66,12 @@ jobs:
             exit 0
           fi
 
-          # Release candidates are excluded so a nightly after v1.2.0-rc1 still reads as a build
-          # on top of the last real release. The date is the commit's, not the run's, so a rerun of
-          # the same commit produces the same file names.
-          base="$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude '*-rc*' 2>/dev/null || echo v0.0.0)"
+          # The highest release tag, not the nearest one: v1.1.0 sits on history that main does not
+          # contain, so git describe would fall back to v1.0.1. Release candidates are excluded so a
+          # nightly after v1.2.0-rc1 still reads as a build on top of the last real release. The date
+          # is the commit's, not the run's, so a rerun of the same commit produces the same file names.
+          base="$(git tag --list 'v[0-9]*' --sort=-v:refname | { grep -v -e '-rc' || true; } | sed -n 1p)"
+          base="${base:-v0.0.0}"
           date="$(TZ=UTC0 git log -1 --date=format-local:%Y%m%d --format=%cd)"
           short="$(git rev-parse --short=7 HEAD)"
           echo "build=true" >> "$GITHUB_OUTPUT"

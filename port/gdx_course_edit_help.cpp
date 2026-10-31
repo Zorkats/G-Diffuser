@@ -139,6 +139,7 @@ void DrawToolLines(int tool) {
             break;
         case 3: // Bank/tilt
             ImGui::TextUnformatted("Drag a point left or right: sets bank");
+            ImGui::TextUnformatted("Grid button: bank snap off, 45, 90, 180 degrees");
             ImGui::TextDisabled("Right-click or Esc: cancel the drag");
             DrawModifierLine();
             break;
@@ -164,13 +165,20 @@ void DrawToolLines(int tool) {
     }
 }
 
-// Title and lines for the DESIGN and PARTS screens, where a click picks the segment under the cursor and applies the
-// selected design or part to it (the PORT pick in course_edit/188850.c).
+// Title and lines for the COURSE, DESIGN and PARTS screens. In DESIGN and PARTS a click picks the segment under the
+// cursor and applies the selected design or part to it (the PORT pick in course_edit/188850.c). Ctrl+click only picks.
 void DrawSegmentLines(int createOption) {
     const ImVec4 title(1.0f, 0.85f, 0.35f, 1.0f);
+    if (createOption == 0 /* CREATE_OPTION_COURSE */) {
+        ImGui::TextColored(title, "Course");
+        ImGui::TextUnformatted("Click: set a point");
+        ImGui::TextUnformatted("Ctrl+click the track: select that segment");
+        return;
+    }
     if (createOption == 3 /* CREATE_OPTION_PARTS */) {
         ImGui::TextColored(title, "Parts");
         ImGui::TextUnformatted("Click the track: place the part on that segment");
+        ImGui::TextUnformatted("Ctrl+click: select the segment only");
         ImGui::TextDisabled("Clicks away from the track do nothing");
         return;
     }
@@ -195,6 +203,7 @@ void DrawSegmentLines(int createOption) {
     }
     ImGui::TextColored(title, "Design");
     ImGui::TextUnformatted("Click the track: apply the design to that segment");
+    ImGui::TextUnformatted("Ctrl+click: select the segment only");
     ImGui::TextDisabled("Clicks away from the track do nothing");
 }
 
@@ -247,11 +256,8 @@ void GdxCourseEditDrawHintStrip(void) {
     if (CVarGetInteger("gEnhancements.Input.CourseEditMouse", 0) == 0 || !EditorActive()) {
         return;
     }
-    // Point mode shows the tool lines. DESIGN (2) and PARTS (3) show how a click picks a segment.
+    // Point mode shows the tool lines. COURSE (0), DESIGN (2) and PARTS (3) show how a click picks a segment.
     const bool pointMode = gCreateOption == 1 /* CREATE_OPTION_POINT */;
-    if (!pointMode && gCreateOption != 2 && gCreateOption != 3) {
-        return;
-    }
     if (pointMode && (gMoveOption < 0 || gMoveOption >= kToolCount)) {
         return;
     }
@@ -344,6 +350,7 @@ void GdxCourseEditDrawControlsHelp(void) {
     HelpRow("Left or right mouse movement", "Width, bank, and offset tools. Farther zoom moves faster");
     HelpRow("Hold Ctrl", "Fine: quarter speed");
     HelpRow("Hold Alt", "Snap the change: width and offset in steps of 50, bank in steps of 15 degrees");
+    HelpRow("Grid button (bank tool)", "Snap bank to exact angles: off, 45, 90, then 180 degrees");
     HelpRow("Right-click", "Cancel a drag");
     HelpRow("Delete",
             "Delete every selected point, in any point tool. With nothing selected, a sound plays and nothing changes");
@@ -356,7 +363,9 @@ void GdxCourseEditDrawControlsHelp(void) {
     HelpSection("Design and Parts");
     HelpRow("Left-click the track",
             "Picks the segment under the cursor and applies the selected design or part to it. A click away from "
-            "the track does nothing. Z still picks a segment without applying");
+            "the track does nothing");
+    HelpRow("Ctrl + left-click the track", "Selects the segment under the cursor without applying anything, in "
+                                           "Course, Design, and Parts. The same as the controller's Z");
     HelpRow("Left-click a segment (Insert design)",
             "Adds a point halfway along the segment. Refused, with the reason in the hint strip, on the start "
             "segment, under 4 or at 60 points, on a track at the length limit, or when a neighbour would be under "
