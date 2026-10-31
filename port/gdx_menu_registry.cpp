@@ -55,6 +55,7 @@
 #include "gdx_machine_stats.h" // F2b machine stat editor: body/boost/grip/weight overrides
 #include "gdx_custom_grid.h" // F3 custom grid: roster string CVar parse/format (extern "C" API)
 #include "gdx_input_actions.h" // 3A action layer: per-context N64 button tables (extern "C" API)
+#include "gdx_single_race.h" // Single Race options: lap limit and settings migration
 #include "gdx_input_profiles.h" // 4A controller profiles: Race-table presets over the 3A layer (extern "C" API)
 #include "gdx_achievements.h" // F10 playtime tracker + local achievements
 #include "gdx_gp_resume.h"    // Save GP in progress: saved cup record + Continue Cup (extern "C" API)
@@ -2037,6 +2038,15 @@ void GdxMenu::RegisterMenu() {
                   .SearchTerms("render distance fog pop-in culling horizon"));
 
     AddWidget("Enhancements", "Visuals", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Track depth test", .cVar = "gEnhancements.Graphics.TrackDepthTest",
+                          .type = GdxUI::WIDGET_CVAR_CHECKBOX }
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(true).Tooltip(
+                      "Sorts overlapping track pieces per pixel, so a track running inside\n"
+                      "a tube does not flicker. Off = stock draw order."))
+                  .ModifiedMarker()
+                  .SearchTerms("flicker tube pipe overlap z buffer zbuffer sorting"));
+
+    AddWidget("Enhancements", "Visuals", SECTION_COLUMN_1,
               WidgetInfo{ .name = "Force max machine detail", .cVar = "gEnhancements.Graphics.ForceMaxMachineLOD",
                           .type = GdxUI::WIDGET_CVAR_CHECKBOX }
                   .Options(UIWidgets::CheckboxOptions().DefaultValue(false).Tooltip(
@@ -2423,6 +2433,35 @@ void GdxMenu::RegisterMenu() {
                   .SearchTerms("course edit editor mouse drag sensitivity percent")
                   .DisableWhen({ GdxUI::DISABLE_FOR_COURSE_EDIT_MOUSE_OFF }));
 
+    // Direction of the camera gestures. Off keeps the drag signs that match the D-pad.
+    AddWidget("Enhancements", "Mouse", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Editor invert orbit horizontal",
+                          .cVar = "gEnhancements.Input.EditorMouseInvertOrbitX",
+                          .type = GdxUI::WIDGET_CVAR_CHECKBOX }
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(false).Tooltip(
+                      "Reverses left and right while orbiting the Course Edit camera."))
+                  .ModifiedMarker()
+                  .SearchTerms("course edit editor mouse invert inverted orbit camera horizontal")
+                  .DisableWhen({ GdxUI::DISABLE_FOR_COURSE_EDIT_MOUSE_OFF }));
+    AddWidget("Enhancements", "Mouse", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Editor invert orbit vertical",
+                          .cVar = "gEnhancements.Input.EditorMouseInvertOrbitY",
+                          .type = GdxUI::WIDGET_CVAR_CHECKBOX }
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(false).Tooltip(
+                      "Reverses up and down while orbiting the Course Edit camera."))
+                  .ModifiedMarker()
+                  .SearchTerms("course edit editor mouse invert inverted orbit camera vertical")
+                  .DisableWhen({ GdxUI::DISABLE_FOR_COURSE_EDIT_MOUSE_OFF }));
+    AddWidget("Enhancements", "Mouse", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Editor invert pan",
+                          .cVar = "gEnhancements.Input.EditorMouseInvertPan",
+                          .type = GdxUI::WIDGET_CVAR_CHECKBOX }
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(false).Tooltip(
+                      "Reverses both directions while panning the Course Edit camera."))
+                  .ModifiedMarker()
+                  .SearchTerms("course edit editor mouse invert inverted pan camera")
+                  .DisableWhen({ GdxUI::DISABLE_FOR_COURSE_EDIT_MOUSE_OFF }));
+
     // Gesture button dropdown: middle mouse, X1, or X2.
     AddWidget("Enhancements", "Mouse", SECTION_COLUMN_1,
               WidgetInfo{ .name = "Editor gesture button",
@@ -2723,10 +2762,12 @@ void GdxMenu::RegisterMenu() {
     // ENHANCEMENTS -> Single Race
     // ═════════════════════════════════════════════════════════════════════════════════════════
 
-    // Single Race is the one-player Practice race outside the title demo. Laps 3, 5, 7 or 9 make
-    // it GP-style (finish on the last lap, GP results, no cup, points or GP progress). It never
+    // Single Race is the one-player Practice race outside the title demo. Laps 1 to 99 make it
+    // GP-style (finish on the last lap, GP results, no cup, points or GP progress). It never
     // writes Practice best laps, Time Attack records, ghosts, GP records or points. Retry re-reads
     // these options.
+    gdx_single_race_migrate_settings();
+
     AddWidget("Enhancements", "Single Race", SECTION_COLUMN_1,
               WidgetInfo{ .name = "Single Race rules in Practice", .cVar = "gEnhancements.SingleRace.Enabled",
                           .type = GdxUI::WIDGET_CVAR_CHECKBOX }
@@ -2737,16 +2778,25 @@ void GdxMenu::RegisterMenu() {
                   .SearchTerms("single race practice gp grand prix rules finish"));
 
     AddWidget("Enhancements", "Single Race", SECTION_COLUMN_1,
-              WidgetInfo{ .name = "Laps", .cVar = "gEnhancements.SingleRace.Laps",
-                          .type = GdxUI::WIDGET_CVAR_COMBOBOX }
-                  .ComboItems({ "3", "5", "7", "9", "Unlimited" })
-                  .Options(UIWidgets::ComboboxOptions()
-                               .DefaultIndex(0)
+              WidgetInfo{ .name = "Laps", .cVar = "gEnhancements.SingleRace.LapCount",
+                          .type = GdxUI::WIDGET_CVAR_SLIDER_INT }
+                  .Options(UIWidgets::IntSliderOptions()
+                               .Min(1)
+                               .Max(GDX_SINGLE_RACE_MAX_LAPS)
+                               .DefaultValue(3)
+                               .ShowButtons(true)
                                .LabelPosition(UIWidgets::LabelPositions::Near)
-                               .Tooltip("Laps per race. 3, 5, 7 or 9 finish on the last lap with GP results.\n"
-                                        "Unlimited keeps the Practice lap wrap and never finishes."))
+                               .Tooltip("Laps per race (1 to 99). The race finishes on the last lap with GP results."))
                   .ModifiedMarker()
-                  .SearchTerms("single race laps lap count unlimited finish"));
+                  .SearchTerms("single race laps lap count finish"));
+
+    AddWidget("Enhancements", "Single Race", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Unlimited laps", .cVar = "gEnhancements.SingleRace.UnlimitedLaps",
+                          .type = GdxUI::WIDGET_CVAR_CHECKBOX }
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(false).Tooltip(
+                      "Keeps the Practice lap wrap, so the race never finishes. Overrides Laps."))
+                  .ModifiedMarker()
+                  .SearchTerms("single race laps unlimited endless practice"));
 
     AddWidget("Enhancements", "Single Race", SECTION_COLUMN_1,
               WidgetInfo{ .name = "CPU racers", .cVar = "gEnhancements.SingleRace.CpuCount",

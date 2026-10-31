@@ -178,6 +178,8 @@ if(GDX_EXPANSION_KIT)
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_split_tex.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_insert_tex.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_link_tex.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_bank_tex.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/gdx_lap_digits_tex.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/n64_leo.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gen/EkAssetBindings.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gen/EkLinkStubs.c"
@@ -342,6 +344,8 @@ gdx_add_main_target(G-Diffuser
                                # here so editor and save validator agree on the y range
     gdx_course_strings.c       # Per-course names/subtitles/BGM from the mounted archive, so a ROM
                                # hack shows its own track names instead of the retail ones
+    gdx_bg_sprites.c           # Per-course skyline sprites from the mounted archive, same reason
+    gdx_game_text.c            # Menu, ending and credits text from the mounted archive, same reason
     gdx_input_script.c
     gdx_input_actions.c        # 3A action layer: per-context N64 button tables, called from
                                # gdx_controller_poll before the dev overrides and mouse merges
@@ -1040,6 +1044,16 @@ else()
     target_compile_options(gdx_course_edit_input_tests PRIVATE ${GDX_PORT_WARN_FLAGS} -UNDEBUG)
 endif()
 
+add_executable(gdx_single_race_tests
+    tests/gdx_single_race_tests.c
+    gdx_single_race.c)
+target_include_directories(gdx_single_race_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_single_race_tests PRIVATE /W3 /UNDEBUG)
+else()
+    target_compile_options(gdx_single_race_tests PRIVATE ${GDX_PORT_WARN_FLAGS} -UNDEBUG)
+endif()
+
 add_executable(gdx_course_edit_native_tests
     tests/gdx_course_edit_native_tests.c
     gdx_course_edit_native.c)
@@ -1090,6 +1104,33 @@ if(MSVC)
     target_compile_definitions(gdx_course_strings_tests PRIVATE _CRT_SECURE_NO_WARNINGS=1)
 elseif(GDX_PORT_WARN_FLAGS)
     target_compile_options(gdx_course_strings_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# Skyline-sprites test: compiles gdx_bg_sprites.c UNMODIFIED against stub table and archive reader,
+# with synthesized payloads only.
+add_executable(gdx_bg_sprites_tests
+    tests/gdx_bg_sprites_tests.c
+    gdx_bg_sprites.c)
+target_include_directories(gdx_bg_sprites_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_bg_sprites_tests PRIVATE /W3)
+    target_compile_definitions(gdx_bg_sprites_tests PRIVATE _CRT_SECURE_NO_WARNINGS=1)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_bg_sprites_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+if(NOT MSVC)
+    target_link_libraries(gdx_bg_sprites_tests PRIVATE m)
+endif()
+# Game-text test: compiles gdx_game_text.c UNMODIFIED against stub text and archive reader, with
+# synthesized payloads only.
+add_executable(gdx_game_text_tests
+    tests/gdx_game_text_tests.c
+    gdx_game_text.c)
+target_include_directories(gdx_game_text_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_game_text_tests PRIVATE /W3)
+    target_compile_definitions(gdx_game_text_tests PRIVATE _CRT_SECURE_NO_WARNINGS=1)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_game_text_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
 endif()
 
 # Wide-Gfx packing test: compiles only the real decomp gbi.h with the game's defines, so the
@@ -1201,6 +1242,8 @@ if(GDX_BUILD_JP AND NOT ANDROID)
             "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_split_tex.c"
             "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_insert_tex.c"
             "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_link_tex.c"
+            "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_bank_tex.c"
+            "${CMAKE_CURRENT_SOURCE_DIR}/gdx_lap_digits_tex.c"
             "${CMAKE_CURRENT_SOURCE_DIR}/n64_leo.c"
             "${CMAKE_CURRENT_SOURCE_DIR}/gen/EkAssetBindings.c"   # US-EK bindings reused; jp/ek TODO
             "${CMAKE_CURRENT_SOURCE_DIR}/gen/EkLinkStubs.c"
@@ -1263,6 +1306,8 @@ if(GDX_BUILD_JP AND NOT ANDROID)
         gdx_input_profiles.c   # 4A controller profiles; the Actions page in gdx_menu_registry.cpp calls it
         gdx_course_strings.c   # decomp game.c calls gdx_course_strings_apply() under PORT, so this
                                # is a link dependency and not an optional feature
+        gdx_bg_sprites.c       # same for gdx_bg_sprites_apply()
+        gdx_game_text.c        # same for gdx_game_text_apply()
         n64_gfx_bridge.cpp
         gdx_interp.cpp
         n64_gfx_convert.cpp

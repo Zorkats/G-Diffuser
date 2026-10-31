@@ -621,6 +621,10 @@ GdxMenu::GdxMenu() : Ship::GuiWindow("gOpenMenuBar", false, "G-Diffuser Menu") {
     CVarRegisterInteger("gEnhancements.Input.EditorMousePanSensitivity", 100);
     CVarRegisterInteger("gEnhancements.Input.EditorMouseZoomSensitivity", 100);
     CVarRegisterInteger("gEnhancements.Input.EditorMouseDragSensitivity", 100);
+    // Camera gesture direction. Default 0 keeps the drag signs that match the D-pad.
+    CVarRegisterInteger("gEnhancements.Input.EditorMouseInvertOrbitX", 0);
+    CVarRegisterInteger("gEnhancements.Input.EditorMouseInvertOrbitY", 0);
+    CVarRegisterInteger("gEnhancements.Input.EditorMouseInvertPan", 0);
     // 0 = middle mouse button, 1 = X1 (side back), 2 = X2 (side forward). Drives the camera orbit/pan.
     CVarRegisterInteger("gEnhancements.Input.EditorCameraGestureButton", 0);
     // Course Edit hint strip (port/gdx_course_edit_help.cpp): tool name and context actions on screen.
