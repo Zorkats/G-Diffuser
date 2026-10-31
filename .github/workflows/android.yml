@@ -2,8 +2,8 @@ name: Android
 
 # Android on its own, so a device test does not wait on the desktop release jobs.
 # Runs on demand, and on pushes that touch something the APK actually contains; both of those
-# build the debug APK. nightly.yml calls it with a version instead, which builds the release APK
-# signed with the project keystore, so each nightly installs over the last one.
+# build the debug APK. nightly.yml and release.yml call it with a version instead, which builds the
+# release APK signed with the project keystore, so each one installs over the last.
 on:
   workflow_call:
     inputs:
@@ -144,7 +144,8 @@ jobs:
 
           cp "$APK" "$OUT"
 
-      # The release name matches nightly.yml's G-Diffuser-v<version>-* download pattern.
+      # The release name matches the G-Diffuser-v<version>-* download pattern of nightly.yml and
+      # release.yml.
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.version && format('G-Diffuser-v{0}-android-arm64', inputs.version) || 'G-Diffuser-debug-apk' }}
