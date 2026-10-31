@@ -179,7 +179,7 @@ if(GDX_EXPANSION_KIT)
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_insert_tex.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_link_tex.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_bank_tex.c"
-        "${CMAKE_CURRENT_SOURCE_DIR}/gdx_lap_digits_tex.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/gdx_lap_digits.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/n64_leo.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gen/EkAssetBindings.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gen/EkLinkStubs.c"
@@ -1120,6 +1120,18 @@ endif()
 if(NOT MSVC)
     target_link_libraries(gdx_bg_sprites_tests PRIVATE m)
 endif()
+# Lap-digits test: compiles gdx_lap_digits.c UNMODIFIED against a stub archive reader, with synthesized
+# atlases only.
+add_executable(gdx_lap_digits_tests
+    tests/gdx_lap_digits_tests.c
+    gdx_lap_digits.c)
+target_include_directories(gdx_lap_digits_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_lap_digits_tests PRIVATE /W3)
+    target_compile_definitions(gdx_lap_digits_tests PRIVATE _CRT_SECURE_NO_WARNINGS=1)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_lap_digits_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
 # Game-text test: compiles gdx_game_text.c UNMODIFIED against stub text and archive reader, with
 # synthesized payloads only.
 add_executable(gdx_game_text_tests
@@ -1243,7 +1255,7 @@ if(GDX_BUILD_JP AND NOT ANDROID)
             "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_insert_tex.c"
             "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_link_tex.c"
             "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_bank_tex.c"
-            "${CMAKE_CURRENT_SOURCE_DIR}/gdx_lap_digits_tex.c"
+            "${CMAKE_CURRENT_SOURCE_DIR}/gdx_lap_digits.c"
             "${CMAKE_CURRENT_SOURCE_DIR}/n64_leo.c"
             "${CMAKE_CURRENT_SOURCE_DIR}/gen/EkAssetBindings.c"   # US-EK bindings reused; jp/ek TODO
             "${CMAKE_CURRENT_SOURCE_DIR}/gen/EkLinkStubs.c"
