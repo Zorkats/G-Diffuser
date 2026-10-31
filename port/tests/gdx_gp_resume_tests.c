@@ -10,6 +10,8 @@
 
 #define TEST_FILE "gdx_gp_resume_test.bin"
 #define TEST_TMP "gdx_gp_resume_test.bin.tmp"
+#define TEST_HACK_FILE "gp_resume-hack-test.bin"
+#define TEST_OTHER_HACK_FILE "gp_resume-hack-test-other.bin"
 
 static int sFailures;
 
@@ -316,6 +318,70 @@ static void test_file_layer(void) {
     check(gdx_gp_resume_default_path(path, 4) == GDX_GP_RESUME_ERR_ARG, "default path refuses a small buffer");
 }
 
+static int default_path_ends_in(const char* name) {
+    char path[1024];
+    size_t pathLength;
+    size_t nameLength = strlen(name);
+
+    if (gdx_gp_resume_default_path(path, sizeof(path)) != GDX_GP_RESUME_OK) {
+        return 0;
+    }
+    pathLength = strlen(path);
+    return pathLength >= nameLength && strcmp(path + pathLength - nameLength, name) == 0;
+}
+
+static void test_file_name(void) {
+    GdxGpResumeState first;
+    GdxGpResumeState second;
+    GdxGpResumeState out;
+    char tooLong[129];
+
+    /* The tests can run beside a real gp_resume.bin, so only the test names are ever written. */
+    gdx_gp_resume_set_directory(".");
+    fill_stock_state(&first);
+    fill_x_state(&second);
+
+    /* Saved under one name, the record stays out of the other. */
+    gdx_gp_resume_set_file_name(TEST_HACK_FILE);
+    remove(TEST_HACK_FILE);
+    remove(TEST_OTHER_HACK_FILE);
+    check(default_path_ends_in(TEST_HACK_FILE), "a hack name selects its own file");
+    check(gdx_gp_resume_save(&first) == GDX_GP_RESUME_OK, "the first hack's record saves");
+    gdx_gp_resume_set_file_name(TEST_OTHER_HACK_FILE);
+    check(gdx_gp_resume_available(NULL) == 0, "a hack does not see another hack's record");
+    check(gdx_gp_resume_save(&second) == GDX_GP_RESUME_OK, "the second hack's record saves");
+    check(gdx_gp_resume_load(&out) == GDX_GP_RESUME_OK && states_equal(&second, &out),
+          "the second hack loads its own record");
+
+    gdx_gp_resume_set_file_name(TEST_HACK_FILE);
+    check(gdx_gp_resume_load(&out) == GDX_GP_RESUME_OK && states_equal(&first, &out),
+          "the first hack still loads its own record");
+    check(gdx_gp_resume_clear() == GDX_GP_RESUME_OK, "clearing the first hack succeeds");
+    gdx_gp_resume_set_file_name(TEST_OTHER_HACK_FILE);
+    check(gdx_gp_resume_available(NULL) == 1, "clearing one hack leaves the other's record");
+    check(gdx_gp_resume_clear() == GDX_GP_RESUME_OK, "clearing the second hack succeeds");
+
+    /* Anything unusable falls back to the stock name rather than a path outside the directory. */
+    gdx_gp_resume_set_file_name(NULL);
+    check(default_path_ends_in(GDX_GP_RESUME_FILE_NAME), "no name selects the stock file");
+    gdx_gp_resume_set_file_name(TEST_HACK_FILE);
+    gdx_gp_resume_set_file_name("");
+    check(default_path_ends_in(GDX_GP_RESUME_FILE_NAME), "an empty name selects the stock file");
+    gdx_gp_resume_set_file_name(TEST_HACK_FILE);
+    gdx_gp_resume_set_file_name("../escape.bin");
+    check(default_path_ends_in(GDX_GP_RESUME_FILE_NAME), "a forward slash selects the stock file");
+    gdx_gp_resume_set_file_name(TEST_HACK_FILE);
+    gdx_gp_resume_set_file_name("..\\escape.bin");
+    check(default_path_ends_in(GDX_GP_RESUME_FILE_NAME), "a backslash selects the stock file");
+    memset(tooLong, 'a', sizeof(tooLong) - 1);
+    tooLong[sizeof(tooLong) - 1] = '\0';
+    gdx_gp_resume_set_file_name(TEST_HACK_FILE);
+    gdx_gp_resume_set_file_name(tooLong);
+    check(default_path_ends_in(GDX_GP_RESUME_FILE_NAME), "a name too long to hold selects the stock file");
+
+    gdx_gp_resume_set_directory(NULL);
+}
+
 static void test_error_text(void) {
     check(strcmp(gdx_gp_resume_error_text(GDX_GP_RESUME_OK), "ok") == 0, "error text: ok");
     check(strlen(gdx_gp_resume_error_text(GDX_GP_RESUME_ERR_CRC)) > 0, "error text: CRC has a message");
@@ -329,6 +395,7 @@ int main(void) {
     test_damage();
     test_out_of_range();
     test_file_layer();
+    test_file_name();
     test_error_text();
 
     if (sFailures != 0) {

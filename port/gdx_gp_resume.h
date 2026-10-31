@@ -125,7 +125,11 @@ GdxGpResumeError gdx_gp_resume_clear_from(const char* path);
 /* Directory for the default file. main.cpp sets it at boot to the LUS app directory, which on Linux
  * is not the working directory. Until it is set, the default is the directory of the executable. */
 void gdx_gp_resume_set_directory(const char* directory);
-/* Default file: gp_resume.bin in the directory above. Returns ERR_ARG when the buffer is too small
+/* Name of the default file. main.cpp sets it at boot for an active ROM hack, whose cups are not the
+ * stock ones, so each hack keeps its own record the way it keeps its own save. NULL, an empty name,
+ * a name too long to hold, or one with a path separator selects gp_resume.bin. */
+void gdx_gp_resume_set_file_name(const char* name);
+/* Default file: the name above in the directory above. Returns ERR_ARG when the buffer is too small
  * for the path. */
 #ifndef GDX_GP_RESUME_STATE_ONLY
 GdxGpResumeError gdx_gp_resume_default_path(char* out, size_t outCap);

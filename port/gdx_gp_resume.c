@@ -373,8 +373,24 @@ void gdx_gp_resume_set_directory(const char* directory) {
     memcpy(sDirectory, directory, length + 1);
 }
 
+static char sFileName[128] = GDX_GP_RESUME_FILE_NAME;
+
+void gdx_gp_resume_set_file_name(const char* name) {
+    size_t length;
+
+    memcpy(sFileName, GDX_GP_RESUME_FILE_NAME, sizeof(GDX_GP_RESUME_FILE_NAME));
+    if (name == NULL || strpbrk(name, "/\\") != NULL) {
+        return;
+    }
+    length = strlen(name);
+    if (length == 0 || length >= sizeof(sFileName)) {
+        return;
+    }
+    memcpy(sFileName, name, length + 1);
+}
+
 GdxGpResumeError gdx_gp_resume_default_path(char* out, size_t outCap) {
-    const size_t nameLength = strlen(GDX_GP_RESUME_FILE_NAME);
+    const size_t nameLength = strlen(sFileName);
 
     if (out == NULL || outCap == 0) {
         return GDX_GP_RESUME_ERR_ARG;
@@ -390,7 +406,7 @@ GdxGpResumeError gdx_gp_resume_default_path(char* out, size_t outCap) {
         if (needsSeparator) {
             out[dirLength] = '/';
         }
-        memcpy(out + dirLength + (size_t) needsSeparator, GDX_GP_RESUME_FILE_NAME, nameLength + 1);
+        memcpy(out + dirLength + (size_t) needsSeparator, sFileName, nameLength + 1);
         return GDX_GP_RESUME_OK;
     }
 #ifdef _WIN32
@@ -411,13 +427,13 @@ GdxGpResumeError gdx_gp_resume_default_path(char* out, size_t outCap) {
             return GDX_GP_RESUME_ERR_ARG;
         }
         memcpy(out, exe, dirLength);
-        memcpy(out + dirLength, GDX_GP_RESUME_FILE_NAME, nameLength + 1);
+        memcpy(out + dirLength, sFileName, nameLength + 1);
     }
 #else
     if (nameLength + 1 > outCap) {
         return GDX_GP_RESUME_ERR_ARG;
     }
-    memcpy(out, GDX_GP_RESUME_FILE_NAME, nameLength + 1);
+    memcpy(out, sFileName, nameLength + 1);
 #endif
     return GDX_GP_RESUME_OK;
 }

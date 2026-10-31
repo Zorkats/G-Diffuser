@@ -1004,6 +1004,14 @@ int main(int argc, char** argv) {
     for (const auto& archivePath : archivePaths) {
         gdx_port_logf("[G-Diffuser] archive: %s\n", archivePath.c_str());
     }
+    // findArchivePaths latched the hack, which owns its Continue Cup record as it owns its save.
+    {
+        char safeHackName[GDX_HACKMOD_NAME_MAX];
+        if (gdx_hackmod_sanitize_name(GdxHackModsActiveName().c_str(), safeHackName, sizeof(safeHackName))) {
+            const std::string resumeFile = std::string("gp_resume-hack-") + safeHackName + ".bin";
+            gdx_gp_resume_set_file_name(resumeFile.c_str());
+        }
+    }
     // libultraship's built-in version gate (validHashes) is reject-only and does NOT special-case
     // unversioned archives, so a non-empty set would refuse to mount f3d.o2r and the texture packs
     // (no "version" file) and break boot. It therefore stays DISABLED and the post-mount check
