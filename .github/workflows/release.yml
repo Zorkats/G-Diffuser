@@ -47,8 +47,17 @@ jobs:
     with:
       version: ${{ needs.gate.outputs.version }}
 
+  # Release-signed with the project keystore, the same one the nightly uses, so either installs over
+  # the other.
+  android:
+    needs: gate
+    uses: ./.github/workflows/android.yml
+    with:
+      version: ${{ needs.gate.outputs.version }}
+    secrets: inherit
+
   draft:
-    needs: [gate, windows, linux, macos]
+    needs: [gate, windows, linux, macos, android]
     runs-on: ubuntu-latest
     # The only job that can write: it creates the draft release and uploads its assets.
     permissions:
@@ -69,13 +78,13 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
 
-          assets=(dist/*.zip dist/*.tar.gz)
+          assets=(dist/*.zip dist/*.tar.gz dist/*.apk)
           if [ "${#assets[@]}" -eq 0 ]; then
             echo "::error::No packages were downloaded for $VERSION."
             exit 1
           fi
           # The in-game updater refuses any download it cannot check against this file.
-          (cd dist && sha256sum -- *.zip *.tar.gz) > dist/SHA256SUMS
+          (cd dist && sha256sum -- *.zip *.tar.gz *.apk) > dist/SHA256SUMS
           assets+=(dist/SHA256SUMS)
 
           # A release candidate stays a prerelease, which the stable update check never offers.
