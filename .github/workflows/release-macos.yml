@@ -35,7 +35,7 @@ jobs:
   macos-arm64:
     # Pinned rather than macos-latest, which moves between images: the toolchain that builds a
     # release should change when we decide it does, not when the runner pool rolls over.
-    runs-on: macos-14
+    runs-on: macos-15
 
     env:
       # Read by clang and by every CMake configure below, dependencies and the gdx-extract
