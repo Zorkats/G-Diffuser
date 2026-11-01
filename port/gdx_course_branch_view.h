@@ -31,6 +31,28 @@ int gdx_branch_view_fork(int fork, int* forkPoint, int* mergePoint, int* nodeCou
 int gdx_branch_view_node(int fork, int node, float pos[3], short* radiusLeft, short* radiusRight,
                          int* trackSegmentInfo, short* bankAngle);
 
+/* Returns 1 and fills trackSegmentInfo when the fork's stored path has a first segment style of its own. */
+int gdx_branch_view_fork_first_info(int fork, int* trackSegmentInfo);
+
+/* A racer's place on one road: distance from the center line (positive to the left), distance above the road, and
+ * the road's radii there. */
+typedef struct GdxBranchLaneSample {
+    float lateral;
+    float height;
+    float radiusLeft;
+    float radiusRight;
+} GdxBranchLaneSample;
+
+/* 1 when a racer who left the current road's edge is on the other road, so it crosses instead of hitting a wall.
+ * A racer still on its road stays on it, however far the other road overlaps. */
+int gdx_branch_view_lane_crossing(const GdxBranchLaneSample* current, const GdxBranchLaneSample* other);
+
+/* 1 when point lies on a road chunk, given as the chunk's center, its left and right edges and a point straight
+ * below its center. The points are the s16 reference positions of a SegmentChunk. An edge level with the chunk's
+ * own edge does not count, which keeps a rail where two roads run together and only one edge is free. */
+int gdx_branch_view_chunk_covers_point(const short point[3], const short center[3], const short left[3],
+                                       const short right[3], const short below[3]);
+
 #ifdef __cplusplus
 }
 #endif

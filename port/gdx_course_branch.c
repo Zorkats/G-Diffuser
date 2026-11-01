@@ -5,6 +5,7 @@
 #include "fzx_racer.h"
 #include "gdx_course_branch.h"
 #include "gdx_course_branch_view.h"
+#include "gdx_course_settings_view.h"
 
 extern CourseInfo* gCurrentCourseInfo;
 extern bool gInCourseEditor;
@@ -18,6 +19,8 @@ extern void Course_GdxSetChunkRing(s32 count);
 /* racer.c: the course file id ("NAME.EXT") of the course about to start; 0 when it has no file. */
 extern int gdx_racer_course_file_id(char* out, int outCap);
 extern void gdx_dbg_logf(const char* fmt, ...);
+extern f32 Course_SplineGetTangent(CourseSegment* segment, f32 t, Vec3f* tangentVec);
+extern void Course_SplineGetPosition(CourseSegment* segment, f32 t, Vec3f* pos);
 
 #define BRANCH_SEGMENTS 64
 /* The larger of the two stock gSegmentChunks sizes (game_context.c), so a copy never runs past a buffer. */
@@ -27,6 +30,8 @@ extern void gdx_dbg_logf(const char* fmt, ...);
 #define BRANCH_REWALK_STEPS 12
 /* A human racer in a fork's first segment moves to the other path only when it is this much nearer. */
 #define BRANCH_SWITCH_MARGIN 20.0f
+/* Part of a lap a lane crossing may move a racer by. */
+#define BRANCH_LANE_MAX_LAP_JUMP 0.25f
 
 #define SIDE_A 0
 #define SIDE_B 1
@@ -68,6 +73,10 @@ static u8 sRing2ChunkMask[BRANCH_CHUNKS];
 static BranchRacer sRacers[TOTAL_RACER_COUNT];
 
 const u8* gGdxCourseChunkDrawMask = NULL;
+
+/* Control point of race segment 0, -1 when no rotation matched. */
+static s32 sSegmentRotation;
+static s32 sSegmentCount;
 
 static f32 branch_abs(f32 v) {
     return (v < 0.0f) ? -v : v;
@@ -130,6 +139,66 @@ static s32 branch_find_rotation(const CourseData* courseData, const CourseSegmen
         }
     }
     return -1;
+}
+
+/* Is the point on the other road of fork f? chunks and forkOf are that road's ring. */
+static s32 branch_edge_on_other_road(const s16 point[3], const SegmentChunk* chunks, s32 count, const s8* forkOf, s32 f) {
+    const SegmentChunk* nearest = NULL;
+    f32 nearestSq = 0.0f;
+    s32 i;
+
+    for (i = 0; i < count; i++) {
+        const SegmentChunk* chunk = &chunks[i];
+        s32 shape = chunk->trackSegmentInfo & TRACK_SHAPE_MASK;
+        f32 dx;
+        f32 dy;
+        f32 dz;
+        f32 distanceSq;
+
+        if ((chunk->segmentIndex < 0) || (chunk->segmentIndex >= BRANCH_SEGMENTS) || (forkOf[chunk->segmentIndex] != f) ||
+            ((shape != TRACK_SHAPE_ROAD) && (shape != TRACK_SHAPE_BORDERLESS_ROAD))) {
+            continue;
+        }
+        dx = (f32) point[0] - chunk->referencePos2[0];
+        dy = (f32) point[1] - chunk->referencePos2[1];
+        dz = (f32) point[2] - chunk->referencePos2[2];
+        distanceSq = (dx * dx) + (dy * dy) + (dz * dz);
+        if ((nearest == NULL) || (distanceSq < nearestSq)) {
+            nearest = chunk;
+            nearestSq = distanceSq;
+        }
+    }
+    return (nearest != NULL) &&
+           gdx_branch_view_chunk_covers_point(point, nearest->referencePos2, nearest->referencePos5,
+                                              nearest->referencePos8, nearest->referencePos1);
+}
+
+/* Where a road's edge lies on the other road, ships cross it, so it draws no rail. Moving the rail top onto the
+ * road edge flattens the rail, and the shared vertices make it taper from the chunk where the roads part, the V of
+ * a GX lane split. Only the plain road has a rail to lose: a walled road's walls stay and stop the ship. */
+static void branch_flatten_rails(SegmentChunk* chunks, s32 count, const s8* forkOf, const SegmentChunk* otherChunks,
+                                 s32 otherCount, const s8* otherForkOf) {
+    s32 i;
+
+    for (i = 0; i < count; i++) {
+        SegmentChunk* chunk = &chunks[i];
+        s32 f;
+
+        if ((chunk->segmentIndex < 0) || (chunk->segmentIndex >= BRANCH_SEGMENTS) ||
+            ((chunk->trackSegmentInfo & TRACK_SHAPE_MASK) != TRACK_SHAPE_ROAD)) {
+            continue;
+        }
+        f = forkOf[chunk->segmentIndex];
+        if (f < 0) {
+            continue;
+        }
+        if (branch_edge_on_other_road(chunk->referencePos5, otherChunks, otherCount, otherForkOf, f)) {
+            memcpy(chunk->referencePos4, chunk->referencePos5, sizeof(chunk->referencePos4));
+        }
+        if (branch_edge_on_other_road(chunk->referencePos8, otherChunks, otherCount, otherForkOf, f)) {
+            memcpy(chunk->referencePos7, chunk->referencePos8, sizeof(chunk->referencePos7));
+        }
+    }
 }
 
 /* editor: the ring is the Course Edit ring (control point order, uncentered, its own trackSegmentInfo),
@@ -258,6 +327,14 @@ static void branch_build(s32 editor) {
             return;
         }
         sBranch.forks[f].ring2Fork = ring2Count - 1;
+        /* F is shared, but the segment it starts is this path's own. */
+        {
+            int firstInfo;
+
+            if (gdx_branch_view_fork_first_info(sBranch.forks[f].setFork, &firstInfo)) {
+                sBranch.ring2[ring2Count - 1].trackSegmentInfo = firstInfo;
+            }
+        }
         for (j = 0; j < nodeCount; j++) {
             CourseSegment* segment = &sBranch.ring2[ring2Count];
             float pos[3];
@@ -405,6 +482,12 @@ static void branch_build(s32 editor) {
         sBranch.ring2SpanChunks += sRing2ChunkMask[i];
     }
 
+    /* The two passes read each other's edges, and a flattened rail keeps its road edge, so the order is free. */
+    branch_flatten_rails(gSegmentChunks, ring1ChunkCount, sBranch.ring1ForkOf, sRing2Chunks, sBranch.ring2ChunkCount,
+                         sBranch.ring2ForkOf);
+    branch_flatten_rails(sRing2Chunks, sBranch.ring2ChunkCount, sBranch.ring2ForkOf, gSegmentChunks, ring1ChunkCount,
+                         sBranch.ring1ForkOf);
+
     sBranch.courseInfo = info;
     sBranch.ring1 = ring1;
     sBranch.ring1Count = count;
@@ -421,6 +504,32 @@ void gdx_course_branch_build(void) {
 
 void gdx_course_branch_build_editor(void) {
     branch_build(1);
+}
+
+void gdx_course_branch_on_segments_init(const CourseSegment* ring, s32 count) {
+    f32 offsetX;
+    f32 offsetZ;
+
+    /* The editor and its test run read the values the edit library publishes. */
+    if (!gInCourseEditor && !gInCourseEditTestRun) {
+        char courseId[26]; /* GDX_BRANCH_COURSE_ID_MAX + 1 */
+
+        gdx_settings_view_select_course(gdx_racer_course_file_id(courseId, sizeof(courseId)) ? courseId : NULL, count);
+    }
+    /* Matched by position, not from the rotation Course_SegmentsInit just did: a test run restart rotates a ring
+     * that is already rotated. */
+    sSegmentRotation = branch_find_rotation(&COURSE_CONTEXT()->courseData, ring, count, &offsetX, &offsetZ);
+    sSegmentCount = count;
+}
+
+s32 gdx_course_branch_control_point(s32 segmentIndex) {
+    if (gInCourseEditor && !gInCourseEditTestRun) {
+        return segmentIndex;
+    }
+    if ((sSegmentRotation < 0) || (sSegmentCount <= 0)) {
+        return -1;
+    }
+    return (sSegmentRotation + segmentIndex) % sSegmentCount;
 }
 
 void gdx_course_branch_on_course_init(void) {
@@ -480,6 +589,152 @@ static void branch_choose(BranchRacer* racer, s32 racerId, s32 f, RacerSegmentPo
     racer->side[f] = onB ? SIDE_B : SIDE_A;
 }
 
+static s32 branch_flat_road(const CourseSegment* segment) {
+    s32 shape = segment->trackSegmentInfo & TRACK_SHAPE_MASK;
+
+    return (shape == TRACK_SHAPE_ROAD) || (shape == TRACK_SHAPE_BORDERLESS_ROAD);
+}
+
+/* The same basis the racer computes after its walk (racer.c). segmentLengthProportion must be current. */
+static s32 branch_lane_sample(const RacerSegmentPositionInfo* info, GdxBranchLaneSample* out) {
+    const CourseSegment* segment = info->courseSegment;
+    const CourseSegment* next = segment->next;
+    const f32 along = info->segmentLengthProportion;
+    Vec3f x;
+    Vec3f y;
+    Vec3f z;
+    f32 scale;
+
+    if (info->segmentForwardMagnitude <= 0.0f) {
+        return 0;
+    }
+    x.x = info->segmentForward.x / info->segmentForwardMagnitude;
+    x.y = info->segmentForward.y / info->segmentForwardMagnitude;
+    x.z = info->segmentForward.z / info->segmentForwardMagnitude;
+    y.x = segment->up.x + along * (next->up.x - segment->up.x);
+    y.y = segment->up.y + along * (next->up.y - segment->up.y);
+    y.z = segment->up.z + along * (next->up.z - segment->up.z);
+    z.x = (y.y * x.z) - (y.z * x.y);
+    z.y = (y.z * x.x) - (y.x * x.z);
+    z.z = (y.x * x.y) - (y.y * x.x);
+    scale = sqrtf((z.x * z.x) + (z.y * z.y) + (z.z * z.z));
+    if (scale <= 0.0f) {
+        return 0;
+    }
+    z.x /= scale;
+    z.y /= scale;
+    z.z /= scale;
+    y.x = (x.y * z.z) - (x.z * z.y);
+    y.y = (x.z * z.x) - (x.x * z.z);
+    y.z = (x.x * z.y) - (x.y * z.x);
+    out->lateral = (z.x * info->segmentDisplacement.x) + (z.y * info->segmentDisplacement.y) +
+                   (z.z * info->segmentDisplacement.z);
+    out->height = (y.x * info->segmentDisplacement.x) + (y.y * info->segmentDisplacement.y) +
+                  (y.z * info->segmentDisplacement.z);
+    out->radiusLeft = segment->radiusLeft + along * (next->radiusLeft - segment->radiusLeft);
+    out->radiusRight = segment->radiusRight + along * (next->radiusRight - segment->radiusRight);
+    return 1;
+}
+
+/* Puts out on the span point nearest to info's position, ready for a walk. The other road can be anywhere along its
+ * span, so a walk from a fixed start could run out of steps. */
+static void branch_lane_start(RacerSegmentPositionInfo* out, const RacerSegmentPositionInfo* info, CourseSegment* first,
+                              s32 count) {
+    CourseSegment* bestSegment = first;
+    f32 bestT = 0.0f;
+    f32 bestSq = -1.0f;
+    s32 i;
+    s32 mark;
+
+    for (i = 0; i < count; i++) {
+        CourseSegment* segment = &first[i];
+        const Vec3f* marks[4];
+
+        marks[0] = &segment->pos;
+        marks[1] = &segment->quarterMarkPos;
+        marks[2] = &segment->halfMarkPos;
+        marks[3] = &segment->threeQuarterMarkPos;
+        for (mark = 0; mark < 4; mark++) {
+            f32 dx = info->pos.x - marks[mark]->x;
+            f32 dy = info->pos.y - marks[mark]->y;
+            f32 dz = info->pos.z - marks[mark]->z;
+            f32 distanceSq = (dx * dx) + (dy * dy) + (dz * dz);
+
+            if ((bestSq < 0.0f) || (distanceSq < bestSq)) {
+                bestSq = distanceSq;
+                bestSegment = segment;
+                bestT = mark * 0.25f;
+            }
+        }
+    }
+    *out = *info;
+    out->courseSegment = bestSegment;
+    out->segmentTValue = bestT;
+    Course_SplineGetPosition(bestSegment, bestT, &out->segmentPos);
+    out->segmentForwardMagnitude = Course_SplineGetTangent(bestSegment, bestT, &out->segmentForward);
+    out->lastGroundedPos = out->segmentPos;
+}
+
+/* A human racer who left the road's edge inside a fork, and is on the other path's road, crosses to it. CPUs keep
+ * the path they took: they follow one ring's racing line. */
+static void branch_lane_cross(BranchRacer* racer, s32 racerId, RacerSegmentPositionInfo* info) {
+    CourseSegment* segment = info->courseSegment;
+    RacerSegmentPositionInfo moved;
+    GdxBranchLaneSample current;
+    GdxBranchLaneSample other;
+    CourseSegment* first;
+    const BranchFork* fork;
+    s32 count;
+    s32 onB;
+    s32 f;
+    s32 index;
+    f32 lapBefore;
+    f32 lapAfter;
+
+    if (racerId >= gNumPlayers) {
+        return;
+    }
+    onB = (segment >= sBranch.ring2) && (segment < sBranch.ring2 + sBranch.ring2Count);
+    if (onB) {
+        f = sBranch.ring2ForkOf[segment - sBranch.ring2];
+    } else if ((segment >= sBranch.ring1) && (segment < sBranch.ring1 + sBranch.ring1Count)) {
+        f = sBranch.ring1ForkOf[segment - sBranch.ring1];
+    } else {
+        return;
+    }
+    if ((f < 0) || !branch_flat_road(segment)) {
+        return;
+    }
+    lapBefore = func_8009DFA0(info);
+    if (!branch_lane_sample(info, &current) ||
+        ((current.lateral <= current.radiusLeft) && (current.lateral >= -current.radiusRight))) {
+        return;
+    }
+
+    fork = &sBranch.forks[f];
+    first = onB ? &sBranch.ring1[fork->ring1Fork] : &sBranch.ring2[fork->ring2Fork];
+    count = onB ? (fork->ring1Merge - fork->ring1Fork) : (fork->ring2Merge - fork->ring2Fork);
+    branch_lane_start(&moved, info, first, count);
+    if (func_8009EBEC(&moved, info->pos.x, info->pos.y, info->pos.z, BRANCH_REWALK_STEPS, -1.0f) != 0) {
+        return;
+    }
+    index = moved.courseSegment - first;
+    if ((index < 0) || (index >= count) || !branch_flat_road(moved.courseSegment)) {
+        return;
+    }
+    lapAfter = func_8009DFA0(&moved);
+    if (!branch_lane_sample(&moved, &other) || !gdx_branch_view_lane_crossing(&current, &other)) {
+        return;
+    }
+    /* The two paths share lap distance in proportion. A racer far along one and early on the other must not gain
+     * or lose a large part of a lap, or a lap: this edge stays a wall. */
+    if (branch_abs(lapAfter - lapBefore) > (gCurrentCourseInfo->length * BRANCH_LANE_MAX_LAP_JUMP)) {
+        return;
+    }
+    *info = moved;
+    racer->side[f] = onB ? SIDE_A : SIDE_B;
+}
+
 void gdx_course_branch_racer_walked(s32 racerId, RacerSegmentPositionInfo* info) {
     BranchRacer* racer;
     CourseSegment* segment;
@@ -523,6 +778,7 @@ void gdx_course_branch_racer_walked(s32 racerId, RacerSegmentPositionInfo* info)
             }
         }
     }
+    branch_lane_cross(racer, racerId, info);
     racer->lastSegment = info->courseSegment;
 }
 

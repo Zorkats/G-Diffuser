@@ -2,6 +2,7 @@
 
 #include "gdx_course_branch_edit.h"
 #include "gdx_course_branch_format.h"
+#include "gdx_course_settings.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -9,16 +10,49 @@
 typedef struct EditState {
     GdxBranchSet set; /* ringCount is the editor ring length in the view showing */
     int viewB;
+    GdxPointExtras ringExtras[GDX_BRANCH_EDIT_MAX_POINTS]; /* The ring in the view showing, by ring index */
+    uint8_t lavaMode;
+    uint8_t magnetStrength;
+    uint8_t magnetRange;
 } EditState;
 
 /* Fails to compile when the undo snapshot size is too small for the state. */
 typedef char GdxBranchEditStateFits[(sizeof(EditState) <= GDX_BRANCH_EDIT_STATE_BYTES) ? 1 : -1];
+typedef char GdxBranchEditExtrasFit[(GDX_BRANCH_EDIT_MAX_POINTS <= GDX_SETTINGS_MAX_POINTS) ? 1 : -1];
 
 static EditState sLive;
 static EditState sBackup;
 
+/* The values as GdxCourseSettings. skipNodes leaves the stored path's values out. */
+static void edit_build_settings(GdxCourseSettings* out, int ringCount, int skipNodes) {
+    int f;
+    int i;
+
+    memset(out, 0, sizeof(*out));
+    out->ringCount = (uint8_t) ringCount;
+    out->lavaMode = sLive.lavaMode;
+    out->magnetStrength = sLive.magnetStrength;
+    out->magnetRange = sLive.magnetRange;
+    for (i = 0; (i < ringCount) && (i < GDX_BRANCH_EDIT_MAX_POINTS); i++) {
+        out->ring[i] = sLive.ringExtras[i];
+    }
+    for (f = 0; !skipNodes && (f < sLive.set.forkCount); f++) {
+        for (i = 0; i < sLive.set.forks[f].nodeCount; i++) {
+            out->nodes[f][i] = sLive.set.forks[f].nodes[i].extras;
+        }
+    }
+}
+
 static void edit_publish(void) {
+    static GdxCourseSettings sPublished;
+
     gdx_branch_set_active((sLive.set.forkCount > 0) ? &sLive.set : NULL);
+    edit_build_settings(&sPublished, sLive.set.ringCount, 0);
+    gdx_settings_set_active(gdx_settings_is_empty(&sPublished) ? NULL : &sPublished);
+}
+
+static void extras_clear_ring(void) {
+    memset(sLive.ringExtras, 0, sizeof(sLive.ringExtras));
 }
 
 static void edit_reason(char* reason, int cap, const char* text) {
@@ -133,6 +167,7 @@ void gdx_branch_edit_clear(void) {
 }
 
 int gdx_branch_edit_select(const char* courseId, int ringCount) {
+    static GdxCourseSettings sLoaded;
     GdxBranchSet set;
 
     memset(&sLive, 0, sizeof(sLive));
@@ -141,13 +176,47 @@ int gdx_branch_edit_select(const char* courseId, int ringCount) {
         sLive.set = set;
     }
     sLive.set.ringCount = (uint8_t) ringCount;
+    if ((courseId != NULL) && gdx_settings_store_get(courseId, &sLoaded)) {
+        sLive.lavaMode = sLoaded.lavaMode;
+        sLive.magnetStrength = sLoaded.magnetStrength;
+        sLive.magnetRange = sLoaded.magnetRange;
+        if ((sLoaded.ringCount == ringCount) && (ringCount <= GDX_BRANCH_EDIT_MAX_POINTS)) {
+            int f;
+            int i;
+
+            memcpy(sLive.ringExtras, sLoaded.ring, (size_t) ringCount * sizeof(GdxPointExtras));
+            for (f = 0; f < sLive.set.forkCount; f++) {
+                for (i = 0; i < sLive.set.forks[f].nodeCount; i++) {
+                    sLive.set.forks[f].nodes[i].extras = sLoaded.nodes[f][i];
+                }
+            }
+        }
+    }
     edit_publish();
     return sLive.set.forkCount;
 }
 
-int gdx_branch_edit_commit(const char* courseId, int ringCount, unsigned int courseChecksum, char* reason, int cap) {
+void gdx_branch_edit_first_fill(const GdxBranchEditPoint* ring, int ringCount) {
+    int f;
+
+    for (f = 0; f < sLive.set.forkCount; f++) {
+        GdxBranchFork* fork = &sLive.set.forks[f];
+
+        if (!(fork->flags & GDX_BRANCH_FLAG_FIRST_INFO) && (fork->forkPoint < ringCount)) {
+            fork->firstInfo = ring[fork->forkPoint].trackSegmentInfo;
+            fork->flags |= GDX_BRANCH_FLAG_FIRST_INFO;
+        }
+    }
+    edit_publish();
+}
+
+int gdx_branch_edit_commit(const char* courseId, const GdxBranchEditPoint* ring, int ringCount,
+                           unsigned int courseChecksum, char* reason, int cap) {
+    static GdxCourseSettings sSaved;
     GdxBranchSet set = sLive.set;
     int rc;
+    int f;
+    int i;
 
     edit_reason(reason, cap, "");
     if (courseId == NULL) {
@@ -155,6 +224,21 @@ int gdx_branch_edit_commit(const char* courseId, int ringCount, unsigned int cou
     }
     set.ringCount = (uint8_t) ringCount;
     set.courseChecksum = courseChecksum;
+    /* Point values go in the settings store, not the fork block. */
+    for (f = 0; f < set.forkCount; f++) {
+        for (i = 0; i < set.forks[f].nodeCount; i++) {
+            memset(&set.forks[f].nodes[i].extras, 0, sizeof(GdxPointExtras));
+        }
+    }
+    /* Paths that agree store no value of their own, so the set stays readable by older builds. */
+    for (f = 0; (ring != NULL) && (f < set.forkCount); f++) {
+        GdxBranchFork* fork = &set.forks[f];
+
+        if ((fork->forkPoint < ringCount) && (fork->firstInfo == ring[fork->forkPoint].trackSegmentInfo)) {
+            fork->flags &= (uint8_t) ~GDX_BRANCH_FLAG_FIRST_INFO;
+            fork->firstInfo = 0;
+        }
+    }
     if (sLive.viewB) {
         edit_reason(reason, cap, "path B is showing");
         rc = GDX_BRANCH_ERR_ARGS;
@@ -172,7 +256,106 @@ int gdx_branch_edit_commit(const char* courseId, int ringCount, unsigned int cou
             rc = GDX_BRANCH_ERR_FULL;
         }
     }
+    /* With path B showing the ring table holds path B, so the stored values stay as they are. */
+    if (!sLive.viewB) {
+        edit_build_settings(&sSaved, ringCount, rc != GDX_BRANCH_OK);
+        if ((gdx_settings_store_set(courseId, &sSaved) != GDX_SETTINGS_OK) && (rc == GDX_BRANCH_OK)) {
+            edit_reason(reason, cap, "the course settings store is full");
+            rc = GDX_BRANCH_ERR_FULL;
+        }
+    }
     return rc;
+}
+
+/* The value's range: 0 is always "not set". */
+static int extra_clamp(int which, int value) {
+    int min = 1;
+    int max = GDX_SETTINGS_WIDTH_MAX;
+
+    if (which == GDX_BRANCH_EDIT_EXTRA_MAGNET_STRENGTH) {
+        min = GDX_SETTINGS_STRENGTH_MIN;
+        max = GDX_SETTINGS_STRENGTH_MAX;
+    } else if (which == GDX_BRANCH_EDIT_EXTRA_MAGNET_RANGE) {
+        min = GDX_SETTINGS_RANGE_MIN;
+        max = GDX_SETTINGS_RANGE_MAX;
+    }
+    if (value <= 0) {
+        return 0;
+    }
+    return (value < min) ? min : (value > max) ? max : value;
+}
+
+static uint8_t* extra_field(GdxPointExtras* extras, int which) {
+    switch (which) {
+        case GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH:
+            return &extras->pitWidth;
+        case GDX_BRANCH_EDIT_EXTRA_DIRT_WIDTH:
+            return &extras->dirtWidth;
+        case GDX_BRANCH_EDIT_EXTRA_ICE_WIDTH:
+            return &extras->iceWidth;
+        case GDX_BRANCH_EDIT_EXTRA_MAGNET_STRENGTH:
+            return &extras->magnetStrength;
+        case GDX_BRANCH_EDIT_EXTRA_MAGNET_RANGE:
+            return &extras->magnetRange;
+        default:
+            return NULL;
+    }
+}
+
+int gdx_branch_edit_point_extra(int point, int which) {
+    uint8_t* field;
+
+    if ((point < 0) || (point >= sLive.set.ringCount) || (point >= GDX_BRANCH_EDIT_MAX_POINTS)) {
+        return 0;
+    }
+    field = extra_field(&sLive.ringExtras[point], which);
+    return (field != NULL) ? *field : 0;
+}
+
+void gdx_branch_edit_set_point_extra(int point, int which, int value) {
+    uint8_t* field;
+
+    if ((point < 0) || (point >= sLive.set.ringCount) || (point >= GDX_BRANCH_EDIT_MAX_POINTS)) {
+        return;
+    }
+    field = extra_field(&sLive.ringExtras[point], which);
+    if (field != NULL) {
+        *field = (uint8_t) extra_clamp(which, value);
+        edit_publish();
+    }
+}
+
+int gdx_branch_edit_track_setting(int which) {
+    switch (which) {
+        case GDX_BRANCH_EDIT_TRACK_LAVA:
+            return sLive.lavaMode;
+        case GDX_BRANCH_EDIT_TRACK_STRENGTH:
+            return sLive.magnetStrength;
+        case GDX_BRANCH_EDIT_TRACK_RANGE:
+            return sLive.magnetRange;
+        default:
+            return 0;
+    }
+}
+
+void gdx_branch_edit_set_track_setting(int which, int value) {
+    switch (which) {
+        case GDX_BRANCH_EDIT_TRACK_LAVA:
+            sLive.lavaMode =
+                (uint8_t) ((value < GDX_SETTINGS_LAVA_FOLLOW_MENU)   ? GDX_SETTINGS_LAVA_FOLLOW_MENU
+                           : (value > GDX_SETTINGS_LAVA_NEVER_KILLS) ? GDX_SETTINGS_LAVA_NEVER_KILLS
+                                                                     : value);
+            break;
+        case GDX_BRANCH_EDIT_TRACK_STRENGTH:
+            sLive.magnetStrength = (uint8_t) extra_clamp(GDX_BRANCH_EDIT_EXTRA_MAGNET_STRENGTH, value);
+            break;
+        case GDX_BRANCH_EDIT_TRACK_RANGE:
+            sLive.magnetRange = (uint8_t) extra_clamp(GDX_BRANCH_EDIT_EXTRA_MAGNET_RANGE, value);
+            break;
+        default:
+            return;
+    }
+    edit_publish();
 }
 
 int gdx_branch_edit_fork_count(void) {
@@ -196,6 +379,7 @@ int gdx_branch_edit_fork_at(int segment) {
 
 int gdx_branch_edit_swap(GdxBranchEditPoint* ring, int ringCount, int cap, int* dropped) {
     static GdxBranchEditPoint sOut[GDX_BRANCH_EDIT_MAX_POINTS];
+    static GdxPointExtras sOutExtras[GDX_BRANCH_EDIT_MAX_POINTS];
     EditState next = sLive;
     int newFork[GDX_BRANCH_MAX_FORKS];
     int newMerge[GDX_BRANCH_MAX_FORKS];
@@ -236,14 +420,19 @@ int gdx_branch_edit_swap(GdxBranchEditPoint* ring, int ringCount, int cap, int* 
         if (outCount >= GDX_BRANCH_EDIT_MAX_POINTS) {
             return ringCount;
         }
+        sOutExtras[outCount] = sLive.ringExtras[i];
         sOut[outCount++] = ring[i];
         fork = (f < next.set.forkCount) ? &next.set.forks[f] : NULL;
         if ((fork != NULL) && (i == fork->forkPoint)) {
             newFork[f] = outCount - 1;
+            if (fork->flags & GDX_BRANCH_FLAG_FIRST_INFO) {
+                sOut[outCount - 1].trackSegmentInfo = fork->firstInfo;
+            }
             if (outCount + fork->nodeCount > GDX_BRANCH_EDIT_MAX_POINTS) {
                 return ringCount;
             }
             for (j = 0; j < fork->nodeCount; j++) {
+                sOutExtras[outCount] = fork->nodes[j].extras;
                 node_to_point(&fork->nodes[j], &sOut[outCount++]);
             }
         }
@@ -261,14 +450,19 @@ int gdx_branch_edit_swap(GdxBranchEditPoint* ring, int ringCount, int cap, int* 
         memset(fork->nodes, 0, sizeof(fork->nodes));
         for (j = 0; j < interior; j++) {
             point_to_node(&ring[oldFork + 1 + j], &fork->nodes[j]);
+            fork->nodes[j].extras = sLive.ringExtras[oldFork + 1 + j];
         }
         fork->nodeCount = (uint8_t) interior;
+        fork->firstInfo = ring[oldFork].trackSegmentInfo;
+        fork->flags |= GDX_BRANCH_FLAG_FIRST_INFO;
         fork->forkPoint = (uint8_t) newFork[f];
         fork->mergePoint = (uint8_t) newMerge[f];
     }
     for (i = 0; i < outCount; i++) {
         ring[i] = sOut[i];
     }
+    memset(next.ringExtras, 0, sizeof(next.ringExtras));
+    memcpy(next.ringExtras, sOutExtras, (size_t) outCount * sizeof(GdxPointExtras));
     next.set.ringCount = (uint8_t) outCount;
     next.viewB = !next.viewB;
     sLive = next;
@@ -300,11 +494,47 @@ int gdx_branch_edit_swap_to_node(GdxBranchEditPoint* ring, int ringCount, int ca
     return count;
 }
 
+/* The new point's segment was cut out of its neighbor's, so a part the insert kept keeps its values. */
+static void extras_on_insert(int newIndex, const GdxBranchEditPoint* ring, int ringCount) {
+    GdxPointExtras fresh;
+    int i;
+
+    if ((newIndex < 0) || (newIndex >= GDX_BRANCH_EDIT_MAX_POINTS)) {
+        return;
+    }
+    memset(&fresh, 0, sizeof(fresh));
+    if ((ring != NULL) && (ringCount > 1) && (newIndex < ringCount)) {
+        const int before = (newIndex - 1 + ringCount) % ringCount;
+        const GdxPointExtras* old = &sLive.ringExtras[before];
+
+        if ((ring[newIndex].parts[0] != GDX_BRANCH_EDIT_PART_NONE) &&
+            (ring[newIndex].parts[0] == ring[before].parts[0])) {
+            fresh.pitWidth = old->pitWidth;
+            fresh.magnetStrength = old->magnetStrength;
+            fresh.magnetRange = old->magnetRange;
+        }
+        if ((ring[newIndex].parts[2] != GDX_BRANCH_EDIT_PART_NONE) &&
+            (ring[newIndex].parts[2] == ring[before].parts[2])) {
+            fresh.dirtWidth = old->dirtWidth;
+        }
+        if ((ring[newIndex].parts[3] != GDX_BRANCH_EDIT_PART_NONE) &&
+            (ring[newIndex].parts[3] == ring[before].parts[3])) {
+            fresh.iceWidth = old->iceWidth;
+        }
+    }
+    for (i = GDX_BRANCH_EDIT_MAX_POINTS - 1; i > newIndex; i--) {
+        sLive.ringExtras[i] = sLive.ringExtras[i - 1];
+    }
+    sLive.ringExtras[newIndex] = fresh;
+}
+
 void gdx_branch_edit_on_insert(int newIndex, const GdxBranchEditPoint* ring, int ringCount) {
     int f;
 
+    extras_on_insert(newIndex, ring, ringCount);
     if (sLive.set.forkCount == 0) {
         sLive.set.ringCount = (uint8_t) ringCount;
+        edit_publish();
         return;
     }
     gdx_branch_on_ring_insert(&sLive.set, newIndex);
@@ -347,10 +577,19 @@ void gdx_branch_edit_on_insert(int newIndex, const GdxBranchEditPoint* ring, int
 }
 
 void gdx_branch_edit_on_delete(int deletedIndex) {
+    int i;
+
     if (sLive.set.ringCount > 0) {
         sLive.set.ringCount--;
     }
+    if ((deletedIndex >= 0) && (deletedIndex < GDX_BRANCH_EDIT_MAX_POINTS)) {
+        for (i = deletedIndex; i + 1 < GDX_BRANCH_EDIT_MAX_POINTS; i++) {
+            sLive.ringExtras[i] = sLive.ringExtras[i + 1];
+        }
+        memset(&sLive.ringExtras[GDX_BRANCH_EDIT_MAX_POINTS - 1], 0, sizeof(GdxPointExtras));
+    }
     if (sLive.set.forkCount == 0) {
+        edit_publish();
         return;
     }
     gdx_branch_on_ring_delete(&sLive.set, deletedIndex);
@@ -358,9 +597,19 @@ void gdx_branch_edit_on_delete(int deletedIndex) {
 }
 
 void gdx_branch_edit_on_rotate(int newStart, int ringCount) {
+    GdxPointExtras old[GDX_BRANCH_EDIT_MAX_POINTS];
     int f;
+    int i;
 
-    if ((sLive.set.forkCount == 0) || (ringCount <= 0)) {
+    if ((ringCount <= 0) || (ringCount > GDX_BRANCH_EDIT_MAX_POINTS)) {
+        return;
+    }
+    memcpy(old, sLive.ringExtras, sizeof(old));
+    for (i = 0; i < ringCount; i++) {
+        sLive.ringExtras[(i - newStart + ringCount) % ringCount] = old[i];
+    }
+    if (sLive.set.forkCount == 0) {
+        edit_publish();
         return;
     }
     for (f = sLive.set.forkCount - 1; f >= 0; f--) {
@@ -380,10 +629,20 @@ void gdx_branch_edit_on_rotate(int newStart, int ringCount) {
 }
 
 void gdx_branch_edit_on_reverse(int ringCount) {
+    GdxPointExtras old[GDX_BRANCH_EDIT_MAX_POINTS];
     int f;
     int i;
 
-    if ((sLive.set.forkCount == 0) || (ringCount <= 0)) {
+    if ((ringCount <= 0) || (ringCount > GDX_BRANCH_EDIT_MAX_POINTS)) {
+        return;
+    }
+    /* The values belong to a segment, the same as the part they size: see func_xk2_800F0FF4. */
+    memcpy(old, sLive.ringExtras, sizeof(old));
+    for (i = 0; i < ringCount; i++) {
+        sLive.ringExtras[i] = old[(ringCount - i) % ringCount];
+    }
+    if (sLive.set.forkCount == 0) {
+        edit_publish();
         return;
     }
     /* func_xk2_800F0FF4 puts old point k at (1 - k) mod n and mirrors every bank angle. */
@@ -407,6 +666,17 @@ void gdx_branch_edit_on_reverse(int ringCount) {
         for (i = 0; i < fork->nodeCount; i++) {
             fork->nodes[i].bankAngle = (int16_t) (360 - fork->nodes[i].bankAngle);
         }
+        /* A style belongs to the segment after its point, and the segments now run the other way: the first
+         * segment takes the old last one's style, and each node the style of the segment that now follows it. */
+        if (fork->flags & GDX_BRANCH_FLAG_FIRST_INFO) {
+            int32_t last = fork->nodes[0].trackSegmentInfo;
+
+            for (i = 0; i + 1 < fork->nodeCount; i++) {
+                fork->nodes[i].trackSegmentInfo = fork->nodes[i + 1].trackSegmentInfo;
+            }
+            fork->nodes[fork->nodeCount - 1].trackSegmentInfo = fork->firstInfo;
+            fork->firstInfo = last;
+        }
     }
     edit_sort();
     edit_publish();
@@ -429,13 +699,16 @@ int gdx_branch_edit_sync(int ringCount) {
     int removed = 0;
     int f;
 
+    /* A ring change no hook reported: the indices are stale. */
+    if (sLive.set.ringCount != ringCount) {
+        extras_clear_ring();
+    }
     if (sLive.set.forkCount == 0) {
         sLive.set.ringCount = (uint8_t) ringCount;
         edit_publish();
         return 0;
     }
     if (sLive.set.ringCount != ringCount) {
-        /* A ring change no hook reported: the indices are stale. */
         removed = sLive.set.forkCount;
         memset(&sLive.set, 0, sizeof(sLive.set));
         sLive.viewB = 0;

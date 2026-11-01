@@ -83,6 +83,7 @@ static const GdxCourseElement sTrackEffectStock[] = {
     { "effect.lava", "Lava", GDX_COURSE_KIND_TRACK_EFFECT, 5, 0 },
     { "effect.magnet_left", "Magnet Left", GDX_COURSE_KIND_TRACK_EFFECT, 6, 0 },
     { "effect.magnet_right", "Magnet Right", GDX_COURSE_KIND_TRACK_EFFECT, 7, 0 },
+    { "effect.magnet_middle", "Magnet Middle", GDX_COURSE_KIND_TRACK_EFFECT, 8, 0 },
 };
 
 /* ---------------------------------------------------------------------------------

@@ -35,6 +35,20 @@ typedef struct GdxCourseEditLineUpPreview {
     GdxCourseEditVec3 landing[GDX_COURSE_EDIT_LINE_UP_MAX_POINTS];
 } GdxCourseEditLineUpPreview;
 
+// A change from the settings panel: a value of one point, or (is_track) of the whole track. begin_edit is set on
+// the first change of a slider drag, so the drag is one undo step. A newer change replaces an older one that the
+// game thread has not taken, keeping its begin_edit.
+typedef struct GdxCourseEditExtraRequest {
+    GdxCourseEditInt32 is_track;
+    GdxCourseEditInt32 point;
+    GdxCourseEditInt32 which;
+    GdxCourseEditInt32 value;
+    GdxCourseEditInt32 begin_edit;
+} GdxCourseEditExtraRequest;
+
+void gdx_course_edit_input_request_extra(const GdxCourseEditExtraRequest* request);
+GdxCourseEditInt32 gdx_course_edit_input_take_extra(GdxCourseEditExtraRequest* request);
+
 void gdx_course_edit_input_request_drag_start(GdxCourseEditInt32 point_index);
 GdxCourseEditInt32 gdx_course_edit_input_take_drag_start(GdxCourseEditInt32* point_index);
 
@@ -78,6 +92,22 @@ GdxCourseEditInt32 gdx_course_edit_bank_snap_next(GdxCourseEditInt32 bank, GdxCo
                                                   GdxCourseEditInt32 direction);
 // The multiple of step closest to bank. A bank halfway between two rounds up.
 GdxCourseEditInt32 gdx_course_edit_bank_snap_nearest(GdxCourseEditInt32 bank, GdxCourseEditInt32 step);
+
+// Typing a bank value: a sign and up to four digits. Backspace removes the last thing typed.
+void gdx_course_edit_bank_entry_begin(void);
+void gdx_course_edit_bank_entry_cancel(void);
+GdxCourseEditInt32 gdx_course_edit_bank_entry_active(void);
+void gdx_course_edit_bank_entry_push_digit(GdxCourseEditInt32 digit);
+void gdx_course_edit_bank_entry_toggle_sign(void);
+void gdx_course_edit_bank_entry_backspace(void);
+const char* gdx_course_edit_bank_entry_text(void);
+// Ends the typing. Returns 0, leaving typed alone, when there are no digits to apply.
+GdxCourseEditInt32 gdx_course_edit_bank_entry_commit(GdxCourseEditInt32* typed);
+// A typed number as a stored bank: wrapped to 0 to 359, then the nearest 3 degrees, the step every bank edit uses.
+GdxCourseEditInt32 gdx_course_edit_bank_value_normalize(GdxCourseEditInt32 typed);
+
+void gdx_course_edit_input_request_bank_value(GdxCourseEditInt32 bank);
+GdxCourseEditInt32 gdx_course_edit_input_take_bank_value(GdxCourseEditInt32* bank);
 
 void gdx_course_edit_input_clear(void);
 void gdx_course_edit_input_clear_drag(void);

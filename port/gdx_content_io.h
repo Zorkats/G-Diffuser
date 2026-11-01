@@ -65,6 +65,7 @@ extern "C" {
 #define GDX_CONTENT_FLAG_RECORDS_STRIPPED (1u << 1)
 #define GDX_CONTENT_FLAG_EXTENSIONS (1u << 2) /* a GXE1 sidecar, <stem>.gdxe, sits next to the .gdxc */
 #define GDX_CONTENT_FLAG_TITLE (1u << 3)      /* a GXT1 title sidecar, <stem>.gdxt, sits next to the .gdxc */
+#define GDX_CONTENT_FLAG_BRANCH (1u << 4)     /* a GXD1 fork and settings sidecar, <stem>.gdxb, sits next to it */
 
 #define GDX_CONTENT_TRACK_PAYLOAD_SIZE 0xC830 /* sizeof(CourseContext), fzx_course.h:41-47 */
 #define GDX_CONTENT_MACHINE_PAYLOAD_SIZE 0x20 /* sizeof(CustomMachine), unk_structs.h:504-528 */

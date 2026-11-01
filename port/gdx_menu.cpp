@@ -581,6 +581,8 @@ GdxMenu::GdxMenu() : Ship::GuiWindow("gOpenMenuBar", false, "G-Diffuser Menu") {
     // LavaNoKill gates the Racer_ReceiveDamage call in racer.c when a machine is on a COURSE_EFFECT_LAVA
     // strip: off = drain can kill (stock), on = drain stops at 0.1 energy. Default off for stock parity.
     CVarRegisterInteger("gEnhancements.Gameplay.LavaNoKill", 0);
+    // IgnoreTrackSettings races every course on the menu's lava and magnet values, not its own.
+    CVarRegisterInteger("gEnhancements.Gameplay.IgnoreTrackSettings", 0);
     // MagnetPullStrength scales MAGNET_PULL_FORCE in racer.c Racer_ApplyMagnetPull.
     CVarRegisterFloat("gEnhancements.Gameplay.MagnetPullStrength", 1.7f);
     // MagnetPullRange moves the pull line in racer.c Racer_InMagnetPullRange. 40 is at the rails.

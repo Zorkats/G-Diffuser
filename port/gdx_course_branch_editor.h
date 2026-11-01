@@ -47,6 +47,20 @@ int gdx_course_branch_editor_stored_node_at(float x, float y, int* fork, int* no
 /* Switches to the path holding that node and selects it. Runs on the game thread. */
 void gdx_course_branch_editor_show_node(int fork, int node);
 
+/* The settings panel (gdx_course_edit_parts_panel.cpp). The point being edited, or -1 when none is. */
+int gdx_course_branch_editor_active_point(void);
+
+#define GDX_BRANCH_EDITOR_PART_PIT (1 << 0) /* a pit or lava part, which has a width */
+#define GDX_BRANCH_EDITOR_PART_MAGNET (1 << 1)
+#define GDX_BRANCH_EDITOR_PART_DIRT (1 << 2)
+#define GDX_BRANCH_EDITOR_PART_ICE (1 << 3)
+
+/* GDX_BRANCH_EDITOR_PART_* of a point. */
+int gdx_course_branch_editor_point_parts(int point);
+
+/* Applies a change the panel queued (gdx_course_edit_input_request_extra). Runs on the game thread. */
+void gdx_course_branch_editor_apply_extra(void);
+
 /* Controller press at the cursor, before the stock pick: switches paths when a stored node is under the cursor,
  * so the stock pick then takes that node. */
 void gdx_course_branch_editor_press_at_cursor(void);

@@ -14,6 +14,7 @@
 #include "gdx_course_bounds.h"
 #include "gdx_course_music.h"
 #include "gdx_course_registry.h"
+#include "gdx_course_settings.h"
 #include "gdx_course_state.h"
 #include "gdx_edit_cup.h"
 #include "port_log.h"
@@ -233,10 +234,10 @@ static uint32_t gdx_import_course_checksum(const GdxImportCourseData* courseData
 }
 
 #define GDX_IMPORT_PIT_MIN -1
-#define GDX_IMPORT_PIT_MAX 9 /* PIT_MAX - 1; PIT_MAX == 10 in fzx_course.h */
+#define GDX_IMPORT_PIT_MAX 10 /* PIT_MAX - 1; PIT_MAX == 11 in fzx_course.h */
 
 /* Sanitize out-of-range pit values in-place. The game's editor tables index by pit+1 with a
- * size-11 array, so values below -1 or above 9 can read past the end. Clamp to PIT_NONE (-1),
+ * size-12 array, so values below -1 or above 10 can read past the end. Clamp to PIT_NONE (-1),
  * recompute the checksum over the sanitized data (mirrors Course_CalculateChecksum), and log. */
 static int gdx_import_sanitize_course_pit(uint8_t* payload) {
     GdxImportCourseData* courseData = (GdxImportCourseData*) payload;
@@ -1403,6 +1404,129 @@ typedef struct GdxImportMemberState {
 static GdxImportMemberState sBundleMember[GDX_CONTENT_BUNDLE_MAX_TRACKS];
 static int sBundleCompanionOk = 0; /* 1 when the companion decoded and bound to every member */
 
+/* Forks and settings from a .gdxb, one slot per bundle member, slot 0 for a single track. Read in begin() and
+ * applied in result(), like the keys and titles above. */
+typedef struct GdxImportBranchSlot {
+    int hasForks;
+    int hasSettings;
+    GdxBranchSet forks;
+    GdxCourseSettings settings;
+} GdxImportBranchSlot;
+
+static GdxImportBranchSlot sImportBranch[GDX_SIDECAR_MAX_ENTRIES];
+static int sImportBranchIsBundle;
+static uint32_t sImportBranchCrc;
+
+static int gdx_import_member_index(const char* courseId);
+
+/* A file with entries this install does not hold is still fine: those entries are skipped. Forks saved for
+ * another ring length would fail gdx_branch_validate at race time, so they stay out of the store. */
+static void gdx_import_branch_visit(const char* courseId, uint32_t bindCrc, const GdxBranchSet* forks,
+                                    const GdxCourseSettings* settings, void* ctx) {
+    const uint8_t* payload;
+    GdxImportBranchSlot* slot;
+    int index = 0;
+
+    (void) ctx;
+    if (sImportBranchIsBundle) {
+        index = gdx_import_member_index(courseId);
+        if ((index < 0) || (bindCrc != sBundleMemberCrc[index])) {
+            gdx_port_logf("[import] %s: forks and settings belong to another file, skipped\n", courseId);
+            return;
+        }
+        payload = sBundlePayloads[index];
+    } else {
+        if (bindCrc != sImportBranchCrc) {
+            gdx_port_logf("[import] %s: forks and settings belong to another file, skipped\n", courseId);
+            return;
+        }
+        payload = sImportPayload;
+    }
+    slot = &sImportBranch[index];
+    if (forks != NULL) {
+        if (forks->ringCount == payload[0x001]) {
+            slot->hasForks = 1;
+            slot->forks = *forks;
+        } else {
+            gdx_port_logf("[import] %s: forks are for %d points, the course has %d, skipped\n", courseId, forks->ringCount,
+                          payload[0x001]);
+        }
+    }
+    if (settings != NULL) {
+        slot->hasSettings = 1;
+        slot->settings = *settings;
+    }
+}
+
+/* Reads the .gdxb of a .gdxc when its header says it has one. A rejected file is logged and ignored in full:
+ * the course still installs, only without them. */
+static void gdx_import_read_branch(const char* gdxcPath, int isBundle) {
+    unsigned char header[GDX_CONTENT_HEADER_SIZE];
+    char sidecarPath[1600];
+    unsigned char* bytes;
+    size_t length;
+    FILE* f;
+    int ioError;
+    int rc;
+
+    memset(sImportBranch, 0, sizeof(sImportBranch));
+    f = fopen(gdxcPath, "rb");
+    if (f == NULL) {
+        return;
+    }
+    length = fread(header, 1, sizeof(header), f);
+    fclose(f);
+    if ((length != sizeof(header)) || ((gdx_import_read_u32le(header + 0x25) & GDX_CONTENT_FLAG_BRANCH) == 0)) {
+        return;
+    }
+    if (!gdx_import_sidecar_path(gdxcPath, ".gdxb", sidecarPath, sizeof(sidecarPath))) {
+        return;
+    }
+    f = fopen(sidecarPath, "rb");
+    if (f == NULL) {
+        gdx_port_logf("[import] %s: fork and settings file missing, skipped\n", gdxcPath);
+        return;
+    }
+    bytes = (unsigned char*) malloc(GDX_SIDECAR_MAX_BYTES + 1);
+    if (bytes == NULL) {
+        fclose(f);
+        return;
+    }
+    /* One byte past the largest legal file is read, so an oversized file is caught below. */
+    length = fread(bytes, 1, GDX_SIDECAR_MAX_BYTES + 1, f);
+    ioError = ferror(f) != 0;
+    fclose(f);
+    if (ioError || (length > GDX_SIDECAR_MAX_BYTES)) {
+        gdx_port_logf("[import] %s: fork and settings file unreadable, skipped\n", sidecarPath);
+        free(bytes);
+        return;
+    }
+    sImportBranchIsBundle = isBundle;
+    /* The header's CRC, not one of the payload: gdx_import_sanitize_course_pit rewrites pit values in place. */
+    sImportBranchCrc = gdx_import_read_u32le(header + 0x2D);
+    rc = gdx_course_sidecar_decode(bytes, length, gdx_import_branch_visit, NULL);
+    free(bytes);
+    if (rc != GDX_SETTINGS_OK) {
+        gdx_port_logf("[import] %s: fork and settings file rejected (%d), skipped\n", sidecarPath, rc);
+        memset(sImportBranch, 0, sizeof(sImportBranch));
+    }
+}
+
+/* The installed file replaces the one the old values belonged to, so a slot with nothing clears them. */
+static void gdx_import_store_branch(const char* courseId, const GdxImportBranchSlot* slot) {
+    static const GdxBranchSet sNoForks;
+    static const GdxCourseSettings sNoSettings;
+    int rc = gdx_branch_store_set(courseId, slot->hasForks ? &slot->forks : &sNoForks);
+
+    if (rc != GDX_BRANCH_OK) {
+        gdx_port_logf("[import] %s: forks not stored (%d)\n", courseId, rc);
+    }
+    rc = gdx_settings_store_set(courseId, slot->hasSettings ? &slot->settings : &sNoSettings);
+    if (rc != GDX_SETTINGS_OK) {
+        gdx_port_logf("[import] %s: settings not stored (%d)\n", courseId, rc);
+    }
+}
+
 typedef struct GdxImportCompanionCtx {
     int commit; /* 0 = verify only, 1 = copy into sBundleMember */
     const char* gdxcPath;
@@ -1625,6 +1749,7 @@ static int gdx_import_begin_path(const char* path) {
             return GDX_CONTENT_IMPORT_ERR_VALIDATION;
         }
         gdx_import_load_bundle_companion(path); /* 9D: member keys and titles, staged for result() */
+        gdx_import_read_branch(path, 1);
         sImportContentType = GDX_CONTENT_TYPE_BUNDLE; /* keeps result() from applying a stale single-track title */
         sImportRc = 0;
         sImportMfsError = 0;
@@ -1644,6 +1769,10 @@ static int gdx_import_begin_path(const char* path) {
         return GDX_CONTENT_IMPORT_ERR_VALIDATION;
     }
     gdx_import_read_extension(path, entry.contentType, sImportPayload);
+    memset(sImportBranch, 0, sizeof(sImportBranch));
+    if (entry.contentType == GDX_CONTENT_TYPE_TRACK) {
+        gdx_import_read_branch(path, 0);
+    }
     memcpy(sImportTitle, entry.title, sizeof(sImportTitle));
 
     memcpy(sImportName, entry.name, sizeof(sImportName));
@@ -1688,6 +1817,7 @@ int gdx_content_import_result(int32_t* outMfsError) {
         snprintf(courseId, sizeof(courseId), "%s.%s", sImportName, sImportExtension);
         gdx_import_store_track(courseId, keyed ? sImportSidecarBlock.records : NULL, keyed ? sImportSidecarBlock.count : 0,
                                sImportTitle);
+        gdx_import_store_branch(courseId, &sImportBranch[0]);
         gdx_course_state_flush();
     }
     if (sImportContentType == GDX_CONTENT_TYPE_BUNDLE) {
@@ -1708,6 +1838,7 @@ int gdx_content_import_result(int32_t* outMfsError) {
             snprintf(courseId, sizeof(courseId), "%s.CRSD", sBundleNames[m]);
             gdx_import_store_track(courseId, keyed ? state->records : NULL, keyed ? state->recordCount : 0,
                                    keyed && state->hasTitle ? state->title : NULL);
+            gdx_import_store_branch(courseId, &sImportBranch[m]);
         }
         gdx_course_state_flush();
     }

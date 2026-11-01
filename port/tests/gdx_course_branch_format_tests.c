@@ -3,6 +3,7 @@
  */
 
 #include "../gdx_course_branch_format.h"
+#include "../gdx_course_branch_view.h"
 #include "../gdx_course_registry.h"
 
 #include <stdio.h>
@@ -118,7 +119,8 @@ static int set_eq(const GdxBranchSet* a, const GdxBranchSet* b) {
     }
     for (i = 0; i < (int) a->forkCount; i++) {
         if (a->forks[i].forkPoint != b->forks[i].forkPoint || a->forks[i].mergePoint != b->forks[i].mergePoint ||
-            a->forks[i].flags != b->forks[i].flags || a->forks[i].nodeCount != b->forks[i].nodeCount) {
+            a->forks[i].flags != b->forks[i].flags || a->forks[i].nodeCount != b->forks[i].nodeCount ||
+            a->forks[i].firstInfo != b->forks[i].firstInfo) {
             return 0;
         }
         for (j = 0; j < (int) a->forks[i].nodeCount; j++) {
@@ -152,7 +154,8 @@ static void test_limits(void) {
     check(GDX_BRANCH_NODE_BYTES == 32, "wire node is 32 bytes");
     check(GDX_BRANCH_COURSE_ID_MAX == GDX_COURSE_FILE_ID_MAX, "course id max matches the registry");
     check(GDX_BRANCH_STORE_SLOTS == GDX_COURSE_STORE_SLOTS, "store slots match the registry");
-    check(GDX_BRANCH_BLOCK_MAX_BYTES == 16 + 4 * (4 + 32 * 32) + 4, "block max matches the wire formula");
+    check(GDX_BRANCH_BLOCK_MAX_BYTES == 16 + 4 * (4 + 4 + 32 * 32) + 4, "block max matches the wire formula");
+    check(GDX_BRANCH_FLAG_FIRST_INFO == 0x02u, "first segment style is flag bit1");
     check(GDX_BRANCH_BLOCK_MAX_BYTES <= 65535, "a GXB1 block fits in the GBS1 u16 length");
     check(GDX_BRANCH_FILE_MAX_BYTES ==
               12 + 128 * (1 + 25 + 2 + GDX_BRANCH_BLOCK_MAX_BYTES) + 4,
@@ -292,12 +295,12 @@ static void test_validate_reject(void) {
 
     memset(&set, 0, sizeof(set));
     set.ringCount = 10;
-    add_fork(&set, 1, 4, 0x02, 1);
+    add_fork(&set, 1, 4, 0x04, 1);
     expect_code("an unknown flag bit is rejected", &set, 10, GDX_BRANCH_ERR_FLAGS, "unknown");
 
     memset(&set, 0, sizeof(set));
     set.ringCount = 10;
-    add_fork(&set, 1, 4, 0x03, 1);
+    add_fork(&set, 1, 4, 0x05, 1);
     expect_code("symmetric plus an unknown flag bit is rejected", &set, 10, GDX_BRANCH_ERR_FLAGS, "unknown");
 
     make_basic(&set);
@@ -632,6 +635,59 @@ static void test_block_round_trip(void) {
           "hand-packed fields match, including negative integers");
 }
 
+/* Version 1 stays on disk unless a fork needs version 2, because older builds refuse anything above 1. */
+static void test_block_first_info(void) {
+    GdxBranchSet set;
+    GdxBranchSet out;
+    unsigned char body[4 + 32];
+    const uint32_t bind = 0x01020304u;
+    size_t crafted;
+    int plain;
+    int len;
+
+    make_basic(&set);
+    plain = gdx_branch_encode(&set, bind, sBlock, sizeof(sBlock));
+    check(plain > 0 && sBlock[4] == 1 && sBlock[5] == 0, "a set without first styles is written as version 1");
+
+    set.forks[1].flags |= GDX_BRANCH_FLAG_FIRST_INFO;
+    set.forks[1].firstInfo = -7654321;
+    len = gdx_branch_encode(&set, bind, sBlock, sizeof(sBlock));
+    check(len == plain + 4, "a first style adds 4 bytes to its fork");
+    check(sBlock[4] == 2 && sBlock[5] == 0, "a set with a first style is written as version 2");
+    check(gdx_branch_decode(sBlock, (size_t) len, bind, &out) == GDX_BRANCH_OK && set_eq(&set, &out),
+          "version 2 round trips the first style");
+    check(out.forks[0].firstInfo == 0 && !(out.forks[0].flags & GDX_BRANCH_FLAG_FIRST_INFO),
+          "a fork without the flag decodes with no first style");
+
+    sBlock[4] = 1;
+    reseal(sBlock, (size_t) len);
+    expect_decode("version 1 does not define the first style bit", sBlock, (size_t) len, bind, GDX_BRANCH_ERR_FLAGS);
+
+    /* Hand-packed version 1 block, the bytes 1.2.0 writes: it must still load. */
+    memset(body, 0, sizeof(body));
+    body[0] = 1;
+    body[1] = 4;
+    body[2] = 0;
+    body[3] = 1;
+    crafted = craft_block(sBlock, sizeof(sBlock), 1, 10, bind, 1u, body, sizeof(body));
+    check(gdx_branch_decode(sBlock, crafted, bind, &out) == GDX_BRANCH_OK && out.forks[0].flags == 0,
+          "a version 1 block still decodes");
+
+    gdx_branch_store_clear();
+    make_basic(&set);
+    set.forks[0].flags |= GDX_BRANCH_FLAG_FIRST_INFO;
+    set.forks[0].firstInfo = 99;
+    check(gdx_branch_store_set("FIRST.CRSD", &set) == GDX_BRANCH_OK && gdx_branch_store_get("FIRST.CRSD", &out) == 1 &&
+              out.forks[0].firstInfo == 99,
+          "the store keeps the first style");
+    len = gdx_branch_store_encode_file(sFile, sizeof(sFile));
+    gdx_branch_store_clear();
+    check(gdx_branch_store_restore_file(sFile, (size_t) len) == GDX_BRANCH_OK &&
+              gdx_branch_store_get("FIRST.CRSD", &out) == 1 && set_eq(&set, &out),
+          "the state file keeps the first style");
+    gdx_branch_store_clear();
+}
+
 static void test_block_reject(void) {
     GdxBranchSet set;
     unsigned char tiny[8];
@@ -656,7 +712,7 @@ static void test_block_reject(void) {
     expect_decode("magic", sBlock, (size_t) len, bind, GDX_BRANCH_ERR_MAGIC);
     sBlock[0] = 'G';
 
-    sBlock[4] = 2;
+    sBlock[4] = 3;
     reseal(sBlock, (size_t) len);
     expect_decode("version", sBlock, (size_t) len, bind, GDX_BRANCH_ERR_VERSION);
     sBlock[4] = 1;
@@ -1022,13 +1078,59 @@ static void test_file_reject(void) {
     expect_file_reject("GBS1 entryCount does not match the bytes", sFile, fileLen, GDX_BRANCH_FILE_ERR_LENGTH);
 }
 
+static void test_lane_crossing(void) {
+    GdxBranchLaneSample current = { 0.0f, 0.0f, 100.0f, 100.0f };
+    GdxBranchLaneSample other = { 0.0f, 0.0f, 100.0f, 100.0f };
+    /* A chunk centered on the origin, on flat ground, reaching 200 to each side along z. */
+    const short center[3] = { 0, 0, 0 };
+    const short left[3] = { 0, 0, 200 };
+    const short right[3] = { 0, 0, -200 };
+    const short below[3] = { 0, -90, 0 };
+    const short inside[3] = { 0, 0, 150 };
+    const short atEdge[3] = { 0, 0, 195 };
+    const short offRoad[3] = { 0, 0, 260 };
+    const short aboveRoad[3] = { 0, 80, 100 };
+    const short pastChunk[3] = { 500, 0, 100 };
+    const short wideRoadLeft[3] = { 0, 0, 200 };
+    const short leaning[3] = { 0, 10, 100 };
+
+    current.lateral = 90.0f;
+    other.lateral = -60.0f;
+    check(!gdx_branch_view_lane_crossing(&current, &other), "a racer still on its road stays on it");
+    current.lateral = 110.0f;
+    check(gdx_branch_view_lane_crossing(&current, &other), "a racer past the left edge crosses when the other road is there");
+    current.lateral = -110.0f;
+    check(gdx_branch_view_lane_crossing(&current, &other), "a racer past the right edge crosses too");
+    current.lateral = 110.0f;
+    other.lateral = 140.0f;
+    check(!gdx_branch_view_lane_crossing(&current, &other), "a gap between the roads stays a wall");
+    other.lateral = -140.0f;
+    check(!gdx_branch_view_lane_crossing(&current, &other), "the far side of the other road does not count");
+    other.lateral = 0.0f;
+    other.height = 200.0f;
+    check(!gdx_branch_view_lane_crossing(&current, &other), "a road far below does not catch the racer");
+    other.height = -200.0f;
+    check(!gdx_branch_view_lane_crossing(&current, &other), "a road far above does not catch the racer");
+
+    check(gdx_branch_view_chunk_covers_point(inside, center, left, right, below), "a point inside the road is covered");
+    check(!gdx_branch_view_chunk_covers_point(atEdge, center, left, right, below),
+          "a point level with the road's own edge keeps its rail");
+    check(!gdx_branch_view_chunk_covers_point(offRoad, center, left, right, below), "a point off the road is not covered");
+    check(!gdx_branch_view_chunk_covers_point(aboveRoad, center, left, right, below), "a point above the road is not covered");
+    check(!gdx_branch_view_chunk_covers_point(pastChunk, center, left, right, below), "a point past the chunk is not covered");
+    check(gdx_branch_view_chunk_covers_point(leaning, center, left, right, below), "a small height difference still counts");
+    check(!gdx_branch_view_chunk_covers_point(wideRoadLeft, center, center, center, below), "a chunk with no width covers nothing");
+}
+
 int main(void) {
+    test_lane_crossing();
     test_limits();
     test_validate_accept();
     test_validate_reject();
     test_ring_insert_delete();
     test_nodes_and_labels();
     test_block_round_trip();
+    test_block_first_info();
     test_block_reject();
     test_store();
     test_file_round_trip();

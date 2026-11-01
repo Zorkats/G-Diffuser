@@ -340,6 +340,7 @@ gdx_add_main_target(G-Diffuser
                                # wrappers over Fast3dWindow for the decomp-side C callers
     gdx_course_edit_input.c
     gdx_course_edit_help.cpp   # Course Edit hint strip and Controls Help block (F1 Enhancements > Mouse)
+    gdx_course_edit_parts_panel.cpp # Course Edit panel: part widths, magnet values, track settings
     gdx_course_bounds.c        # Course Edit control-point bounds; the decomp clamp sites call in
                                # here so editor and save validator agree on the y range
     gdx_course_strings.c       # Per-course names/subtitles/BGM from the mounted archive, so a ROM
@@ -389,6 +390,8 @@ gdx_add_main_target(G-Diffuser
     gdx_course_branch_format.c     # Course forks: GdxBranchSet model, GXB1 block and GBS1 file (pure C)
     gdx_course_branch_view.c       # Course forks: the active set in plain types for global.h code
     gdx_course_branch_edit.c       # Course forks: editor fork set, path B view swap, undo state (pure C)
+    gdx_course_settings.c          # Per-track and per-point values: GXK1 block, GKS1 file, .gdxb sidecar (pure C)
+    gdx_course_settings_view.c     # The active values in plain types for global.h code
     gdx_update.cpp                 # Update check, verified download, and the gdx-update handoff
     gdx_update_ui.cpp              # Launch update check, update notice, About page Updates block
     gdx_rom_courses.c              # W2 ROM course table reader; converts ROM courses (including
@@ -899,6 +902,7 @@ endif()
 add_executable(gdx_course_branch_format_tests
     tests/gdx_course_branch_format_tests.c
     gdx_course_branch_format.c
+    gdx_course_branch_view.c
     gdx_course_registry.c)
 if(MSVC)
     target_compile_options(gdx_course_branch_format_tests PRIVATE /W3)
@@ -906,10 +910,25 @@ elseif(GDX_PORT_WARN_FLAGS)
     target_compile_options(gdx_course_branch_format_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
 endif()
 
+# Per-track and per-point values: GXK1 and GKS1 codecs, the .gdxb sidecar, the plain view. Standalone pure C.
+add_executable(gdx_course_settings_tests
+    tests/gdx_course_settings_tests.c
+    gdx_course_settings.c
+    gdx_course_settings_view.c
+    gdx_course_branch_format.c
+    gdx_course_registry.c)
+if(MSVC)
+    target_compile_options(gdx_course_settings_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_course_settings_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+
 # Course fork editing: split, link, ring hooks, path B view swap and undo state. Standalone pure C.
 add_executable(gdx_course_branch_edit_tests
     tests/gdx_course_branch_edit_tests.c
     gdx_course_branch_edit.c
+    gdx_course_settings.c
+    gdx_course_settings_view.c
     gdx_course_branch_format.c
     gdx_course_registry.c)
 if(MSVC)
@@ -1379,6 +1398,7 @@ if(GDX_BUILD_JP AND NOT ANDROID)
         gdx_course_edit_mouse.cpp
         gdx_course_edit_input.c
         gdx_course_edit_help.cpp
+        gdx_course_edit_parts_panel.cpp
         gdx_course_bounds.c
         gdx_content_io.c
         gdx_content_import.c
@@ -1387,6 +1407,8 @@ if(GDX_BUILD_JP AND NOT ANDROID)
         gdx_course_branch_format.c
         gdx_course_branch_view.c
         gdx_course_branch_edit.c
+        gdx_course_settings.c
+        gdx_course_settings_view.c
         gdx_update.cpp
         gdx_update_ui.cpp
         gdx_rom_courses.c

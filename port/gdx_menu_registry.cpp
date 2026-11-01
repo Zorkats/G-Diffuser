@@ -2350,7 +2350,8 @@ void GdxMenu::RegisterMenu() {
                                .Format("%.2f")
                                .ShowButtons(false)
                                .LabelPosition(UIWidgets::LabelPositions::Near)
-                               .Tooltip("How hard magnet rails pull machines toward the track edge.\n"
+                               .Tooltip("How hard magnet rails pull machines toward the track edge, or onto the\n"
+                                        "center line for a middle magnet.\n"
                                         "1.70 = default, about as strong as a held drift."))
                   .ModifiedMarker()
                   .SearchTerms("magnet rail trap pull strength force course editor"));
@@ -2369,9 +2370,22 @@ void GdxMenu::RegisterMenu() {
                                .LabelPosition(UIWidgets::LabelPositions::Near)
                                .Tooltip("How far from the track edge magnets start pulling.\n"
                                         "80 = default, before you reach the rails. 40 is right at the rails,\n"
-                                        "lower lets you cross them first. The middle of the road always stays free."))
+                                        "lower lets you cross them first. The middle of the road always stays free.\n"
+                                        "A middle magnet pulls within this distance of the center line, at most the\n"
+                                        "middle half of the road."))
                   .ModifiedMarker()
                   .SearchTerms("magnet rail trap pull range reach distance course editor"));
+
+    // Read by racer.c Racer_UsesCourseSettings.
+    AddWidget("Enhancements", "Gameplay", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Ignore track settings", .cVar = "gEnhancements.Gameplay.IgnoreTrackSettings",
+                          .type = GdxUI::WIDGET_CVAR_CHECKBOX }
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(false).Tooltip(
+                      "A course can set its own lava rule and magnet values in Course Edit, and they\n"
+                      "win over the three options above. On = always use the options above.\n"
+                      "Part widths are the course's shape and still apply."))
+                  .ModifiedMarker()
+                  .SearchTerms("course track settings lava magnet override ignore menu"));
 
     // Save GP in progress: resumes the GP cup saved at the last race boundary (port/gdx_gp_resume.h).
     AddWidget("Enhancements", "Gameplay", SECTION_COLUMN_1,
@@ -2679,6 +2693,16 @@ void GdxMenu::RegisterMenu() {
                       "Ctrl+Y redoes with or without the panel."))
                   .ModifiedMarker()
                   .SearchTerms("course edit undo redo history backlog"));
+    // Read by gdx_course_edit_parts_panel.cpp.
+    AddWidget("Enhancements", "Course Edit & Machine", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Course Edit: settings panel",
+                          .cVar = "gEnhancements.CourseEdit.PartSettingsPanel",
+                          .type = GdxUI::WIDGET_CVAR_CHECKBOX }
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(true).Tooltip(
+                      "Shows a small panel in Course Edit for the selected point's part widths and\n"
+                      "magnet values, and for the track's lava rule and magnet values."))
+                  .ModifiedMarker()
+                  .SearchTerms("course edit part width pit dirt ice magnet lava track settings panel"));
     // Gates the PORT branch in course_edit/19C470.c func_xk2_800EB3B4: B inside the
     // OFFICIAL course list reopens the parent picker instead of closing the File menu.
     AddWidget("Enhancements", "Course Edit & Machine", SECTION_COLUMN_1,

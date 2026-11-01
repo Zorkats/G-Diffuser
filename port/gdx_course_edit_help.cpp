@@ -140,6 +140,7 @@ void DrawToolLines(int tool) {
         case 3: // Bank/tilt
             ImGui::TextUnformatted("Drag a point left or right: sets bank");
             ImGui::TextUnformatted("Grid button: bank snap off, 45, 90, 180 degrees");
+            ImGui::TextUnformatted("Enter: type a bank for the selected points");
             ImGui::TextDisabled("Right-click or Esc: cancel the drag");
             DrawModifierLine();
             break;
@@ -250,7 +251,8 @@ extern "C" void gdx_course_edit_flash_message(const char* text) {
 // Called from the Course Edit overlay each frame, under the selection box. Draws nothing unless the editor mouse
 // drive is on, the editor is active in point mode, and no menu, sub-screen, name entry, or mouse capture is up.
 void GdxCourseEditDrawHintStrip(void) {
-    if (CVarGetInteger("gEnhancements.Input.EditorHintStrip", 1) == 0) {
+    // Typing a bank value shows here even with the strip off, since nothing else shows what was typed.
+    if (CVarGetInteger("gEnhancements.Input.EditorHintStrip", 1) == 0 && !gdx_course_edit_bank_entry_active()) {
         return;
     }
     if (CVarGetInteger("gEnhancements.Input.CourseEditMouse", 0) == 0 || !EditorActive()) {
@@ -304,7 +306,12 @@ void GdxCourseEditDrawHintStrip(void) {
             ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.35f, 1.0f), "[%s]", gdx_course_edit_mouse_key_name(key));
             ImGui::SameLine();
             ImGui::TextUnformatted(gdx_course_edit_action_name(key));
-            DrawToolLines(gMoveOption);
+            if (gdx_course_edit_bank_entry_active()) {
+                ImGui::Text("Bank: %s_", gdx_course_edit_bank_entry_text());
+                ImGui::TextDisabled("Enter: apply. Esc: cancel. Minus: flip the sign");
+            } else {
+                DrawToolLines(gMoveOption);
+            }
         } else {
             DrawSegmentLines(gCreateOption);
         }
@@ -351,6 +358,9 @@ void GdxCourseEditDrawControlsHelp(void) {
     HelpRow("Hold Ctrl", "Fine: quarter speed");
     HelpRow("Hold Alt", "Snap the change: width and offset in steps of 50, bank in steps of 15 degrees");
     HelpRow("Grid button (bank tool)", "Snap bank to exact angles: off, 45, 90, then 180 degrees");
+    HelpRow("Enter (bank tool)",
+            "Type a bank for the selected points, then Enter to apply or Esc to cancel. It lands on the nearest 3 "
+            "degrees, and a value past 359 or below 0 wraps");
     HelpRow("Right-click", "Cancel a drag");
     HelpRow("Delete",
             "Delete every selected point, in any point tool. With nothing selected, a sound plays and nothing changes");

@@ -2,6 +2,7 @@
 #include "gdx_course_edit_menu.h"
 
 #include <assert.h>
+#include <string.h>
 
 static void test_one_shot_actions(void) {
     GdxCourseEditInt32 point = -1;
@@ -179,8 +180,126 @@ static void test_bank_snap(void) {
     assert(gdx_course_edit_bank_snap_nearest(270, 180) == 0);
 }
 
+static void test_bank_value_entry(void) {
+    GdxCourseEditInt32 typed = 123;
+    GdxCourseEditInt32 bank = 0;
+    GdxCourseEditInt32 i;
+
+    // Keys do nothing until the typing starts, and each start is empty.
+    assert(!gdx_course_edit_bank_entry_active());
+    gdx_course_edit_bank_entry_push_digit(4);
+    gdx_course_edit_bank_entry_begin();
+    assert(gdx_course_edit_bank_entry_active());
+    assert(strcmp(gdx_course_edit_bank_entry_text(), "") == 0);
+
+    // Enter with nothing typed, or only a sign, applies nothing and ends the typing.
+    assert(!gdx_course_edit_bank_entry_commit(&typed));
+    assert(typed == 123 && !gdx_course_edit_bank_entry_active());
+    gdx_course_edit_bank_entry_begin();
+    gdx_course_edit_bank_entry_toggle_sign();
+    assert(!gdx_course_edit_bank_entry_commit(&typed));
+    assert(typed == 123);
+
+    // The sign flips at any point, and the digits stay in order.
+    gdx_course_edit_bank_entry_begin();
+    gdx_course_edit_bank_entry_push_digit(4);
+    gdx_course_edit_bank_entry_toggle_sign();
+    gdx_course_edit_bank_entry_push_digit(5);
+    assert(strcmp(gdx_course_edit_bank_entry_text(), "-45") == 0);
+    assert(gdx_course_edit_bank_entry_commit(&typed));
+    assert(typed == -45 && !gdx_course_edit_bank_entry_active());
+
+    gdx_course_edit_bank_entry_begin();
+    gdx_course_edit_bank_entry_toggle_sign();
+    gdx_course_edit_bank_entry_push_digit(9);
+    gdx_course_edit_bank_entry_toggle_sign();
+    assert(strcmp(gdx_course_edit_bank_entry_text(), "9") == 0);
+
+    // Backspace removes the last thing typed, stops at empty, and takes a lone sign too.
+    gdx_course_edit_bank_entry_backspace();
+    gdx_course_edit_bank_entry_backspace();
+    assert(strcmp(gdx_course_edit_bank_entry_text(), "") == 0);
+    gdx_course_edit_bank_entry_toggle_sign();
+    gdx_course_edit_bank_entry_backspace();
+    assert(strcmp(gdx_course_edit_bank_entry_text(), "") == 0);
+
+    // Four digits at most, with or without a sign. The sign still fits after them.
+    for (i = 1; i <= 6; i++) {
+        gdx_course_edit_bank_entry_push_digit(i);
+    }
+    assert(strcmp(gdx_course_edit_bank_entry_text(), "1234") == 0);
+    gdx_course_edit_bank_entry_toggle_sign();
+    assert(strcmp(gdx_course_edit_bank_entry_text(), "-1234") == 0);
+    gdx_course_edit_bank_entry_push_digit(5);
+    assert(strcmp(gdx_course_edit_bank_entry_text(), "-1234") == 0);
+
+    // Cancel and clear both end the typing without applying anything.
+    gdx_course_edit_bank_entry_cancel();
+    assert(!gdx_course_edit_bank_entry_active());
+    assert(!gdx_course_edit_input_take_bank_value(&bank));
+    gdx_course_edit_bank_entry_begin();
+    gdx_course_edit_input_request_bank_value(90);
+    gdx_course_edit_input_clear();
+    assert(!gdx_course_edit_bank_entry_active());
+    assert(!gdx_course_edit_input_take_bank_value(&bank));
+
+    // The request is one-shot.
+    gdx_course_edit_input_request_bank_value(45);
+    assert(gdx_course_edit_input_take_bank_value(&bank));
+    assert(bank == 45);
+    assert(!gdx_course_edit_input_take_bank_value(&bank));
+
+    // Typed numbers wrap to 0 to 359, then land on the nearest 3 degrees.
+    assert(gdx_course_edit_bank_value_normalize(0) == 0);
+    assert(gdx_course_edit_bank_value_normalize(45) == 45);
+    assert(gdx_course_edit_bank_value_normalize(50) == 51);
+    assert(gdx_course_edit_bank_value_normalize(46) == 45);
+    assert(gdx_course_edit_bank_value_normalize(-45) == 315);
+    assert(gdx_course_edit_bank_value_normalize(360) == 0);
+    assert(gdx_course_edit_bank_value_normalize(720) == 0);
+    assert(gdx_course_edit_bank_value_normalize(359) == 0);
+    assert(gdx_course_edit_bank_value_normalize(358) == 357);
+    assert(gdx_course_edit_bank_value_normalize(-9999) == 81);
+}
+
+static void test_extra_requests(void) {
+    GdxCourseEditExtraRequest request;
+    GdxCourseEditExtraRequest taken;
+
+    gdx_course_edit_input_clear();
+    assert(!gdx_course_edit_input_take_extra(&taken));
+
+    request.is_track = 0;
+    request.point = 3;
+    request.which = 1;
+    request.value = 10;
+    request.begin_edit = 1;
+    gdx_course_edit_input_request_extra(&request);
+    // A slider moves many times a frame apart: the newest value wins and the drag still opens its undo step.
+    request.value = 20;
+    request.begin_edit = 0;
+    gdx_course_edit_input_request_extra(&request);
+    assert(gdx_course_edit_input_take_extra(&taken));
+    assert(taken.point == 3);
+    assert(taken.which == 1);
+    assert(taken.value == 20);
+    assert(taken.begin_edit == 1);
+    assert(!gdx_course_edit_input_take_extra(&taken));
+
+    // The next change of the same drag opens nothing.
+    gdx_course_edit_input_request_extra(&request);
+    assert(gdx_course_edit_input_take_extra(&taken));
+    assert(taken.begin_edit == 0);
+
+    gdx_course_edit_input_request_extra(&request);
+    gdx_course_edit_input_clear();
+    assert(!gdx_course_edit_input_take_extra(&taken));
+}
+
 int main(void) {
+    test_extra_requests();
     test_bank_snap();
+    test_bank_value_entry();
     test_one_shot_actions();
     test_latest_continuous_command_wins();
     test_clear_drops_stale_commands();

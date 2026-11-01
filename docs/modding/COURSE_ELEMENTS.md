@@ -35,7 +35,7 @@ music:   bgm.mute_city bgm.silence bgm.sand_ocean bgm.port_town bgm.big_blue bgm
          bgm.new_01 bgm.new_04
 part:    part.pit part.dash part.dirt part.slip part.jump part.trap part.gate part.building part.sign
 effect:  effect.none effect.pit effect.dirt effect.dash effect.ice effect.lava
-         effect.magnet_left effect.magnet_right
+         effect.magnet_left effect.magnet_right effect.magnet_middle
 ```
 
 ## Packs: `mods/<pack>/elements.txt`

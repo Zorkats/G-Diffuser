@@ -13,6 +13,7 @@
 #include "gdx_content_pack.h"
 #include "gdx_course_music.h"
 #include "gdx_course_registry.h"
+#include "gdx_course_settings.h"
 #include "gdx_course_state.h"
 #include "gdx_edit_cup.h"
 #include "port_log.h"
@@ -599,6 +600,67 @@ static int gdx_content_write_extension_sidecar(const char* directory, const char
     return rc;
 }
 
+/* GXD1 sidecar: exports/<stem>.gdxb, the forks and settings of each track in the export, each bound to its
+ * payload CRC-32 (gdx_course_settings.h). rings[i] is the point count of track i: forks saved for another
+ * ring length would be refused on import, so they stay behind, and so do the point values of such a track.
+ * Sets GDX_CONTENT_FLAG_BRANCH when it writes a file. A track with neither gets no file, because 1.2.0 and
+ * older refuse a package that holds one. */
+typedef char GdxContentSidecarEntriesFitBundle[(GDX_SIDECAR_MAX_ENTRIES >= GDX_CONTENT_BUNDLE_MAX_TRACKS) ? 1 : -1];
+
+static int gdx_content_write_branch_sidecar(const char* directory, const char* stem, char ids[][GDX_COURSE_FILE_ID_MAX + 1],
+                                            const uint32_t* crcs, const int* rings, int count, uint32_t* flags) {
+    static GdxBranchSet sForks[GDX_SIDECAR_MAX_ENTRIES];
+    static GdxCourseSettings sSettings[GDX_SIDECAR_MAX_ENTRIES];
+    GdxSidecarEntry entries[GDX_SIDECAR_MAX_ENTRIES];
+    unsigned char* block;
+    char path[1600];
+    int length;
+    int n;
+    int rc;
+    int i;
+
+    for (i = 0; i < count; i++) {
+        entries[i].courseId = ids[i];
+        entries[i].bindCrc = crcs[i];
+        entries[i].forks = (gdx_branch_store_get(ids[i], &sForks[i]) && (sForks[i].ringCount == rings[i])) ? &sForks[i] : NULL;
+        entries[i].settings = NULL;
+        if (gdx_settings_store_get(ids[i], &sSettings[i])) {
+            if (sSettings[i].ringCount != rings[i]) {
+                memset(sSettings[i].ring, 0, sizeof(sSettings[i].ring));
+                memset(sSettings[i].nodes, 0, sizeof(sSettings[i].nodes));
+                sSettings[i].ringCount = (uint8_t) rings[i];
+            } else if (entries[i].forks == NULL) {
+                memset(sSettings[i].nodes, 0, sizeof(sSettings[i].nodes));
+            }
+            entries[i].settings = &sSettings[i];
+        }
+    }
+    block = (unsigned char*) malloc(GDX_SIDECAR_MAX_BYTES);
+    if (block == NULL) {
+        return GDX_CONTENT_ERR_IO;
+    }
+    length = gdx_course_sidecar_encode(entries, count, block, GDX_SIDECAR_MAX_BYTES);
+    if (length <= 0) {
+        free(block);
+        return (length == 0) ? GDX_CONTENT_OK : GDX_CONTENT_ERR_BAD_ARGS;
+    }
+#ifdef _WIN32
+    n = snprintf(path, sizeof(path), "%s\\%s.gdxb", directory, stem);
+#else
+    n = snprintf(path, sizeof(path), "%s/%s.gdxb", directory, stem);
+#endif
+    if (n < 0 || (size_t) n >= sizeof(path)) {
+        free(block);
+        return GDX_CONTENT_ERR_IO;
+    }
+    rc = gdx_content_write_bytes_atomic(path, block, (size_t) length);
+    free(block);
+    if (rc == GDX_CONTENT_OK) {
+        *flags |= GDX_CONTENT_FLAG_BRANCH;
+    }
+    return rc;
+}
+
 /* GXT1 title sidecar for a track whose session title (8A) differs from its file name:
  * exports/<stem>.gdxt, bound to the payload CRC-32 (gdx_course_registry.h). Written before the
  * container, like the GXE1 sidecar. */
@@ -797,6 +859,20 @@ int gdx_content_export(const GdxContentEntry* entry, char* outPath, size_t outCa
             }
             flags |= GDX_CONTENT_FLAG_TITLE;
         }
+        /* Forks and per-track settings travel in a GXD1 sidecar. */
+        {
+            char ids[1][GDX_COURSE_FILE_ID_MAX + 1];
+            uint32_t crc = gdx_content_crc32(payload, (size_t) expectedSize);
+            int ring = payload[0x001];
+
+            memcpy(ids[0], courseId, sizeof(ids[0]));
+            rc = gdx_content_write_branch_sidecar(directory, stem, ids, &crc, &ring, 1, &flags);
+            if (rc != GDX_CONTENT_OK) {
+                free(payload);
+                gdx_content_pack_clear_dir(directory, 1);
+                return rc;
+            }
+        }
     }
 
     rc = gdx_content_write_container(path, entry, flags, payload, (uint32_t) expectedSize);
@@ -957,6 +1033,7 @@ int gdx_content_export_bundle(char* outPath, size_t outCap) {
     GdxMfsRamDirectoryEntry dirEntry;
     char packedNames[GDX_CONTENT_BUNDLE_MAX_TRACKS][GDX_EDIT_CUP_NAME_SIZE];
     uint32_t memberCrc[GDX_CONTENT_BUNDLE_MAX_TRACKS];
+    int memberRing[GDX_CONTENT_BUNDLE_MAX_TRACKS];
     char exportsDir[1200];
     char directory[1200];
     char path[1600];
@@ -1042,6 +1119,7 @@ int gdx_content_export_bundle(char* outPath, size_t outCap) {
             memset(trackBuf + GDX_CONTENT_GHOST_REGION_OFFSET, 0, GDX_CONTENT_STRIP_REGION_SIZE);
         }
         memberCrc[trackCount] = gdx_content_crc32(trackBuf, GDX_CONTENT_TRACK_PAYLOAD_SIZE);
+        memberRing[trackCount] = trackBuf[0x001];
         gdx_content_pack_bundle_entry(&cursor, "CRSD", slot, trackBuf, GDX_CONTENT_TRACK_PAYLOAD_SIZE);
         memcpy(packedNames[trackCount], slot, sizeof(packedNames[trackCount]));
         trackCount++;
@@ -1096,6 +1174,23 @@ int gdx_content_export_bundle(char* outPath, size_t outCap) {
 
             snprintf(courseId, sizeof(courseId), "%s.CRSD", packedNames[m]);
             gdx_course_music_export_course(courseId, directory);
+        }
+    }
+
+    /* The members' forks and settings, one GXD1 sidecar for the whole cup. */
+    {
+        char memberIds[GDX_CONTENT_BUNDLE_MAX_TRACKS][GDX_COURSE_FILE_ID_MAX + 1];
+        int m;
+
+        for (m = 0; m < trackCount; m++) {
+            snprintf(memberIds[m], sizeof(memberIds[m]), "%s.CRSD", packedNames[m]);
+        }
+        rc = gdx_content_write_branch_sidecar(directory, GDX_CONTENT_BUNDLE_FILE_STEM, memberIds, memberCrc, memberRing,
+                                              trackCount, &flags);
+        if (rc != GDX_CONTENT_OK) {
+            free(bundlePayload);
+            gdx_content_pack_clear_dir(directory, 1);
+            return rc;
         }
     }
 
