@@ -101,6 +101,32 @@ static void node_to_point(const GdxBranchNode* node, GdxBranchEditPoint* point) 
     point->parts[8] = node->sign;
 }
 
+static void node_clear_parts(GdxBranchNode* node) {
+    node->pit = node->dash = node->dirt = node->ice = node->jump = GDX_BRANCH_EDIT_PART_NONE;
+    node->landmine = node->gate = node->building = node->sign = GDX_BRANCH_EDIT_PART_NONE;
+}
+
+void gdx_branch_edit_point_clear_parts(GdxBranchEditPoint* point) {
+    memset(point->parts, GDX_BRANCH_EDIT_PART_NONE, sizeof(point->parts));
+}
+
+/* Older builds gave every new path B node 0 for all nine parts, the first type of each. */
+static void edit_repair_parts(GdxBranchSet* set) {
+    int f;
+    int i;
+
+    for (f = 0; f < set->forkCount; f++) {
+        for (i = 0; i < set->forks[f].nodeCount; i++) {
+            GdxBranchNode* node = &set->forks[f].nodes[i];
+
+            if ((node->pit == 0) && (node->dash == 0) && (node->dirt == 0) && (node->ice == 0) && (node->jump == 0) &&
+                (node->landmine == 0) && (node->gate == 0) && (node->building == 0) && (node->sign == 0)) {
+                node_clear_parts(node);
+            }
+        }
+    }
+}
+
 void gdx_branch_edit_clear(void) {
     memset(&sLive, 0, sizeof(sLive));
     edit_publish();
@@ -111,6 +137,7 @@ int gdx_branch_edit_select(const char* courseId, int ringCount) {
 
     memset(&sLive, 0, sizeof(sLive));
     if ((courseId != NULL) && gdx_branch_store_get(courseId, &set) && (set.ringCount == ringCount)) {
+        edit_repair_parts(&set);
         sLive.set = set;
     }
     sLive.set.ringCount = (uint8_t) ringCount;
@@ -249,6 +276,30 @@ int gdx_branch_edit_swap(GdxBranchEditPoint* ring, int ringCount, int cap, int* 
     return outCount;
 }
 
+int gdx_branch_edit_swap_to_node(GdxBranchEditPoint* ring, int ringCount, int cap, int f, int node, int* point) {
+    int viewBefore = sLive.viewB;
+    int dropped;
+    int count;
+    int i;
+
+    if ((f < 0) || (f >= sLive.set.forkCount) || (node < 0) || (node >= sLive.set.forks[f].nodeCount)) {
+        return -1;
+    }
+    for (i = 0; i < sLive.set.forkCount; i++) {
+        int interior = sLive.set.forks[i].mergePoint - sLive.set.forks[i].forkPoint - 1;
+
+        if ((interior < 1) || (interior > GDX_BRANCH_MAX_NODES) || (sLive.set.forks[i].mergePoint >= ringCount)) {
+            return -1;
+        }
+    }
+    count = gdx_branch_edit_swap(ring, ringCount, cap, &dropped);
+    if (sLive.viewB == viewBefore) {
+        return -1;
+    }
+    *point = sLive.set.forks[f].forkPoint + 1 + node;
+    return count;
+}
+
 void gdx_branch_edit_on_insert(int newIndex, const GdxBranchEditPoint* ring, int ringCount) {
     int f;
 
@@ -287,8 +338,7 @@ void gdx_branch_edit_on_insert(int newIndex, const GdxBranchEditPoint* ring, int
         node.pos[0] = (prev[0] + next[0]) * 0.5f;
         node.pos[1] = (prev[1] + next[1]) * 0.5f;
         node.pos[2] = (prev[2] + next[2]) * 0.5f;
-        node.pit = node.dash = node.dirt = node.ice = node.jump = 0;
-        node.landmine = node.gate = node.building = node.sign = 0;
+        node_clear_parts(&node);
         if (gdx_branch_insert_node(fork, k, &node) != GDX_BRANCH_OK) {
             fork->flags &= (uint8_t) ~GDX_BRANCH_FLAG_SYMMETRIC;
         }
@@ -359,6 +409,19 @@ void gdx_branch_edit_on_reverse(int ringCount) {
         }
     }
     edit_sort();
+    edit_publish();
+}
+
+void gdx_branch_edit_on_translate(float dx, float dz) {
+    int f;
+    int i;
+
+    for (f = 0; f < sLive.set.forkCount; f++) {
+        for (i = 0; i < sLive.set.forks[f].nodeCount; i++) {
+            sLive.set.forks[f].nodes[i].pos[0] += dx;
+            sLive.set.forks[f].nodes[i].pos[2] += dz;
+        }
+    }
     edit_publish();
 }
 

@@ -22,6 +22,9 @@ static GdxCourseEditInt32 sScalarTargetPending;
 static GdxCourseEditInt32 sScalarTargetOption;
 static GdxCourseEditInt32 sScalarTargetOffset;
 static GdxCourseEditInt32 sLineUpPending;
+static GdxCourseEditInt32 sNodePickPending;
+static GdxCourseEditInt32 sNodePickFork;
+static GdxCourseEditInt32 sNodePickNode;
 
 void gdx_course_edit_input_request_drag_start(GdxCourseEditInt32 point_index) {
     sDragStartPoint = point_index;
@@ -216,6 +219,22 @@ void gdx_course_edit_input_clear_drag(void) {
     sScalarTargetPending = 0;
 }
 
+void gdx_course_edit_input_request_node_pick(GdxCourseEditInt32 fork, GdxCourseEditInt32 node) {
+    sNodePickFork = fork;
+    sNodePickNode = node;
+    sNodePickPending = 1;
+}
+
+GdxCourseEditInt32 gdx_course_edit_input_take_node_pick(GdxCourseEditInt32* fork, GdxCourseEditInt32* node) {
+    if (!sNodePickPending) {
+        return 0;
+    }
+    *fork = sNodePickFork;
+    *node = sNodePickNode;
+    sNodePickPending = 0;
+    return 1;
+}
+
 void gdx_course_edit_input_clear(void) {
     sSelectionAddMask = 0;
     sSelectionAddPending = 0;
@@ -223,4 +242,5 @@ void gdx_course_edit_input_clear(void) {
     sDeletePending = 0;
     sSelectionPending = 0;
     sLineUpPending = 0;
+    sNodePickPending = 0;
 }

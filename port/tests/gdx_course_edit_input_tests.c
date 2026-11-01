@@ -26,6 +26,17 @@ static void test_one_shot_actions(void) {
     gdx_course_edit_input_request_line_up();
     assert(gdx_course_edit_input_take_line_up() == 1);
     assert(gdx_course_edit_input_take_line_up() == 0);
+
+    GdxCourseEditInt32 fork = -1;
+    GdxCourseEditInt32 node = -1;
+    gdx_course_edit_input_request_node_pick(2, 5);
+    assert(gdx_course_edit_input_take_node_pick(&fork, &node) == 1);
+    assert(fork == 2 && node == 5);
+    assert(gdx_course_edit_input_take_node_pick(&fork, &node) == 0);
+
+    gdx_course_edit_input_request_node_pick(1, 1);
+    gdx_course_edit_input_clear();
+    assert(gdx_course_edit_input_take_node_pick(&fork, &node) == 0);
 }
 
 static void test_latest_continuous_command_wins(void) {

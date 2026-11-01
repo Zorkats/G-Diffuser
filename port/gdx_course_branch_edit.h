@@ -21,6 +21,8 @@ extern "C" {
 #endif
 
 #define GDX_BRANCH_EDIT_PARTS 9 /* pit, dash, dirt, ice, jump, landmine, gate, building, sign */
+/* "No part" for all nine (PIT_NONE, DASH_NONE and so on in fzx_course.h). 0 is a real part of each. */
+#define GDX_BRANCH_EDIT_PART_NONE (-1)
 #define GDX_BRANCH_EDIT_MAX_POINTS 64
 
 /* Bytes of one saved edit state (undo snapshots). gdx_course_branch_edit.c checks it at compile time. */
@@ -35,8 +37,12 @@ typedef struct GdxBranchEditPoint {
     signed char parts[GDX_BRANCH_EDIT_PARTS];
 } GdxBranchEditPoint;
 
+/* Removes every part from point. A new path B point starts this way. */
+void gdx_branch_edit_point_clear_parts(GdxBranchEditPoint* point);
+
 /* Session. clear drops every fork and shows path A. select loads courseId's stored set when it was
- * saved for a ring of ringCount points (else clears). Both refresh the active set. */
+ * saved for a ring of ringCount points (else clears), and removes the parts of any stored node that
+ * has all nine set to 0, which older builds gave every new node. Both refresh the active set. */
 void gdx_branch_edit_clear(void);
 int gdx_branch_edit_select(const char* courseId, int ringCount);
 
@@ -55,6 +61,11 @@ int gdx_branch_edit_fork_at(int segment);
  * point count. A fork whose ring interior is empty cannot swap and is removed; *dropped counts them. */
 int gdx_branch_edit_swap(GdxBranchEditPoint* ring, int ringCount, int cap, int* dropped);
 
+/* Swaps as above so stored node `node` of fork f comes into the ring, and writes its ring index to *point.
+ * Returns the new point count, or -1 with nothing changed when there is no such node, a swap would remove any
+ * fork, or the swapped ring would not fit. */
+int gdx_branch_edit_swap_to_node(GdxBranchEditPoint* ring, int ringCount, int cap, int f, int node, int* point);
+
 /* Fork f's fork and merge points, and the positions of its stored nodes (the path not showing), up to cap of
  * them. Returns the stored node count, or -1 when f is not a fork. */
 int gdx_branch_edit_fork_shape(int f, int* forkPoint, int* mergePoint, float (*pos)[3], int cap);
@@ -66,6 +77,8 @@ void gdx_branch_edit_on_insert(int newIndex, const GdxBranchEditPoint* ring, int
 void gdx_branch_edit_on_delete(int deletedIndex);
 void gdx_branch_edit_on_rotate(int newStart, int ringCount);
 void gdx_branch_edit_on_reverse(int ringCount);
+/* The whole ring moved by (dx, dz), so the stored nodes move with it. Center course does this. */
+void gdx_branch_edit_on_translate(float dx, float dz);
 
 /* Called after every editor rebuild. Removes forks the ring no longer supports (a ring change the hooks
  * did not see, a fork that now touches point 0, too many points) and refreshes the active set.

@@ -123,6 +123,9 @@ struct CourseEditDragState {
     Ship::Coords boxEndWindow{};
     // Set by a press that starts a box select: true for Shift (add to the selection), false to replace it.
     bool boxAdditive = false;
+    // Press on a node of the path not showing: its fork and node. A click there switches paths.
+    int32_t storedFork = -1;
+    int32_t storedNode = -1;
 };
 static CourseEditDragState sCourseEditDrag;
 static bool sDragBlockedUntilRelease = false;
@@ -1671,6 +1674,14 @@ void CourseEditDrawForkMarks(void) {
     const ImU32 line = IM_COL32(70, 230, 110, 150);
     const ImU32 node = IM_COL32(235, 245, 235, 230);
     ImDrawList* draw = ImGui::GetForegroundDrawList();
+    // The node a press would switch to is ringed. The stored index counts the node marks of its fork, in order.
+    int hoverFork = -1;
+    int hoverNode = -1;
+    if (gCreateOption == 1) {
+        gdx_course_branch_editor_stored_node_at(static_cast<float>(gCourseEditCursorXPos),
+                                                static_cast<float>(gCourseEditCursorYPos), &hoverFork, &hoverNode);
+    }
+    int chainNode = 0;
     ImVec2 last(0.0f, 0.0f);
     bool haveLast = false;
     for (int i = 0; i < count; i++) {
@@ -1683,11 +1694,15 @@ void CourseEditDrawForkMarks(void) {
         if (visible) {
             if (marks[i].kind == GDX_BRANCH_MARK_NODE) {
                 draw->AddCircleFilled(at, 3.5f, node);
+                if (marks[i].chain == hoverFork && chainNode == hoverNode) {
+                    draw->AddCircle(at, 7.0f, IM_COL32(120, 200, 255, 255), 0, 2.0f);
+                }
             } else {
                 draw->AddCircleFilled(at, 6.0f, green);
                 draw->AddCircle(at, 6.0f, IM_COL32(255, 255, 255, 230), 0, 1.5f);
             }
         }
+        chainNode = marks[i].kind == GDX_BRANCH_MARK_NODE ? chainNode + 1 : 0;
         last = at;
         haveLast = visible;
     }
@@ -1695,7 +1710,7 @@ void CourseEditDrawForkMarks(void) {
     ImVec2 corner(0.0f, 0.0f);
     if (showing != 0 && CourseEditGameToWindow(312.0f, 60.0f, &corner)) {
         const char* title = showing == 2 ? "Path B showing" : "Path A showing";
-        const char* hint = "Split on a fork switches paths";
+        const char* hint = gCreateOption == 1 ? "Select a white dot to switch paths" : "Split on a fork switches paths";
         const ImVec2 titleSize = ImGui::CalcTextSize(title);
         const ImVec2 hintSize = ImGui::CalcTextSize(hint);
         const float width = (std::max)(titleSize.x, hintSize.x) + 12.0f;
@@ -1940,9 +1955,13 @@ extern "C" void gdx_course_edit_mouse_drag_tick(void) {
             gCourseEditCursorYPos = y;
             const int32_t idx = CourseEditPickPoint(gameX, gameY);
             const bool shiftHeld = sShiftHeld || ((SDL_GetModState() & KMOD_SHIFT) != 0);
+            int storedFork = -1;
+            int storedNode = -1;
+            const bool onStoredNode =
+                idx < 0 && !shiftHeld && gdx_course_branch_editor_stored_node_at(gameX, gameY, &storedFork, &storedNode);
             // The Delete tool arms on every press, so an empty-space press can clear the selection or start a box
             // select.
-            if (idx >= 0 || shiftHeld || gMoveOption == 5) {
+            if (idx >= 0 || shiftHeld || gMoveOption == 5 || onStoredNode) {
                 // idx < 0 is a box-select candidate; Armed promotes it once the pointer moves.
                 d.state = DragState::Armed;
                 d.pointIndex = idx;
@@ -1957,6 +1976,8 @@ extern "C" void gdx_course_edit_mouse_drag_tick(void) {
                 d.boxStartX = gameX;
                 d.boxStartY = gameY;
                 d.boxAdditive = shiftHeld;
+                d.storedFork = onStoredNode ? storedFork : -1;
+                d.storedNode = onStoredNode ? storedNode : -1;
                 // A new press never inherits a scalar drag that ended in a cancel.
                 sScalarDrag = CourseEditScalarDragState();
             } else {
@@ -1968,6 +1989,16 @@ extern "C" void gdx_course_edit_mouse_drag_tick(void) {
             const int32_t dxWindow = mouse.x - d.startWindow.x;
             const int32_t dyWindow = mouse.y - d.startWindow.y;
             const bool moved = dxWindow * dxWindow + dyWindow * dyWindow >= kDragStartThresholdSq;
+            if (d.storedFork >= 0) {
+                // Only a click switches paths. A press that moves off the node does nothing.
+                if (!moved && d.released) {
+                    gdx_course_edit_input_request_node_pick(d.storedFork, d.storedNode);
+                }
+                if (moved || d.released) {
+                    d = {};
+                }
+                break;
+            }
             if (d.pointIndex < 0) {
                 // Press on empty space. A moved pointer becomes a box select. A plain click clears the selection;
                 // a Shift-click on empty space does nothing.

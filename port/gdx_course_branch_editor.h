@@ -12,6 +12,7 @@ void gdx_course_branch_editor_on_insert(int newIndex);
 void gdx_course_branch_editor_on_delete(int index);
 void gdx_course_branch_editor_on_rotate(int newStart);
 void gdx_course_branch_editor_on_reverse(void);
+void gdx_course_branch_editor_on_translate(float dx, float dz);
 
 void gdx_course_branch_editor_rebuilt(void);
 void gdx_course_branch_editor_force_path_a(void);
@@ -38,6 +39,17 @@ int gdx_course_branch_editor_marks(GdxBranchMark* out, int cap);
 
 /* 0 when the course has no forks, else 1 while path A shows and 2 while path B shows. */
 int gdx_course_branch_editor_path_showing(void);
+
+/* The node of the path not showing under game-space (x, y), for tools that select a single point. Returns 1 and
+ * fills fork and node, or 0 when there is none or a ring point is under the cursor too. */
+int gdx_course_branch_editor_stored_node_at(float x, float y, int* fork, int* node);
+
+/* Switches to the path holding that node and selects it. Runs on the game thread. */
+void gdx_course_branch_editor_show_node(int fork, int node);
+
+/* Controller press at the cursor, before the stock pick: switches paths when a stored node is under the cursor,
+ * so the stock pick then takes that node. */
+void gdx_course_branch_editor_press_at_cursor(void);
 
 #ifdef __cplusplus
 }
