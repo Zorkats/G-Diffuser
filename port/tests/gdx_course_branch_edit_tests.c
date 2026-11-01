@@ -278,12 +278,204 @@ static void test_undo_state_and_commit(void) {
           "committing no forks removes the entry");
 }
 
+static int node_has_no_parts(const GdxBranchNode* node) {
+    return (node->pit == GDX_BRANCH_EDIT_PART_NONE) && (node->dash == GDX_BRANCH_EDIT_PART_NONE) &&
+           (node->dirt == GDX_BRANCH_EDIT_PART_NONE) && (node->ice == GDX_BRANCH_EDIT_PART_NONE) &&
+           (node->jump == GDX_BRANCH_EDIT_PART_NONE) && (node->landmine == GDX_BRANCH_EDIT_PART_NONE) &&
+           (node->gate == GDX_BRANCH_EDIT_PART_NONE) && (node->building == GDX_BRANCH_EDIT_PART_NONE) &&
+           (node->sign == GDX_BRANCH_EDIT_PART_NONE);
+}
+
+static void test_new_nodes_have_no_parts(void) {
+    GdxBranchEditPoint nodeB;
+    int dropped;
+    int i;
+    const GdxBranchFork* fork;
+
+    memset(&nodeB, 0, sizeof(nodeB));
+    gdx_branch_edit_point_clear_parts(&nodeB);
+    for (i = 0; i < GDX_BRANCH_EDIT_PARTS; i++) {
+        CHECK(nodeB.parts[i] == GDX_BRANCH_EDIT_PART_NONE, "clearing a point removes each part");
+    }
+
+    make_ring(8);
+    gdx_branch_edit_clear();
+    gdx_branch_edit_sync(sCount);
+    ring_insert(3, 3500.0f);
+    gdx_branch_edit_split_commit(3, &nodeB);
+    fork = fork_of(0);
+    CHECK((fork != NULL) && node_has_no_parts(&fork->nodes[0]), "a split's path B node has no parts");
+
+    /* The new path A point has parts here, and its partner on path B must not copy them. */
+    for (i = sCount; i > 5; i--) {
+        sRing[i] = sRing[i - 1];
+    }
+    memset(&sRing[5], 1, sizeof(sRing[5]));
+    sRing[5].pos[0] = 4500.0f;
+    sCount++;
+    gdx_branch_edit_on_insert(5, sRing, sCount);
+    fork = fork_of(0);
+    CHECK((fork != NULL) && (fork->nodeCount == 2) && node_has_no_parts(&fork->nodes[1]),
+          "an inserted point's partner on path B has no parts");
+
+    sCount = gdx_branch_edit_swap(sRing, sCount, GDX_BRANCH_EDIT_MAX_POINTS, &dropped);
+    CHECK((sRing[4].parts[0] == GDX_BRANCH_EDIT_PART_NONE) && (sRing[4].parts[8] == GDX_BRANCH_EDIT_PART_NONE),
+          "path B shows in the ring with no parts");
+    sCount = gdx_branch_edit_swap(sRing, sCount, GDX_BRANCH_EDIT_MAX_POINTS, &dropped);
+}
+
+static void test_select_repairs_old_parts(void) {
+    GdxBranchEditPoint nodes[2];
+    char reason[96];
+    const GdxBranchFork* fork;
+
+    make_ring(10);
+    gdx_branch_edit_clear();
+    gdx_branch_edit_sync(sCount);
+    memset(nodes, 0, sizeof(nodes));
+    nodes[0].pos[2] = 900.0f; /* every part 0, as older builds saved it */
+    nodes[1].pos[0] = 4000.0f;
+    nodes[1].pos[2] = 900.0f;
+    gdx_branch_edit_point_clear_parts(&nodes[1]);
+    nodes[1].parts[0] = 0; /* one part the user placed */
+    CHECK(gdx_branch_edit_span_commit(3, 6, nodes, 2) == 0, "span commit with old parts");
+    CHECK(gdx_branch_edit_commit("OLD.CRSD", sCount, 1234u, reason, sizeof(reason)) == 0, "commit stores old parts");
+    gdx_branch_edit_clear();
+    CHECK(gdx_branch_edit_select("OLD.CRSD", sCount) == 1, "select loads old parts");
+    fork = fork_of(0);
+    CHECK((fork != NULL) && node_has_no_parts(&fork->nodes[0]), "select removes all nine parts set to 0");
+    CHECK((fork != NULL) && (fork->nodes[1].pit == 0) && (fork->nodes[1].dash == GDX_BRANCH_EDIT_PART_NONE),
+          "select keeps a part the user placed");
+    gdx_branch_edit_clear();
+    gdx_branch_edit_commit("OLD.CRSD", sCount, 1234u, reason, sizeof(reason));
+}
+
+static void test_translate(void) {
+    GdxBranchEditPoint nodeB;
+    GdxBranchEditPoint nodesB[3];
+    int dropped;
+    int i;
+    const GdxBranchFork* fork;
+
+    make_ring(16);
+    gdx_branch_edit_clear();
+    gdx_branch_edit_sync(sCount);
+    memset(&nodeB, 0, sizeof(nodeB));
+    nodeB.pos[0] = 3000.0f;
+    nodeB.pos[1] = 50.0f;
+    nodeB.pos[2] = 900.0f;
+    memset(nodesB, 0, sizeof(nodesB));
+    for (i = 0; i < 3; i++) {
+        nodesB[i].pos[0] = 1000.0f * (float) (9 + i);
+        nodesB[i].pos[2] = 900.0f;
+    }
+    gdx_branch_edit_span_commit(2, 4, &nodeB, 1);
+    gdx_branch_edit_span_commit(8, 12, nodesB, 3);
+
+    gdx_branch_edit_on_translate(-100.0f, 25.0f);
+    fork = fork_of(0);
+    CHECK((fork != NULL) && (fork->nodes[0].pos[0] == 2900.0f) && (fork->nodes[0].pos[1] == 50.0f) &&
+              (fork->nodes[0].pos[2] == 925.0f),
+          "translate moves a node on x and z and leaves y");
+    fork = fork_of(1);
+    CHECK((fork != NULL) && (fork->nodes[2].pos[0] == 10900.0f) && (fork->nodes[2].pos[2] == 925.0f),
+          "translate moves the nodes of every fork");
+
+    /* In the B view the stored nodes are path A. */
+    for (i = 0; i < sCount; i++) {
+        sRing[i].pos[0] -= 100.0f;
+        sRing[i].pos[2] += 25.0f;
+    }
+    sCount = gdx_branch_edit_swap(sRing, sCount, GDX_BRANCH_EDIT_MAX_POINTS, &dropped);
+    for (i = 0; i < sCount; i++) {
+        sRing[i].pos[0] += 100.0f;
+        sRing[i].pos[2] -= 25.0f;
+    }
+    gdx_branch_edit_on_translate(100.0f, -25.0f);
+    fork = fork_of(0);
+    CHECK((fork != NULL) && gdx_branch_edit_view_b() && (fork->nodes[0].pos[0] == 3000.0f) &&
+              (fork->nodes[0].pos[2] == 0.0f),
+          "translate in the B view moves the stored path A");
+    sCount = gdx_branch_edit_swap(sRing, sCount, GDX_BRANCH_EDIT_MAX_POINTS, &dropped);
+    fork = fork_of(0);
+    CHECK((sRing[3].pos[0] == 3000.0f) && (sRing[3].pos[2] == 0.0f) && (fork != NULL) &&
+              (fork->nodes[0].pos[0] == 3000.0f) && (fork->nodes[0].pos[2] == 900.0f),
+          "both paths are back in place after moving in both views");
+}
+
+static void test_swap_to_node(void) {
+    GdxBranchEditPoint nodeB;
+    GdxBranchEditPoint nodesB[3];
+    int point = -1;
+    int count;
+    int i;
+
+    make_ring(16);
+    gdx_branch_edit_clear();
+    gdx_branch_edit_sync(sCount);
+    memset(&nodeB, 0, sizeof(nodeB));
+    nodeB.pos[0] = 3000.0f;
+    nodeB.pos[2] = 900.0f;
+    memset(nodesB, 0, sizeof(nodesB));
+    for (i = 0; i < 3; i++) {
+        nodesB[i].pos[0] = 1000.0f * (float) (9 + i);
+        nodesB[i].pos[2] = 900.0f;
+    }
+    gdx_branch_edit_span_commit(2, 4, &nodeB, 1);
+    gdx_branch_edit_span_commit(8, 12, nodesB, 3);
+    CHECK(gdx_branch_edit_link(0, 6, sCount) == 0, "fork 0 becomes asymmetric: 3 A points, 1 B node");
+
+    CHECK(gdx_branch_edit_swap_to_node(sRing, sCount, GDX_BRANCH_EDIT_MAX_POINTS, 2, 0, &point) == -1,
+          "swap to node refuses a fork that does not exist");
+    CHECK(gdx_branch_edit_swap_to_node(sRing, sCount, GDX_BRANCH_EDIT_MAX_POINTS, 0, 1, &point) == -1,
+          "swap to node refuses a node that does not exist");
+    CHECK(!gdx_branch_edit_view_b() && (fork_of(0)->nodeCount == 1), "a refused swap to node changes nothing");
+
+    /* Fork 1 sits after the asymmetric fork, so its index moves with the swap. */
+    count = gdx_branch_edit_swap_to_node(sRing, sCount, GDX_BRANCH_EDIT_MAX_POINTS, 1, 2, &point);
+    CHECK((count == 14) && gdx_branch_edit_view_b() && (point == 9), "swap to node reports the node's new index");
+    sCount = count;
+    CHECK((sRing[point].pos[0] == 11000.0f) && (sRing[point].pos[2] == 900.0f), "that index holds the node of path B");
+
+    /* And back: the stored nodes are now path A. */
+    count = gdx_branch_edit_swap_to_node(sRing, sCount, GDX_BRANCH_EDIT_MAX_POINTS, 0, 2, &point);
+    sCount = count;
+    CHECK((count == 16) && !gdx_branch_edit_view_b() && (point == 5) && (sRing[point].pos[0] == 5000.0f) &&
+              (sRing[point].pos[2] == 0.0f),
+          "swap to node goes back to path A the same way");
+
+    /* A fork with no points on the showing path would be removed by a swap, so the switch is refused. */
+    ring_delete(5);
+    ring_delete(4);
+    ring_delete(3);
+    count = gdx_branch_edit_swap_to_node(sRing, sCount, GDX_BRANCH_EDIT_MAX_POINTS, 1, 0, &point);
+    CHECK((count == -1) && (gdx_branch_edit_fork_count() == 2) && !gdx_branch_edit_view_b(),
+          "swap to node refuses rather than remove a fork");
+
+    /* A ring that grew after the fork was made can swap past the point limit, which is refused too. */
+    make_ring(58);
+    gdx_branch_edit_clear();
+    gdx_branch_edit_sync(sCount);
+    gdx_branch_edit_span_commit(8, 12, nodesB, 3);
+    CHECK(gdx_branch_edit_link(0, 10, sCount) == 0, "fork stores 3 nodes over a 1 point interior");
+    for (i = 0; i < 6; i++) {
+        ring_insert(20, 20500.0f);
+    }
+    count = gdx_branch_edit_swap_to_node(sRing, sCount, GDX_BRANCH_EDIT_MAX_POINTS, 0, 0, &point);
+    CHECK((count == -1) && !gdx_branch_edit_view_b() && (gdx_branch_edit_fork_count() == 1),
+          "swap to node refuses a ring that would not fit");
+}
+
 int main(void) {
     test_split_and_swap();
     test_link_and_asymmetric_swap();
     test_delete_rotate_reverse();
     test_span_split();
     test_undo_state_and_commit();
+    test_new_nodes_have_no_parts();
+    test_select_repairs_old_parts();
+    test_translate();
+    test_swap_to_node();
     if (sFailures != 0) {
         printf("%d course branch edit test(s) failed\n", sFailures);
         return 1;

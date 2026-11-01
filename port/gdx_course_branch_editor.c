@@ -20,19 +20,25 @@ extern CourseInfo* gCurrentCourseInfo;
 extern bool gInCourseEditTestRun;
 extern s32 D_xk2_800F7040;
 extern s32 D_xk2_800F704C;
+extern s32 gCourseEditCursorXPos;
 extern s32 gCourseEditCursorYPos;
 extern s32 gCreateOption;
 extern s32 gDesignStyleOption;
+extern s32 gMoveOption;
 extern void func_xk2_800E6F9C(void);
 extern void func_xk2_800E6CA8(s32 arg0, CourseSegment arg1);
 extern void func_xk2_800EF78C(void);
+extern s32 func_xk2_800EF090(Vec3f arg0, s32* arg1, s32* arg2);
 extern s32 func_i2_800BE8BC(CourseInfo* courseInfo);
+extern void gdx_course_edit_select_point(s32 pointIndex, s32 toggle);
 extern void gdx_course_edit_flash_message(const char* text);
 extern int gdx_course_state_edit_file_id(char* out, int outCap);
 extern int gdx_course_state_flush(void);
 extern void gdx_course_branch_build_editor(void);
 
 #define EDITOR_LABEL_CAP 96
+/* Squared game pixels, the mouse pick radius of ring points (gdx_course_edit_mouse.cpp). */
+#define EDITOR_NODE_PICK_RADIUS_SQ 150.0f
 
 static GdxBranchEditPoint sPoints[GDX_BRANCH_EDIT_MAX_POINTS];
 static s32 sLinkFork = -1;
@@ -143,6 +149,10 @@ void gdx_course_branch_editor_on_rotate(int newStart) {
 
 void gdx_course_branch_editor_on_reverse(void) {
     gdx_branch_edit_on_reverse(D_802CB6D0.controlPointCount);
+}
+
+void gdx_course_branch_editor_on_translate(float dx, float dz) {
+    gdx_branch_edit_on_translate(dx, dz);
 }
 
 /* After func_xk2_800E5B6C rebuilt a valid editor ring: drop forks the ring no longer supports, then build
@@ -279,9 +289,7 @@ static f32 editor_place_path_b(s32 forkPoint, s32 mergePoint, f32 side, GdxBranc
         node->radiusRight = D_802CB6D0.unk_0000[point].radiusRight;
         node->trackSegmentInfo = D_802CB6D0.unk_0000[point].trackSegmentInfo;
         node->bankAngle = courseData->bankAngle[point];
-        for (k = 0; k < GDX_BRANCH_EDIT_PARTS; k++) {
-            node->parts[k] = 0;
-        }
+        gdx_branch_edit_point_clear_parts(node);
     }
 
     for (i = 0; i <= interior; i++) {
@@ -340,7 +348,6 @@ static void editor_split_segment(s32 segment) {
     s32 count = D_802CB6D0.controlPointCount;
     s32 bankAverage;
     s32 rc;
-    s32 i;
 
     rc = gdx_branch_edit_split_check(segment, count, reason, sizeof(reason));
     if (rc != 0) {
@@ -407,9 +414,7 @@ static void editor_split_segment(s32 segment) {
     nodeB.radiusRight = newSeg.radiusRight;
     nodeB.trackSegmentInfo = D_802CB6D0.unk_0000[segment + 1].trackSegmentInfo;
     nodeB.bankAngle = (short) bankAverage;
-    for (i = 0; i < GDX_BRANCH_EDIT_PARTS; i++) {
-        nodeB.parts[i] = 0;
-    }
+    gdx_branch_edit_point_clear_parts(&nodeB);
     gdx_branch_edit_split_commit(segment, &nodeB);
 
     func_i2_800BE8BC(gCurrentCourseInfo);
@@ -607,4 +612,84 @@ int gdx_course_branch_editor_path_showing(void) {
         return 0;
     }
     return gdx_branch_edit_view_b() ? 2 : 1;
+}
+
+static f32 editor_screen_distance_sq(Vec3f pos, f32 x, f32 y) {
+    s32 sx;
+    s32 sy;
+
+    if (func_xk2_800EF090(pos, &sx, &sy) != 0) {
+        return 1.0e9f;
+    }
+    return SQ(sx - x) + SQ(sy - y);
+}
+
+int gdx_course_branch_editor_stored_node_at(float x, float y, int* fork, int* node) {
+    static f32 sNodes[GDX_BRANCH_EDIT_MAX_POINTS][3];
+    f32 best = EDITOR_NODE_PICK_RADIUS_SQ;
+    s32 forkPoint;
+    s32 mergePoint;
+    s32 nodes;
+    s32 found = 0;
+    s32 f;
+    s32 i;
+
+    /* Line up builds a selection point by point, and a switch of paths would clear it. */
+    if (gInCourseEditTestRun || (gMoveOption == MOVE_OPTION_STRAIGHT)) {
+        return 0;
+    }
+    for (i = 0; i < D_802CB6D0.controlPointCount; i++) {
+        if (editor_screen_distance_sq(D_802CB6D0.unk_0000[i].pos, x, y) < EDITOR_NODE_PICK_RADIUS_SQ) {
+            return 0;
+        }
+    }
+    for (f = 0; f < gdx_branch_edit_fork_count(); f++) {
+        nodes = gdx_branch_edit_fork_shape(f, &forkPoint, &mergePoint, sNodes, GDX_BRANCH_EDIT_MAX_POINTS);
+        for (i = 0; i < nodes; i++) {
+            Vec3f pos = { sNodes[i][0], sNodes[i][1], sNodes[i][2] };
+            f32 distance = editor_screen_distance_sq(pos, x, y);
+
+            if (distance < best) {
+                best = distance;
+                *fork = f;
+                *node = i;
+                found = 1;
+            }
+        }
+    }
+    return found;
+}
+
+/* Brings stored node `node` of fork f into the ring. Returns its ring index, or -1. */
+static s32 editor_swap_to_node(s32 fork, s32 node) {
+    s32 count = D_802CB6D0.controlPointCount;
+    int point = -1;
+    s32 newCount;
+
+    editor_export();
+    newCount = gdx_branch_edit_swap_to_node(sPoints, count, GDX_BRANCH_EDIT_MAX_POINTS, fork, node, &point);
+    if (newCount < 0) {
+        editor_refuse("Can't switch paths: a fork has no points on one path");
+        return -1;
+    }
+    editor_import(newCount);
+    gdx_course_edit_flash_message(gdx_branch_edit_view_b() ? "Showing path B" : "Showing path A");
+    return point;
+}
+
+void gdx_course_branch_editor_show_node(int fork, int node) {
+    s32 point = editor_swap_to_node(fork, node);
+
+    if (point >= 0) {
+        gdx_course_edit_select_point(point, 0);
+    }
+}
+
+void gdx_course_branch_editor_press_at_cursor(void) {
+    int fork;
+    int node;
+
+    if (gdx_course_branch_editor_stored_node_at(gCourseEditCursorXPos, gCourseEditCursorYPos, &fork, &node)) {
+        editor_swap_to_node(fork, node);
+    }
 }

@@ -68,6 +68,10 @@ GdxCourseEditInt32 gdx_course_edit_input_take_scalar_target(GdxCourseEditInt32* 
 void gdx_course_edit_input_request_line_up(void);
 GdxCourseEditInt32 gdx_course_edit_input_take_line_up(void);
 
+// A click on a node of the path not showing: fork index and node index within it.
+void gdx_course_edit_input_request_node_pick(GdxCourseEditInt32 fork, GdxCourseEditInt32 node);
+GdxCourseEditInt32 gdx_course_edit_input_take_node_pick(GdxCourseEditInt32* fork, GdxCourseEditInt32* node);
+
 // Bank snap. Banks are 0 to 359 degrees. A step of 0 means snap is off and returns the bank unchanged.
 // The next multiple of step strictly past bank, in the direction of the sign of direction.
 GdxCourseEditInt32 gdx_course_edit_bank_snap_next(GdxCourseEditInt32 bank, GdxCourseEditInt32 step,
