@@ -98,15 +98,16 @@ Options live in the enhancement menu, which opens with **F1**. Editing tools are
   segments, split nodes show in green, and a badge shows the active path.
 - **Lava strips:** left, right, middle or both sides. They drain energy and kill at zero, and CPU
   racers steer away from them. "Lava strips never kill" turns off the kill.
-- **Magnet traps:** thin pulsing rails on the left or right of the road that pull machines toward
-  the track edge, with their own warning sound and adjustable pull strength and range. CPU racers
+- **Magnet traps:** thin pulsing rails on the left, right or middle of the road. Side magnets pull
+  machines toward the track edge and middle magnets pull them onto the center line, with their own
+  warning sound and adjustable pull strength and range. CPU racers
   steer away from them. They can't be placed on pipes, half-pipes or cylinders.
 - **Mouse editing:** drag point position, height, width, bank and offset, with multi-select and
   box select. Create Machine has a mouse cursor too.
 - **Blender-style camera:** orbit and pan with a button you choose, and zoom with the wheel.
   Sensitivity and inversion are adjustable.
-- **Shaping tools:** bank snap at 45, 90 or 180 degrees, and lining up a run of three or more
-  points.
+- **Shaping tools:** bank snap at 45, 90 or 180 degrees, typing an exact bank, and lining up a run
+  of three or more points.
 - **Keys and help:** number-key shortcuts, rebindable tool keys, a hint strip for the current
   tool, and a Controls Help page showing your live bindings.
 - **Test drive:** choose the machine and engine, and drive in widescreen.

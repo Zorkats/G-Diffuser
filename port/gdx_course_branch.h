@@ -24,6 +24,14 @@
  * set for the editor and its test run) and builds ring 2. */
 void gdx_course_branch_on_course_init(void);
 
+/* End of Course_SegmentsInit, before the parts are built: picks the course's settings
+ * (gdx_course_settings_view.h) and finds which control point race segment 0 came from. */
+void gdx_course_branch_on_segments_init(const CourseSegment* ring, s32 count);
+
+/* The control point a race segment came from, which is what the settings are keyed by, or -1 when the ring
+ * does not match the course data. The editor's segments are its control points. */
+s32 gdx_course_branch_control_point(s32 segmentIndex);
+
 /* Rebuilds ring 2 from gdx_branch_active_set() for gCurrentCourseInfo, whose stock ring and chunk ring must
  * be built. Clears the runtime when the set is empty or does not fit the course. */
 void gdx_course_branch_build(void);

@@ -26,7 +26,21 @@ extern "C" {
 #define GDX_BRANCH_EDIT_MAX_POINTS 64
 
 /* Bytes of one saved edit state (undo snapshots). gdx_course_branch_edit.c checks it at compile time. */
-#define GDX_BRANCH_EDIT_STATE_BYTES 4352
+#define GDX_BRANCH_EDIT_STATE_BYTES 6144
+
+/* The values of one point (GdxPointExtras in gdx_course_settings.h), by index. */
+#define GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH 0
+#define GDX_BRANCH_EDIT_EXTRA_DIRT_WIDTH 1
+#define GDX_BRANCH_EDIT_EXTRA_ICE_WIDTH 2
+#define GDX_BRANCH_EDIT_EXTRA_MAGNET_STRENGTH 3
+#define GDX_BRANCH_EDIT_EXTRA_MAGNET_RANGE 4
+#define GDX_BRANCH_EDIT_EXTRA_COUNT 5
+
+/* The values of the whole track. */
+#define GDX_BRANCH_EDIT_TRACK_LAVA 0
+#define GDX_BRANCH_EDIT_TRACK_STRENGTH 1
+#define GDX_BRANCH_EDIT_TRACK_RANGE 2
+#define GDX_BRANCH_EDIT_TRACK_COUNT 3
 
 typedef struct GdxBranchEditPoint {
     float pos[3];
@@ -40,19 +54,33 @@ typedef struct GdxBranchEditPoint {
 /* Removes every part from point. A new path B point starts this way. */
 void gdx_branch_edit_point_clear_parts(GdxBranchEditPoint* point);
 
-/* Session. clear drops every fork and shows path A. select loads courseId's stored set when it was
- * saved for a ring of ringCount points (else clears), and removes the parts of any stored node that
- * has all nine set to 0, which older builds gave every new node. Both refresh the active set. */
+/* Session. clear drops every fork, every setting and shows path A. select loads courseId's stored set when it
+ * was saved for a ring of ringCount points (else clears), and removes the parts of any stored node that
+ * has all nine set to 0, which older builds gave every new node. It loads courseId's settings too: track values
+ * always, point values only for that ring length. Both refresh the active set and settings. */
 void gdx_branch_edit_clear(void);
 int gdx_branch_edit_select(const char* courseId, int ringCount);
 
-/* Stores the edit set under courseId (a set with no forks removes the entry). The A view must be
- * showing. Returns 0, or a negative code with reason filled when the set is invalid; then the entry is
- * removed so the saved course races path A only. */
-int gdx_branch_edit_commit(const char* courseId, int ringCount, unsigned int courseChecksum, char* reason, int cap);
+/* Gives every fork without one its own first segment style, taken from the fork point in ring. Call it when
+ * a fork appears (split, load), so a later design on that segment reaches one path only. */
+void gdx_branch_edit_first_fill(const GdxBranchEditPoint* ring, int ringCount);
+
+/* Stores the edit set and settings under courseId (nothing to store removes the entry). The A view must be
+ * showing. ring is the editor ring: a fork whose two paths start with the same style stores no value of its
+ * own. NULL keeps every value. Returns 0, or a negative code with reason filled when the set is invalid; then
+ * the fork entry is removed so the saved course races path A only. */
+int gdx_branch_edit_commit(const char* courseId, const GdxBranchEditPoint* ring, int ringCount,
+                           unsigned int courseChecksum, char* reason, int cap);
 
 int gdx_branch_edit_fork_count(void);
 int gdx_branch_edit_view_b(void);
+
+/* Values of the ring point the view shows at point, or of the whole track. which is one of the defines above.
+ * Set clamps to the value's range. 0 means not set. Each refreshes the active settings. */
+int gdx_branch_edit_point_extra(int point, int which);
+void gdx_branch_edit_set_point_extra(int point, int which, int value);
+int gdx_branch_edit_track_setting(int which);
+void gdx_branch_edit_set_track_setting(int which, int value);
 
 /* Fork whose segments F..M-1 include segment, or -1. */
 int gdx_branch_edit_fork_at(int segment);

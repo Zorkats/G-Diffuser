@@ -72,6 +72,8 @@ extern "C" void func_xk2_800EF78C(void);
 // Defined in gdx_course_edit_help.cpp and gdx_course_edit_history.cpp.
 void GdxCourseEditFlashMessage(const char* text);
 void GdxCourseEditDrawHistoryPanel(void);
+void GdxCourseEditDrawPartsPanel(void);
+int GdxCourseEditPartsPanelWantsMouse(void);
 
 namespace {
 
@@ -611,8 +613,10 @@ void CourseEditMouseCameraTick(void) {
 
 // Full S1/S4 gate: CVar on, in Course Edit or Create Machine, not test-driving (Course Edit only),
 // not grabbing geometry (Course Edit only), no menu/menubar up, and the OS cursor inside the game
-// blit rect. On success outX/outY receive the cursor position in 320x240 game space.
-bool CourseEditMousePosF(std::shared_ptr<Fast::Fast3dWindow>& wnd, float* outX, float* outY) {
+// blit rect. On success outX/outY receive the cursor position in 320x240 game space. A drag that is already
+// running passes allowOutside, so it follows the cursor past the blit rect and the window, off 0..320 and 0..240.
+bool CourseEditMousePosF(std::shared_ptr<Fast::Fast3dWindow>& wnd, float* outX, float* outY,
+                         bool allowOutside = false) {
     if (CVarGetInteger("gEnhancements.Input.CourseEditMouse", 0) == 0) {
         return false;
     }
@@ -629,7 +633,7 @@ bool CourseEditMousePosF(std::shared_ptr<Fast::Fast3dWindow>& wnd, float* outX, 
         return false;
     }
     Ship::Coords mouse = wnd->GetMousePos();
-    if (mouse.x < rx || mouse.x >= rx + rw || mouse.y < ry || mouse.y >= ry + rh) {
+    if (!allowOutside && (mouse.x < rx || mouse.x >= rx + rw || mouse.y < ry || mouse.y >= ry + rh)) {
         return false;
     }
     *outX = (mouse.x - rx) * 320.0f / rw;
@@ -741,6 +745,9 @@ extern "C" int gdx_mouse_steer_stick_x(void) {
 // S3: per-frame window mouse-grab for Course Edit / race mouse steering. Confines the OS cursor
 // to the game window while either mouse-steering mode is active and no ImGui menu is open.
 // Yields to F2 relative-mode capture; the backend restores this grab when capture is released.
+// A point drag lets go of the window, so it can run past the window edge, and the grab returns when it ends.
+static bool CourseEditPointDragRunning(void);
+
 extern "C" void gdx_course_edit_mouse_grab_tick(void) {
     std::shared_ptr<Fast::Fast3dWindow> wnd = CourseEditMouseWindow();
     if (wnd == nullptr || wnd->IsMouseCaptured()) {
@@ -753,7 +760,7 @@ extern "C" void gdx_course_edit_mouse_grab_tick(void) {
     bool wantGrab = false;
     if (!wnd->GetGui()->GetMenuOrMenubarVisible() && !CourseEditMouseInSubMenu()) {
         if ((CVarGetInteger("gEnhancements.Input.CourseEditMouse", 0) != 0) && CourseEditMouseModeActive()) {
-            wantGrab = true;
+            wantGrab = !CourseEditPointDragRunning();
         } else if (RaceMouseSteeringActive()) {
             wantGrab = true;
         }
@@ -813,6 +820,10 @@ extern "C" int gdx_course_edit_mouse_buttons(void) {
     }
     if (gdx_course_edit_mouse_camera_gesture_active() || sCourseEditDrag.state != DragState::Idle ||
         gdx_course_edit_native_mouse_owned() != 0) {
+        return 0;
+    }
+    // A click on the settings panel belongs to the panel. Chrome alone would still send it as A.
+    if (GdxCourseEditPartsPanelWantsMouse() != 0) {
         return 0;
     }
     // The line-up tool sends no A or B from the mouse. Clicks there only select and box select.
@@ -1097,6 +1108,37 @@ static bool GdxIsValidNameChar(char c) {
     return false;
 }
 
+// The digit a key types, by scancode so the keyboard layout doesn't matter: the number row and the numpad.
+// -1 for any other key.
+static int CourseEditDigitFromScancode(int scancode) {
+    if (scancode >= 2 && scancode <= 10) {
+        return scancode - 1;
+    }
+    if (scancode == 11 || scancode == 82) {
+        return 0;
+    }
+    if (scancode >= 79 && scancode <= 81) {
+        return scancode - 78;
+    }
+    if (scancode >= 75 && scancode <= 77) {
+        return scancode - 71;
+    }
+    if (scancode >= 71 && scancode <= 73) {
+        return scancode - 64;
+    }
+    return -1;
+}
+
+static bool CourseEditPointDragRunning(void) {
+    return sCourseEditDrag.state == DragState::Starting || sCourseEditDrag.state == DragState::Dragging;
+}
+
+// A typed bank value needs the Bank tool, an idle drag machine and something selected to apply it to.
+static bool CourseEditBankEntryAllowed(void) {
+    return CourseEditPointInputContextActive() && gMoveOption == 3 && CourseEditSelectionMask() != 0 &&
+        sCourseEditDrag.state == DragState::Idle && gdx_course_edit_native_mouse_owned() == 0;
+}
+
 extern "C" int gdx_course_edit_mouse_on_key(int lusScancode, int isDown) {
     if (lusScancode <= 0) {
         return 0;
@@ -1286,6 +1328,38 @@ extern "C" int gdx_course_edit_mouse_on_key(int lusScancode, int isDown) {
         !CourseEditMouseInSubMenu();
     // The selection, line-up, and history keys act only while the drag machine is idle and no native transaction runs.
     const bool dragIdle = sCourseEditDrag.state == DragState::Idle && gdx_course_edit_native_mouse_owned() == 0;
+    // While a bank value is being typed every key-down belongs to it, so the digits don't switch tools. Key-ups
+    // fall through, so a key that went down before the typing started can't stick.
+    if (gdx_course_edit_bank_entry_active()) {
+        if (!editorInput || !CourseEditBankEntryAllowed()) {
+            gdx_course_edit_bank_entry_cancel();
+        } else if (isDown) {
+            const int digit = CourseEditDigitFromScancode(lusScancode);
+            int32_t typed = 0;
+            if (digit >= 0) {
+                gdx_course_edit_bank_entry_push_digit(digit);
+            } else if (lusScancode == 12 || lusScancode == 74) {
+                gdx_course_edit_bank_entry_toggle_sign();
+            } else if (lusScancode == 14) {
+                gdx_course_edit_bank_entry_backspace();
+            } else if (lusScancode == 1) {
+                gdx_course_edit_bank_entry_cancel();
+                sEditorEscOwned = true;
+            } else if (lusScancode == 28 || lusScancode == 284) {
+                sEnterOwned = true;
+                if (gdx_course_edit_bank_entry_commit(&typed)) {
+                    gdx_course_edit_input_request_bank_value(gdx_course_edit_bank_value_normalize(typed));
+                }
+            }
+            return 1;
+        }
+    }
+    if (isDown && !enterWasHeld && (lusScancode == 28 || lusScancode == 284) && editorInput &&
+        CourseEditBankEntryAllowed()) {
+        sEnterOwned = true;
+        gdx_course_edit_bank_entry_begin();
+        return 1;
+    }
     if (editorInput && lusScancode == 1 && isDown) {
         // Esc cancels a drag or transaction first, then clears a non-empty selection on the point screen.
         if (!dragIdle) {
@@ -1753,6 +1827,7 @@ public:
         if (CVarGetInteger("gEnhancements.CourseEdit.HistoryPanel", 0) != 0) {
             GdxCourseEditDrawHistoryPanel();
         }
+        GdxCourseEditDrawPartsPanel();
     }
     void DrawElement() override {}
     void InitElement() override {}
@@ -1771,6 +1846,10 @@ constexpr int32_t kMoveOptionCount = 7;
 
 // Course Edit UI regions where LMB should keep its normal A meaning even in point mode.
 bool CourseEditMouseOverChrome(int32_t x, int32_t y) {
+    // The settings panel stops point picks and drags starting under it.
+    if (GdxCourseEditPartsPanelWantsMouse() != 0) {
+        return true;
+    }
     // Top menu bar (icon row).
     if (y < 56) {
         return true;
@@ -1893,6 +1972,10 @@ extern "C" void gdx_course_edit_mouse_drag_tick(void) {
     leftHeld = lmb;
     rightHeld = rmb;
 
+    // A click, a tool change or an emptied selection ends the typing, not only the next key.
+    if (gdx_course_edit_bank_entry_active() && !CourseEditBankEntryAllowed()) {
+        gdx_course_edit_bank_entry_cancel();
+    }
     if (wnd == nullptr || wnd->IsMouseCaptured() || wnd->GetGui()->GetMenuOrMenubarVisible() ||
         CourseEditMouseInSubMenu() || CVarGetInteger("gEnhancements.Input.CourseEditMouse", 0) == 0 ||
         !CourseEditEditorActive() || (!GdxDragEnabled() && gMoveOption != 5 && gMoveOption != 6)) {
@@ -1923,7 +2006,7 @@ extern "C" void gdx_course_edit_mouse_drag_tick(void) {
 
     float gameX = 0.0f;
     float gameY = 0.0f;
-    bool havePos = CourseEditMousePosF(wnd, &gameX, &gameY);
+    bool havePos = CourseEditMousePosF(wnd, &gameX, &gameY, CourseEditPointDragRunning());
     const int32_t x = static_cast<int32_t>(gameX);
     const int32_t y = static_cast<int32_t>(gameY);
     // Window pixels, not game pixels: the drag threshold is measured on the real pointer.

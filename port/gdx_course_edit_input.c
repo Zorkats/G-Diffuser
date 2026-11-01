@@ -25,6 +25,14 @@ static GdxCourseEditInt32 sLineUpPending;
 static GdxCourseEditInt32 sNodePickPending;
 static GdxCourseEditInt32 sNodePickFork;
 static GdxCourseEditInt32 sNodePickNode;
+static GdxCourseEditInt32 sExtraPending;
+static GdxCourseEditExtraRequest sExtra;
+static GdxCourseEditInt32 sBankValuePending;
+static GdxCourseEditInt32 sBankValue;
+static GdxCourseEditInt32 sBankEntryActive;
+static GdxCourseEditInt32 sBankEntryLength;
+// A sign, four digits and the end of the string.
+static char sBankEntryText[6];
 
 void gdx_course_edit_input_request_drag_start(GdxCourseEditInt32 point_index) {
     sDragStartPoint = point_index;
@@ -211,6 +219,95 @@ GdxCourseEditInt32 gdx_course_edit_bank_snap_nearest(GdxCourseEditInt32 bank, Gd
     return (((bank + (step / 2)) / step) * step) % 360;
 }
 
+void gdx_course_edit_bank_entry_begin(void) {
+    sBankEntryActive = 1;
+    sBankEntryLength = 0;
+    sBankEntryText[0] = '\0';
+}
+
+void gdx_course_edit_bank_entry_cancel(void) {
+    sBankEntryActive = 0;
+}
+
+GdxCourseEditInt32 gdx_course_edit_bank_entry_active(void) {
+    return sBankEntryActive;
+}
+
+void gdx_course_edit_bank_entry_push_digit(GdxCourseEditInt32 digit) {
+    GdxCourseEditInt32 digits = sBankEntryLength - ((sBankEntryText[0] == '-') ? 1 : 0);
+
+    if (!sBankEntryActive || digit < 0 || digit > 9 || digits >= 4) {
+        return;
+    }
+    sBankEntryText[sBankEntryLength++] = (char) ('0' + digit);
+    sBankEntryText[sBankEntryLength] = '\0';
+}
+
+void gdx_course_edit_bank_entry_toggle_sign(void) {
+    GdxCourseEditInt32 i;
+
+    if (!sBankEntryActive) {
+        return;
+    }
+    if (sBankEntryText[0] == '-') {
+        for (i = 0; i < sBankEntryLength; i++) {
+            sBankEntryText[i] = sBankEntryText[i + 1];
+        }
+        sBankEntryLength--;
+    } else {
+        for (i = sBankEntryLength + 1; i > 0; i--) {
+            sBankEntryText[i] = sBankEntryText[i - 1];
+        }
+        sBankEntryText[0] = '-';
+        sBankEntryLength++;
+    }
+}
+
+void gdx_course_edit_bank_entry_backspace(void) {
+    if (sBankEntryActive && sBankEntryLength > 0) {
+        sBankEntryText[--sBankEntryLength] = '\0';
+    }
+}
+
+const char* gdx_course_edit_bank_entry_text(void) {
+    return sBankEntryText;
+}
+
+GdxCourseEditInt32 gdx_course_edit_bank_entry_commit(GdxCourseEditInt32* typed) {
+    GdxCourseEditInt32 negative = sBankEntryText[0] == '-';
+    GdxCourseEditInt32 value = 0;
+    GdxCourseEditInt32 i;
+
+    if (!sBankEntryActive || sBankEntryLength == negative) {
+        sBankEntryActive = 0;
+        return 0;
+    }
+    for (i = negative; i < sBankEntryLength; i++) {
+        value = (value * 10) + (sBankEntryText[i] - '0');
+    }
+    *typed = negative ? -value : value;
+    sBankEntryActive = 0;
+    return 1;
+}
+
+GdxCourseEditInt32 gdx_course_edit_bank_value_normalize(GdxCourseEditInt32 typed) {
+    return gdx_course_edit_bank_snap_nearest(((typed % 360) + 360) % 360, 3);
+}
+
+void gdx_course_edit_input_request_bank_value(GdxCourseEditInt32 bank) {
+    sBankValue = bank;
+    sBankValuePending = 1;
+}
+
+GdxCourseEditInt32 gdx_course_edit_input_take_bank_value(GdxCourseEditInt32* bank) {
+    if (!sBankValuePending) {
+        return 0;
+    }
+    *bank = sBankValue;
+    sBankValuePending = 0;
+    return 1;
+}
+
 void gdx_course_edit_input_clear_drag(void) {
     sDragStartPending = 0;
     sDragCommitPending = 0;
@@ -235,6 +332,23 @@ GdxCourseEditInt32 gdx_course_edit_input_take_node_pick(GdxCourseEditInt32* fork
     return 1;
 }
 
+void gdx_course_edit_input_request_extra(const GdxCourseEditExtraRequest* request) {
+    GdxCourseEditInt32 begin = request->begin_edit || (sExtraPending && sExtra.begin_edit);
+
+    sExtra = *request;
+    sExtra.begin_edit = begin;
+    sExtraPending = 1;
+}
+
+GdxCourseEditInt32 gdx_course_edit_input_take_extra(GdxCourseEditExtraRequest* request) {
+    if (!sExtraPending) {
+        return 0;
+    }
+    *request = sExtra;
+    sExtraPending = 0;
+    return 1;
+}
+
 void gdx_course_edit_input_clear(void) {
     sSelectionAddMask = 0;
     sSelectionAddPending = 0;
@@ -243,4 +357,7 @@ void gdx_course_edit_input_clear(void) {
     sSelectionPending = 0;
     sLineUpPending = 0;
     sNodePickPending = 0;
+    sExtraPending = 0;
+    sBankValuePending = 0;
+    sBankEntryActive = 0;
 }

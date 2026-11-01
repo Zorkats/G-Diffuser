@@ -6,6 +6,8 @@
 
 #include "../gdx_course_branch_edit.h"
 #include "../gdx_course_branch_format.h"
+#include "../gdx_course_settings.h"
+#include "../gdx_course_settings_view.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -266,14 +268,14 @@ static void test_undo_state_and_commit(void) {
     gdx_branch_edit_state_load(state);
     CHECK(gdx_branch_edit_fork_count() == 1, "state load brings the fork back");
 
-    CHECK(gdx_branch_edit_commit("TEST.CRSD", sCount, 1234u, reason, sizeof(reason)) == 0, "commit stores the set");
+    CHECK(gdx_branch_edit_commit("TEST.CRSD", NULL, sCount, 1234u, reason, sizeof(reason)) == 0, "commit stores the set");
     CHECK(gdx_branch_store_get("TEST.CRSD", &stored) && (stored.forkCount == 1) && (stored.ringCount == sCount),
           "store holds the committed set");
     gdx_branch_edit_clear();
     CHECK(gdx_branch_edit_select("TEST.CRSD", sCount) == 1, "select loads the stored set");
     CHECK(gdx_branch_edit_select("TEST.CRSD", sCount + 1) == 0, "select ignores a set for another ring length");
     gdx_branch_edit_clear();
-    CHECK(gdx_branch_edit_commit("TEST.CRSD", sCount, 1234u, reason, sizeof(reason)) == 0 &&
+    CHECK(gdx_branch_edit_commit("TEST.CRSD", NULL, sCount, 1234u, reason, sizeof(reason)) == 0 &&
               !gdx_branch_store_get("TEST.CRSD", &stored),
           "committing no forks removes the entry");
 }
@@ -339,7 +341,7 @@ static void test_select_repairs_old_parts(void) {
     gdx_branch_edit_point_clear_parts(&nodes[1]);
     nodes[1].parts[0] = 0; /* one part the user placed */
     CHECK(gdx_branch_edit_span_commit(3, 6, nodes, 2) == 0, "span commit with old parts");
-    CHECK(gdx_branch_edit_commit("OLD.CRSD", sCount, 1234u, reason, sizeof(reason)) == 0, "commit stores old parts");
+    CHECK(gdx_branch_edit_commit("OLD.CRSD", NULL, sCount, 1234u, reason, sizeof(reason)) == 0, "commit stores old parts");
     gdx_branch_edit_clear();
     CHECK(gdx_branch_edit_select("OLD.CRSD", sCount) == 1, "select loads old parts");
     fork = fork_of(0);
@@ -347,7 +349,7 @@ static void test_select_repairs_old_parts(void) {
     CHECK((fork != NULL) && (fork->nodes[1].pit == 0) && (fork->nodes[1].dash == GDX_BRANCH_EDIT_PART_NONE),
           "select keeps a part the user placed");
     gdx_branch_edit_clear();
-    gdx_branch_edit_commit("OLD.CRSD", sCount, 1234u, reason, sizeof(reason));
+    gdx_branch_edit_commit("OLD.CRSD", NULL, sCount, 1234u, reason, sizeof(reason));
 }
 
 static void test_translate(void) {
@@ -466,6 +468,174 @@ static void test_swap_to_node(void) {
           "swap to node refuses a ring that would not fit");
 }
 
+/* Styles sit on the segment after their point. Fork at 2..5, interior 3 and 4, path B two nodes. */
+static void test_first_style(void) {
+    GdxBranchEditPoint nodes[2];
+    GdxBranchSet stored;
+    char reason[96];
+    int dropped;
+    const GdxBranchFork* fork;
+
+    make_ring(8);
+    gdx_branch_edit_clear();
+    gdx_branch_edit_sync(sCount);
+    sRing[2].trackSegmentInfo = 20;
+    memset(nodes, 0, sizeof(nodes));
+    nodes[0].pos[0] = 3000.0f;
+    nodes[0].trackSegmentInfo = 30;
+    nodes[1].pos[0] = 4000.0f;
+    nodes[1].trackSegmentInfo = 40;
+    gdx_branch_edit_span_commit(2, 5, nodes, 2);
+    gdx_branch_edit_first_fill(sRing, sCount);
+    fork = fork_of(0);
+    CHECK((fork != NULL) && (fork->flags & GDX_BRANCH_FLAG_FIRST_INFO) && (fork->firstInfo == 20),
+          "a new fork's path B starts with the style of the fork point");
+
+    /* A design on the fork's first segment in the A view reaches path A only. */
+    sRing[2].trackSegmentInfo = 21;
+    sCount = gdx_branch_edit_swap(sRing, sCount, GDX_BRANCH_EDIT_MAX_POINTS, &dropped);
+    CHECK(gdx_branch_edit_view_b() && (sRing[2].trackSegmentInfo == 20), "showing path B shows its own first style");
+    fork = fork_of(0);
+    CHECK((fork != NULL) && (fork->firstInfo == 21), "path A's first style is kept while path B shows");
+    sRing[2].trackSegmentInfo = 22;
+    sCount = gdx_branch_edit_swap(sRing, sCount, GDX_BRANCH_EDIT_MAX_POINTS, &dropped);
+    CHECK(!gdx_branch_edit_view_b() && (sRing[2].trackSegmentInfo == 21), "path A comes back with its first style");
+    fork = fork_of(0);
+    CHECK((fork != NULL) && (fork->firstInfo == 22), "path B keeps the style designed while it showed");
+
+    CHECK(gdx_branch_edit_commit("FIRST.CRSD", sRing, sCount, 1u, reason, sizeof(reason)) == 0 &&
+              gdx_branch_store_get("FIRST.CRSD", &stored) && (stored.forks[0].flags & GDX_BRANCH_FLAG_FIRST_INFO) &&
+              (stored.forks[0].firstInfo == 22),
+          "paths that differ store the value");
+    sRing[2].trackSegmentInfo = 22;
+    CHECK(gdx_branch_edit_commit("FIRST.CRSD", sRing, sCount, 1u, reason, sizeof(reason)) == 0 &&
+              gdx_branch_store_get("FIRST.CRSD", &stored) && !(stored.forks[0].flags & GDX_BRANCH_FLAG_FIRST_INFO) &&
+              (stored.forks[0].firstInfo == 0),
+          "paths that agree store nothing, so older builds can read the set");
+    fork = fork_of(0);
+    CHECK((fork != NULL) && (fork->flags & GDX_BRANCH_FLAG_FIRST_INFO),
+          "the edit set keeps the value after a commit");
+
+    /* Reverse: the segments of path B run the other way, so the styles rotate by one. */
+    gdx_branch_edit_clear();
+    gdx_branch_edit_sync(sCount);
+    gdx_branch_edit_span_commit(2, 5, nodes, 2);
+    sRing[2].trackSegmentInfo = 20;
+    gdx_branch_edit_first_fill(sRing, sCount);
+    gdx_branch_edit_on_reverse(sCount);
+    fork = fork_of(0);
+    /* Old segments: F-n0 20, n0-n1 30, n1-M 40. New order: F-n1 40, n1-n0 30, n0-M 20. */
+    CHECK((fork != NULL) && (fork->firstInfo == 40), "reverse gives the first segment the old last style");
+    CHECK((fork != NULL) && (fork->nodes[0].pos[0] == 4000.0f) && (fork->nodes[0].trackSegmentInfo == 30),
+          "reverse gives the first node the style of the segment that now follows it");
+    CHECK((fork != NULL) && (fork->nodes[1].pos[0] == 3000.0f) && (fork->nodes[1].trackSegmentInfo == 20),
+          "reverse gives the last node the old first style");
+    gdx_branch_edit_clear();
+    gdx_branch_edit_commit("FIRST.CRSD", NULL, sCount, 1u, reason, sizeof(reason));
+}
+
+static void test_extras(void) {
+    static unsigned char state[GDX_BRANCH_EDIT_STATE_BYTES];
+    GdxBranchEditPoint nodes[2];
+    char reason[96];
+    int dropped;
+    const GdxBranchFork* fork;
+
+    make_ring(8);
+    gdx_branch_edit_clear();
+    gdx_branch_edit_sync(sCount);
+    CHECK(gdx_settings_active() == NULL, "no values publishes nothing");
+
+    gdx_branch_edit_set_point_extra(3, GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH, 50);
+    CHECK(gdx_branch_edit_point_extra(3, GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH) == 50, "a point keeps its width");
+    CHECK(gdx_settings_view_pit_width(3) == 50, "the race reads the value as soon as it changes");
+    gdx_branch_edit_set_point_extra(4, GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH, 400);
+    CHECK(gdx_branch_edit_point_extra(4, GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH) == GDX_SETTINGS_WIDTH_MAX, "a width stops at its maximum");
+    gdx_branch_edit_set_point_extra(4, GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH, 0);
+    gdx_branch_edit_set_point_extra(4, GDX_BRANCH_EDIT_EXTRA_MAGNET_STRENGTH, 5);
+    CHECK(gdx_branch_edit_point_extra(4, GDX_BRANCH_EDIT_EXTRA_MAGNET_STRENGTH) == GDX_SETTINGS_STRENGTH_MIN,
+          "a strength stops at its minimum");
+    gdx_branch_edit_set_point_extra(4, GDX_BRANCH_EDIT_EXTRA_MAGNET_STRENGTH, 0);
+    CHECK(gdx_branch_edit_point_extra(4, GDX_BRANCH_EDIT_EXTRA_MAGNET_STRENGTH) == 0, "0 clears a value");
+    gdx_branch_edit_set_point_extra(99, GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH, 50);
+    CHECK(gdx_branch_edit_point_extra(99, GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH) == 0, "a point out of the ring has no value");
+
+    /* Point 3's value follows its segment through the ring edits. */
+    ring_insert(1, 1500.0f);
+    CHECK((gdx_branch_edit_point_extra(4, GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH) == 50) &&
+              (gdx_branch_edit_point_extra(3, GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH) == 0),
+          "an insert before the point moves its value");
+    /* A segment cut in two, with the part on both halves: both keep the value. */
+    sRing[4].parts[0] = 2;
+    sRing[5] = sRing[4];
+    gdx_branch_edit_on_insert(5, sRing, sCount);
+    CHECK((gdx_branch_edit_point_extra(5, GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH) == 50) &&
+              (gdx_branch_edit_point_extra(4, GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH) == 50),
+          "an insert that keeps the part keeps its width on both halves");
+    gdx_branch_edit_on_delete(5);
+    ring_delete(1);
+    CHECK((gdx_branch_edit_point_extra(3, GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH) == 50) &&
+              (gdx_branch_edit_point_extra(4, GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH) == 0),
+          "a delete moves the value back");
+    gdx_branch_edit_on_rotate(2, sCount);
+    CHECK(gdx_branch_edit_point_extra(1, GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH) == 50, "a rotate moves the value with its segment");
+    gdx_branch_edit_on_rotate(sCount - 2, sCount);
+    gdx_branch_edit_on_reverse(sCount);
+    CHECK(gdx_branch_edit_point_extra(5, GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH) == 50,
+          "a reverse gives segment 3 of 8 the index 5, where its point lands");
+    gdx_branch_edit_on_reverse(sCount);
+    CHECK(gdx_branch_edit_point_extra(3, GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH) == 50, "a second reverse brings it back");
+
+    /* The whole track. */
+    gdx_branch_edit_set_track_setting(GDX_BRANCH_EDIT_TRACK_LAVA, GDX_SETTINGS_LAVA_NEVER_KILLS);
+    gdx_branch_edit_set_track_setting(GDX_BRANCH_EDIT_TRACK_RANGE, 120);
+    CHECK((gdx_settings_view_lava_mode() == GDX_SETTINGS_LAVA_NEVER_KILLS) && (gdx_settings_view_magnet_range(0) == 120.0f),
+          "the race reads the track's values");
+    gdx_branch_edit_set_track_setting(GDX_BRANCH_EDIT_TRACK_LAVA, 9);
+    CHECK(gdx_branch_edit_track_setting(GDX_BRANCH_EDIT_TRACK_LAVA) == GDX_SETTINGS_LAVA_NEVER_KILLS, "a lava mode stops at its maximum");
+
+    /* Undo holds the values. */
+    gdx_branch_edit_state_save(state);
+    CHECK(gdx_branch_edit_state_equal(state), "the saved state matches");
+    gdx_branch_edit_set_point_extra(3, GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH, 70);
+    CHECK(!gdx_branch_edit_state_equal(state), "a changed value is a changed state");
+    gdx_branch_edit_state_load(state);
+    CHECK((gdx_branch_edit_point_extra(3, GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH) == 50) && (gdx_settings_view_pit_width(3) == 50),
+          "loading the state brings the value back and publishes it");
+
+    /* Saving a course and opening it again. */
+    CHECK(gdx_branch_edit_commit("EXTRA.CRSD", sRing, sCount, 1u, reason, sizeof(reason)) == 0, "a commit stores the values");
+    gdx_branch_edit_clear();
+    CHECK((gdx_settings_active() == NULL) && (gdx_branch_edit_point_extra(3, GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH) == 0),
+          "clear drops the values and what the race reads");
+    gdx_branch_edit_select("EXTRA.CRSD", sCount);
+    CHECK((gdx_branch_edit_point_extra(3, GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH) == 50) &&
+              (gdx_branch_edit_track_setting(GDX_BRANCH_EDIT_TRACK_RANGE) == 120),
+          "selecting the course brings the values back");
+
+    /* Each path keeps its own values through a swap. */
+    gdx_branch_edit_clear();
+    gdx_branch_edit_sync(sCount);
+    memset(nodes, 0, sizeof(nodes));
+    nodes[0].pos[0] = 3000.0f;
+    nodes[1].pos[0] = 4000.0f;
+    gdx_branch_edit_span_commit(2, 5, nodes, 2);
+    gdx_branch_edit_set_point_extra(3, GDX_BRANCH_EDIT_EXTRA_ICE_WIDTH, 40);
+    sCount = gdx_branch_edit_swap(sRing, sCount, GDX_BRANCH_EDIT_MAX_POINTS, &dropped);
+    CHECK(gdx_branch_edit_view_b() && (gdx_branch_edit_point_extra(3, GDX_BRANCH_EDIT_EXTRA_ICE_WIDTH) == 0),
+          "path B does not show path A's value");
+    gdx_branch_edit_set_point_extra(3, GDX_BRANCH_EDIT_EXTRA_ICE_WIDTH, 60);
+    sCount = gdx_branch_edit_swap(sRing, sCount, GDX_BRANCH_EDIT_MAX_POINTS, &dropped);
+    fork = fork_of(0);
+    CHECK((gdx_branch_edit_point_extra(3, GDX_BRANCH_EDIT_EXTRA_ICE_WIDTH) == 40) && (fork != NULL) &&
+              (fork->nodes[0].extras.iceWidth == 60),
+          "the swap back restores path A and keeps path B's value on its node");
+
+    gdx_branch_edit_clear();
+    gdx_branch_edit_commit("EXTRA.CRSD", NULL, sCount, 1u, reason, sizeof(reason));
+    gdx_settings_store_clear();
+}
+
 int main(void) {
     test_split_and_swap();
     test_link_and_asymmetric_swap();
@@ -476,6 +646,8 @@ int main(void) {
     test_select_repairs_old_parts();
     test_translate();
     test_swap_to_node();
+    test_first_style();
+    test_extras();
     if (sFailures != 0) {
         printf("%d course branch edit test(s) failed\n", sFailures);
         return 1;

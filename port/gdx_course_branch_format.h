@@ -15,13 +15,14 @@
  * GXB1 block (little-endian):
  *
  *   0x00  magic            "GXB1"
- *   0x04  version          u16 = 1
+ *   0x04  version          u16, 1 or 2
  *   0x06  forkCount        u8, 0..GDX_BRANCH_MAX_FORKS
  *   0x07  ringCount        u8
  *   0x08  bindCrc          u32, CRC-32 of the bytes this block is bound to
  *   0x0C  courseChecksum   u32, the course checksum the forks belong to
  *   0x10  forks            forkCount x {
  *                            u8 forkPoint, u8 mergePoint, u8 flags, u8 nodeCount,
+ *                            [s32 firstInfo, version 2 with flag bit1 only],
  *                            nodeCount x 32-byte node }
  *   end-4 crc32            u32, CRC-32 over every byte before it (IEEE, zlib polynomial)
  *
@@ -32,6 +33,12 @@
  * Forks are stored in increasing forkPoint order. S71's overlap check is
  * mergePoint <= next forkPoint, so two forks may meet at one ring point and may not overlap.
  * Flag bit0 is GDX_BRANCH_FLAG_SYMMETRIC. Version 1 defines no other flag bit.
+ *
+ * The segment from F to the first node belongs to one path, but its style sits on F, a point both paths
+ * share. Flag bit1 (GDX_BRANCH_FLAG_FIRST_INFO, version 2) gives the stored path its own value: firstInfo
+ * is the trackSegmentInfo of the stored path's first segment. Without the bit both paths use F's value.
+ * Encode writes version 1 when no fork has the bit, so a set that needs nothing new still loads on older
+ * builds, which refuse any version above 1.
  *
  * GBS1 state file, separate from GXS1 on purpose (the GXS1 decoder rejects unknown flags, so an
  * older build must never see fork bytes inside the element store):
@@ -63,15 +70,17 @@ extern "C" {
 #define GDX_BRANCH_MAX_NODES 32
 #define GDX_BRANCH_MAX_TOTAL_POINTS 64
 #define GDX_BRANCH_FLAG_SYMMETRIC 0x01u
+#define GDX_BRANCH_FLAG_FIRST_INFO 0x02u
 
 /* Same limit as the registry store: course id "NAME.CRSD", 20 + '.' + 4. */
 #define GDX_BRANCH_COURSE_ID_MAX 25
 #define GDX_BRANCH_STORE_SLOTS 128
 
-#define GDX_BRANCH_BLOCK_VERSION 1
+#define GDX_BRANCH_BLOCK_VERSION 2
+#define GDX_BRANCH_BLOCK_VERSION_V1 1
 #define GDX_BRANCH_BLOCK_HEADER_SIZE 16
 #define GDX_BRANCH_NODE_BYTES 32
-#define GDX_BRANCH_FORK_WIRE_MAX (4 + GDX_BRANCH_MAX_NODES * GDX_BRANCH_NODE_BYTES)
+#define GDX_BRANCH_FORK_WIRE_MAX (4 + 4 + GDX_BRANCH_MAX_NODES * GDX_BRANCH_NODE_BYTES)
 #define GDX_BRANCH_BLOCK_MIN_BYTES (GDX_BRANCH_BLOCK_HEADER_SIZE + 4)
 #define GDX_BRANCH_BLOCK_MAX_BYTES \
     (GDX_BRANCH_BLOCK_HEADER_SIZE + GDX_BRANCH_MAX_FORKS * GDX_BRANCH_FORK_WIRE_MAX + 4)
@@ -94,12 +103,12 @@ extern "C" {
 #define GDX_BRANCH_ERR_TOTAL (-7)      /* ring points plus every B node exceed 64 */
 #define GDX_BRANCH_ERR_SYMMETRIC (-8)  /* symmetric nodeCount is not the path A length */
 #define GDX_BRANCH_ERR_FLOAT (-9)      /* a used node position is not finite */
-#define GDX_BRANCH_ERR_FLAGS (-10)     /* a flag bit other than bit0 is set */
+#define GDX_BRANCH_ERR_FLAGS (-10)     /* a flag bit the block's version does not define is set */
 #define GDX_BRANCH_ERR_RING (-11)      /* ringCount is negative or does not match the set */
 
 #define GDX_BRANCH_ERR_TRUNCATED (-20) /* shorter than the minimum block */
 #define GDX_BRANCH_ERR_MAGIC (-21)     /* not "GXB1" */
-#define GDX_BRANCH_ERR_VERSION (-22)   /* version is not 1 */
+#define GDX_BRANCH_ERR_VERSION (-22)   /* version is not 1 or 2 */
 #define GDX_BRANCH_ERR_CRC (-23)       /* trailing CRC-32 does not match the bytes */
 #define GDX_BRANCH_ERR_BINDING (-24)   /* block is bound to a different CRC-32 */
 #define GDX_BRANCH_ERR_LAYOUT (-25)    /* fork bytes do not fill the block, or a pad byte is not 0 */
@@ -112,6 +121,15 @@ extern "C" {
 #define GDX_BRANCH_FILE_ERR_LENGTH (-44)    /* fileLength or an entry size does not match the bytes */
 #define GDX_BRANCH_FILE_ERR_CRC (-45)       /* trailing CRC-32 does not match the bytes */
 #define GDX_BRANCH_FILE_ERR_ENTRY (-46)     /* bad course id, repeated id, or a forkless entry */
+
+/* Values of one point that the course data has no room for (gdx_course_settings.h). 0 is "not set". */
+typedef struct GdxPointExtras {
+    uint8_t pitWidth;
+    uint8_t dirtWidth;
+    uint8_t iceWidth;
+    uint8_t magnetStrength;
+    uint8_t magnetRange;
+} GdxPointExtras;
 
 /* One path B control point. Fixed size, no pointers. Not a file overlay. */
 typedef struct GdxBranchNode {
@@ -129,6 +147,7 @@ typedef struct GdxBranchNode {
     int8_t gate;
     int8_t building;
     int8_t sign;
+    GdxPointExtras extras; /* The editor's copy, so it follows the node. GXK1 stores it, never GXB1. */
 } GdxBranchNode;
 
 typedef struct GdxBranchFork {
@@ -136,6 +155,7 @@ typedef struct GdxBranchFork {
     uint8_t mergePoint;
     uint8_t flags;
     uint8_t nodeCount;
+    int32_t firstInfo; /* trackSegmentInfo of the stored path's first segment, with GDX_BRANCH_FLAG_FIRST_INFO */
     GdxBranchNode nodes[GDX_BRANCH_MAX_NODES];
 } GdxBranchFork;
 

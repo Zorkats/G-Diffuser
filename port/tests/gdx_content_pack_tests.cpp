@@ -92,6 +92,7 @@ size_t file_count(const fs::path& dir) {
 const std::string kContainer = "GXC1 container bytes";
 const std::string kExtension = "GXE1 extension bytes";
 const std::string kTitle = "GXT1 title bytes";
+const std::string kBranch = "GXD1 fork and settings bytes";
 const std::string kSong = noise(200000, 7);
 
 void stage_export(const fs::path& dir) {
@@ -99,6 +100,7 @@ void stage_export(const fs::path& dir) {
     write_file(dir / "Track One.gdxc", kContainer);
     write_file(dir / "Track One.gdxe", kExtension);
     write_file(dir / "Track One.gdxt", kTitle);
+    write_file(dir / "Track One.gdxb", kBranch);
     write_file(dir / "ocean_theme.ogg", kSong);
 }
 
@@ -114,9 +116,10 @@ void test_round_trip(const fs::path& root) {
     check(extract(pack, out, 1, &container) == GDX_CONTENT_PACK_OK && container == "Track One.gdxc",
           "extract accepts the package and names its container");
     check(read_file(out / "Track One.gdxc") == kContainer && read_file(out / "Track One.gdxe") == kExtension &&
-              read_file(out / "Track One.gdxt") == kTitle && read_file(out / "ocean_theme.ogg") == kSong,
+              read_file(out / "Track One.gdxt") == kTitle && read_file(out / "Track One.gdxb") == kBranch &&
+              read_file(out / "ocean_theme.ogg") == kSong,
           "extract restores every member byte for byte");
-    check(file_count(out) == 4, "extract writes nothing besides the members");
+    check(file_count(out) == 5, "extract writes nothing besides the members");
 
     int error = 0;
     zip_t* archive = zip_open(pack.string().c_str(), ZIP_RDONLY, &error);

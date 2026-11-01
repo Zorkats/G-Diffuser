@@ -7,6 +7,7 @@
 #include "gdx_course_music.h"
 #include "gdx_course_packs.h"
 #include "gdx_course_registry.h"
+#include "gdx_course_settings.h"
 #include "port_log.h"
 
 #include <cstdio>
@@ -18,8 +19,9 @@
 
 namespace {
 
-// Course Edit element choices, and the course forks (gdx_course_branch_format.h). Each store has its own
-// file and revision, so one store's edit never rewrites the other's file.
+// Course Edit element choices, the course forks (gdx_course_branch_format.h) and the per-track settings
+// (gdx_course_settings.h). Each store has its own file and revision, so one store's edit never rewrites
+// another store's file.
 struct StoreFile {
     const char* name;
     const char* label;
@@ -39,6 +41,9 @@ StoreFile sElementFile = { "course-elements.gdxs",        "course element store"
 StoreFile sForkFile = { "course-forks.gbs",               "course fork store",          GDX_BRANCH_FILE_MAX_BYTES,
                         gdx_branch_store_restore_file,    gdx_branch_store_encode_file, gdx_branch_store_revision,
                         false,                            0 };
+StoreFile sSettingsFile = { "course-settings.gks",           "course settings store",        GDX_SETTINGS_FILE_MAX_BYTES,
+                            gdx_settings_store_restore_file, gdx_settings_store_encode_file, gdx_settings_store_revision,
+                            false,                           0 };
 
 // Course id of the file the Course Edit course came from, empty when it has none.
 char sEditFileId[GDX_COURSE_FILE_ID_MAX + 1] = "";
@@ -171,17 +176,19 @@ extern "C" int gdx_course_boot(void) {
 }
 
 extern "C" int gdx_course_state_load(void) {
+    const int settings = store_load(&sSettingsFile);
     const int forks = store_load(&sForkFile);
     const int elements = store_load(&sElementFile);
 
-    return (elements < 0) ? elements : (forks < 0) ? forks : elements;
+    return (elements < 0) ? elements : (forks < 0) ? forks : (settings < 0) ? settings : elements;
 }
 
 extern "C" int gdx_course_state_flush(void) {
+    const int settings = store_flush(&sSettingsFile);
     const int forks = store_flush(&sForkFile);
     const int elements = store_flush(&sElementFile);
 
-    return (elements < 0) ? elements : (forks < 0) ? forks : elements;
+    return (elements < 0) ? elements : (forks < 0) ? forks : (settings < 0) ? settings : elements;
 }
 
 extern "C" void gdx_course_state_on_file_renamed(const char* oldName, const char* oldExtension,
@@ -199,6 +206,7 @@ extern "C" void gdx_course_state_on_file_renamed(const char* oldName, const char
     }
     gdx_course_boot();
     gdx_branch_store_rename(oldId, newId);
+    gdx_settings_store_rename(oldId, newId);
     rc = gdx_course_store_rename(oldId, newId);
     if (rc != GDX_COURSE_OK) {
         gdx_port_logf("[state] rename %s to %s: keys not moved (%d)\n", oldId, newId, rc);
@@ -222,6 +230,8 @@ extern "C" void gdx_course_state_on_file_deleted(const char* name, const char* e
     {
         const GdxBranchSet noForks{};
         gdx_branch_store_set(courseId, &noForks);
+        const GdxCourseSettings noSettings{};
+        gdx_settings_store_set(courseId, &noSettings);
     }
     gdx_course_state_flush();
 }

@@ -3,8 +3,61 @@
 #include "gdx_course_branch_view.h"
 #include "gdx_course_branch_format.h"
 
+#include <math.h>
+
 /* Fails to compile when the two limits drift apart. */
 typedef char GdxBranchViewMaxForksMatch[(GDX_BRANCH_VIEW_MAX_FORKS == GDX_BRANCH_MAX_FORKS) ? 1 : -1];
+
+/* A racer further above the other road than this is passing over it, not onto it. */
+#define LANE_MAX_HEIGHT 60.0f
+/* How far inside a chunk's edge reference (radius + 11.5) a point must be to count as on the road. */
+#define CHUNK_EDGE_INSET 20.0f
+#define CHUNK_MAX_HEIGHT 25.0f
+/* A point further along the road than this is past the chunk, whatever its side. */
+#define CHUNK_MAX_ALONG 300.0f
+
+int gdx_branch_view_lane_crossing(const GdxBranchLaneSample* current, const GdxBranchLaneSample* other) {
+    const int leftCurrent = (current->lateral > current->radiusLeft) || (current->lateral < -current->radiusRight);
+    const int onOther = (other->lateral <= other->radiusLeft) && (other->lateral >= -other->radiusRight);
+    const float height = (other->height < 0.0f) ? -other->height : other->height;
+
+    return leftCurrent && onOther && (height <= LANE_MAX_HEIGHT);
+}
+
+int gdx_branch_view_chunk_covers_point(const short point[3], const short center[3], const short left[3],
+                                       const short right[3], const short below[3]) {
+    float rel[3];
+    float axis[3];
+    float up[3];
+    float width = 0.0f;
+    float upLength = 0.0f;
+    float lateral = 0.0f;
+    float height = 0.0f;
+    float distanceSq = 0.0f;
+    float alongSq;
+    int i;
+
+    for (i = 0; i < 3; i++) {
+        rel[i] = (float) point[i] - (float) center[i];
+        axis[i] = (float) left[i] - (float) right[i];
+        up[i] = (float) center[i] - (float) below[i];
+        width += axis[i] * axis[i];
+        upLength += up[i] * up[i];
+        distanceSq += rel[i] * rel[i];
+    }
+    width = sqrtf(width);
+    upLength = sqrtf(upLength);
+    if ((width < 1.0f) || (upLength < 1.0f)) {
+        return 0;
+    }
+    for (i = 0; i < 3; i++) {
+        lateral += rel[i] * axis[i] / width;
+        height += rel[i] * up[i] / upLength;
+    }
+    alongSq = distanceSq - (lateral * lateral) - (height * height);
+    return (fabsf(lateral) <= (width / 2.0f) - CHUNK_EDGE_INSET) && (fabsf(height) <= CHUNK_MAX_HEIGHT) &&
+           (alongSq <= CHUNK_MAX_ALONG * CHUNK_MAX_ALONG);
+}
 
 int gdx_branch_view_select_course(const char* courseId) {
     GdxBranchSet set;
@@ -56,6 +109,16 @@ int gdx_branch_view_fork(int fork, int* forkPoint, int* mergePoint, int* nodeCou
     *forkPoint = data->forkPoint;
     *mergePoint = data->mergePoint;
     *nodeCount = data->nodeCount;
+    return 1;
+}
+
+int gdx_branch_view_fork_first_info(int fork, int* trackSegmentInfo) {
+    const GdxBranchFork* data = view_fork(fork);
+
+    if ((data == NULL) || ((data->flags & GDX_BRANCH_FLAG_FIRST_INFO) == 0)) {
+        return 0;
+    }
+    *trackSegmentInfo = data->firstInfo;
     return 1;
 }
 

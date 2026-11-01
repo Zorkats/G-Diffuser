@@ -144,8 +144,8 @@ int gdx_branch_validate(const GdxBranchSet* set, int ringCount, char* reason, si
         if (fork->nodeCount < 1 || fork->nodeCount > GDX_BRANCH_MAX_NODES) {
             return fail(reason, cap, GDX_BRANCH_ERR_COUNT, "node count must be 1 to 32");
         }
-        /* Version 1 defines only bit0. Ignoring another bit would drop it on the next encode. */
-        if ((fork->flags & (uint8_t) ~GDX_BRANCH_FLAG_SYMMETRIC) != 0) {
+        /* Ignoring an unknown bit would drop it on the next encode. */
+        if ((fork->flags & (uint8_t) ~(GDX_BRANCH_FLAG_SYMMETRIC | GDX_BRANCH_FLAG_FIRST_INFO)) != 0) {
             return fail(reason, cap, GDX_BRANCH_ERR_FLAGS, "fork flags have an unknown bit");
         }
         if (fork->forkPoint == 0) {
@@ -429,8 +429,23 @@ static size_t block_size(const GdxBranchSet* set) {
 
     for (i = 0; i < (int) set->forkCount; i++) {
         need += 4 + (size_t) set->forks[i].nodeCount * GDX_BRANCH_NODE_BYTES;
+        if ((set->forks[i].flags & GDX_BRANCH_FLAG_FIRST_INFO) != 0) {
+            need += 4;
+        }
     }
     return need;
+}
+
+/* Older builds refuse a version above 1, so version 2 is written only when a fork needs it. */
+static uint32_t block_version(const GdxBranchSet* set) {
+    int i;
+
+    for (i = 0; i < (int) set->forkCount; i++) {
+        if ((set->forks[i].flags & GDX_BRANCH_FLAG_FIRST_INFO) != 0) {
+            return GDX_BRANCH_BLOCK_VERSION;
+        }
+    }
+    return GDX_BRANCH_BLOCK_VERSION_V1;
 }
 
 int gdx_branch_encode(const GdxBranchSet* set, uint32_t bindCrc, unsigned char* out, size_t cap) {
@@ -456,7 +471,7 @@ int gdx_branch_encode(const GdxBranchSet* set, uint32_t bindCrc, unsigned char* 
     out[1] = 'X';
     out[2] = 'B';
     out[3] = '1';
-    put_u16le(out + 4, GDX_BRANCH_BLOCK_VERSION);
+    put_u16le(out + 4, block_version(set));
     out[6] = set->forkCount;
     out[7] = set->ringCount;
     put_u32le(out + 8, bindCrc);
@@ -470,6 +485,10 @@ int gdx_branch_encode(const GdxBranchSet* set, uint32_t bindCrc, unsigned char* 
         out[pos + 2] = fork->flags;
         out[pos + 3] = fork->nodeCount;
         pos += 4;
+        if ((fork->flags & GDX_BRANCH_FLAG_FIRST_INFO) != 0) {
+            put_s32le(out + pos, fork->firstInfo);
+            pos += 4;
+        }
         for (j = 0; j < (int) fork->nodeCount; j++) {
             put_node(out + pos, &fork->nodes[j]);
             pos += GDX_BRANCH_NODE_BYTES;
@@ -485,6 +504,7 @@ int gdx_branch_decode(const unsigned char* data, size_t length, uint32_t bindCrc
     size_t pos;
     unsigned forkCount;
     unsigned ringCount;
+    uint32_t version;
     int rc;
     int i;
     int j;
@@ -503,7 +523,8 @@ int gdx_branch_decode(const unsigned char* data, size_t length, uint32_t bindCrc
     if (data[0] != 'G' || data[1] != 'X' || data[2] != 'B' || data[3] != '1') {
         return GDX_BRANCH_ERR_MAGIC;
     }
-    if (get_u16le(data + 4) != GDX_BRANCH_BLOCK_VERSION) {
+    version = get_u16le(data + 4);
+    if (version != GDX_BRANCH_BLOCK_VERSION && version != GDX_BRANCH_BLOCK_VERSION_V1) {
         return GDX_BRANCH_ERR_VERSION;
     }
     end = length - 4;
@@ -540,6 +561,16 @@ int gdx_branch_decode(const unsigned char* data, size_t length, uint32_t bindCrc
         pos += 4;
         if (nodeCount > GDX_BRANCH_MAX_NODES) {
             return GDX_BRANCH_ERR_LAYOUT;
+        }
+        if ((fork->flags & GDX_BRANCH_FLAG_FIRST_INFO) != 0) {
+            if (version < GDX_BRANCH_BLOCK_VERSION) {
+                return GDX_BRANCH_ERR_FLAGS;
+            }
+            if (!bytes_fit(pos, end, 4)) {
+                return GDX_BRANCH_ERR_LAYOUT;
+            }
+            fork->firstInfo = get_s32le(data + pos);
+            pos += 4;
         }
         if (!bytes_fit(pos, end, (size_t) nodeCount * GDX_BRANCH_NODE_BYTES)) {
             return GDX_BRANCH_ERR_LAYOUT;
@@ -653,6 +684,7 @@ static void copy_set_clean(GdxBranchSet* dst, const GdxBranchSet* src) {
         dst->forks[i].mergePoint = src->forks[i].mergePoint;
         dst->forks[i].flags = src->forks[i].flags;
         dst->forks[i].nodeCount = src->forks[i].nodeCount;
+        dst->forks[i].firstInfo = src->forks[i].firstInfo;
         if (nodes > GDX_BRANCH_MAX_NODES) {
             nodes = GDX_BRANCH_MAX_NODES;
         }

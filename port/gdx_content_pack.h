@@ -1,11 +1,12 @@
 /* port/gdx_content_pack.h -- .gdxp share packages: one file that carries a whole export.
  *
- * A track or cup export is a .gdxc container plus up to three sidecars beside it (<stem>.gdxe extension
- * keys, <stem>.gdxt title, <stem>.gdxs bundle companion) and the audio of its custom BGM choices. A
+ * A track or cup export is a .gdxc container plus up to four sidecars beside it (<stem>.gdxe extension
+ * keys, <stem>.gdxt title, <stem>.gdxs bundle companion, <stem>.gdxb forks and settings) and the audio of
+ * its custom BGM choices. A
  * .gdxp is a plain zip of exactly those files, unchanged, so one file travels instead of several and an
  * older build can still import the files after unzipping them.
  *
- * Members must be plain file names (no folders), with a .gdxc, .gdxe, .gdxt, .gdxs, .ogg, .flac or .wav
+ * Members must be plain file names (no folders), with a .gdxc, .gdxe, .gdxt, .gdxs, .gdxb, .ogg, .flac or .wav
  * extension. A package holds exactly one .gdxc, and every sidecar shares its stem. Sizes are capped
  * before anything is read: a data member at GDX_CONTENT_PACK_MAX_DATA_BYTES, an audio member at
  * GDX_CONTENT_PACK_MAX_AUDIO_BYTES (the 7A copy limit) and the whole package at

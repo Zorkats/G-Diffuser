@@ -11,6 +11,7 @@
 #include "gdx_course_branch.h"
 #include "gdx_course_branch_edit.h"
 #include "gdx_course_branch_editor.h"
+#include "gdx_course_edit_input.h"
 #include "gdx_course_edit_undo.h"
 
 extern unk_807B3C20 D_802CB6D0;
@@ -134,6 +135,11 @@ static s32 editor_swap(void) {
     return 1;
 }
 
+static void editor_first_fill(void) {
+    editor_export();
+    gdx_branch_edit_first_fill(sPoints, D_802CB6D0.controlPointCount);
+}
+
 void gdx_course_branch_editor_on_insert(int newIndex) {
     editor_export();
     gdx_branch_edit_on_insert(newIndex, sPoints, D_802CB6D0.controlPointCount);
@@ -186,8 +192,9 @@ void gdx_course_branch_editor_saved(void) {
     if (!gdx_course_state_edit_file_id(courseId, sizeof(courseId))) {
         return;
     }
-    if (gdx_branch_edit_commit(courseId, D_802CB6D0.controlPointCount, COURSE_CONTEXT()->courseData.checksum, reason,
-                               sizeof(reason)) != 0) {
+    editor_export();
+    if (gdx_branch_edit_commit(courseId, sPoints, D_802CB6D0.controlPointCount, COURSE_CONTEXT()->courseData.checksum,
+                               reason, sizeof(reason)) != 0) {
         sprintf(text, "Forks not saved: %s", reason);
         gdx_course_edit_flash_message(text);
     }
@@ -202,6 +209,7 @@ void gdx_course_branch_editor_loaded(void) {
     sSplitStart = -1;
     if (gdx_course_state_edit_file_id(courseId, sizeof(courseId))) {
         gdx_branch_edit_select(courseId, D_802CB6D0.controlPointCount);
+        editor_first_fill();
     } else {
         gdx_branch_edit_clear();
     }
@@ -212,6 +220,62 @@ void gdx_course_branch_editor_new_course(void) {
     sLinkFork = -1;
     sSplitStart = -1;
     gdx_branch_edit_clear();
+}
+
+int gdx_course_branch_editor_active_point(void) {
+    s32 point = D_800D6CA0.unk_0C;
+
+    return ((point >= 0) && (point < D_802CB6D0.controlPointCount)) ? point : -1;
+}
+
+int gdx_course_branch_editor_point_parts(int point) {
+    const CourseData* courseData = &COURSE_CONTEXT()->courseData;
+    s32 parts = 0;
+
+    if ((point < 0) || (point >= D_802CB6D0.controlPointCount)) {
+        return 0;
+    }
+    if ((courseData->pit[point] == PIT_MAGNET_LEFT) || (courseData->pit[point] == PIT_MAGNET_RIGHT) ||
+        (courseData->pit[point] == PIT_MAGNET_MIDDLE)) {
+        parts |= GDX_BRANCH_EDITOR_PART_MAGNET;
+    } else if (courseData->pit[point] != PIT_NONE) {
+        parts |= GDX_BRANCH_EDITOR_PART_PIT;
+    }
+    if (courseData->dirt[point] != DIRT_NONE) {
+        parts |= GDX_BRANCH_EDITOR_PART_DIRT;
+    }
+    if (courseData->ice[point] != ICE_NONE) {
+        parts |= GDX_BRANCH_EDITOR_PART_ICE;
+    }
+    return parts;
+}
+
+void gdx_course_branch_editor_apply_extra(void) {
+    GdxCourseEditExtraRequest request;
+
+    if (!gdx_course_edit_input_take_extra(&request)) {
+        return;
+    }
+    if (gInCourseEditTestRun) {
+        return;
+    }
+    if (!request.is_track && ((request.point < 0) || (request.point >= D_802CB6D0.controlPointCount))) {
+        return;
+    }
+    if (request.begin_edit) {
+        gdx_course_edit_undo_set_pending_label(GDX_COURSE_EDIT_UNDO_LABEL_OPTION);
+        func_xk2_800EF78C();
+    }
+    if (request.is_track) {
+        gdx_branch_edit_set_track_setting(request.which, request.value);
+    } else {
+        gdx_branch_edit_set_point_extra(request.point, request.which, request.value);
+        /* A width changes the strips the effects were built with. */
+        if ((request.which == GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH) || (request.which == GDX_BRANCH_EDIT_EXTRA_DIRT_WIDTH) ||
+            (request.which == GDX_BRANCH_EDIT_EXTRA_ICE_WIDTH)) {
+            D_xk2_800F7040 = 3;
+        }
+    }
 }
 
 static s32 editor_tool_pressed(s32 style) {
@@ -416,6 +480,7 @@ static void editor_split_segment(s32 segment) {
     nodeB.bankAngle = (short) bankAverage;
     gdx_branch_edit_point_clear_parts(&nodeB);
     gdx_branch_edit_split_commit(segment, &nodeB);
+    editor_first_fill();
 
     func_i2_800BE8BC(gCurrentCourseInfo);
     func_80074CE4(gCurrentCourseInfo);
@@ -451,6 +516,7 @@ static void editor_split_span(s32 forkPoint, s32 mergePoint) {
     func_xk2_800EF78C();
     gdx_branch_edit_span_commit(forkPoint, mergePoint, (leftMargin >= rightMargin) ? sLeft : sRight,
                                 mergePoint - forkPoint - 1);
+    editor_first_fill();
     Audio_TriggerSystemSE(NA_SE_39);
     gdx_course_edit_flash_message("Split: path B added");
     D_xk2_800F7040 = 3;

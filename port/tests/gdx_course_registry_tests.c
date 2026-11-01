@@ -37,7 +37,7 @@ static void test_stock_tables(void) {
     check(gdx_course_registry_stock_count(GDX_COURSE_KIND_SKYBOX) == 8, "skybox has 8 stock entries");
     check(gdx_course_registry_stock_count(GDX_COURSE_KIND_BGM) == 14, "bgm has 14 stock entries (raw 0..13)");
     check(gdx_course_registry_stock_count(GDX_COURSE_KIND_PART_STYLE) == 9, "part style has 9 stock entries");
-    check(gdx_course_registry_stock_count(GDX_COURSE_KIND_TRACK_EFFECT) == 8, "track effect has 8 stock entries");
+    check(gdx_course_registry_stock_count(GDX_COURSE_KIND_TRACK_EFFECT) == 9, "track effect has 9 stock entries");
     check(gdx_course_registry_stock_count((GdxCourseKind) 9) == 0, "an invalid kind has no stock entries");
 
     for (kind = 0; kind < GDX_COURSE_KIND_COUNT; kind++) {
@@ -68,6 +68,7 @@ static void test_stock_tables(void) {
     check(stock_id_of(GDX_COURSE_KIND_TRACK_EFFECT, "effect.lava") == 5, "effect.lava is stock ID 5");
     check(stock_id_of(GDX_COURSE_KIND_TRACK_EFFECT, "effect.magnet_left") == 6, "effect.magnet_left is stock ID 6");
     check(stock_id_of(GDX_COURSE_KIND_TRACK_EFFECT, "effect.magnet_right") == 7, "effect.magnet_right is stock ID 7");
+    check(stock_id_of(GDX_COURSE_KIND_TRACK_EFFECT, "effect.magnet_middle") == 8, "effect.magnet_middle is stock ID 8");
     check(stock_id_of(GDX_COURSE_KIND_SKYBOX, "venue.ending") == -1, "a key only matches within its own kind");
     check(gdx_course_registry_find_stock(GDX_COURSE_KIND_VENUE, 11) == NULL, "find_stock rejects an ID past the table");
 }
