@@ -46,6 +46,8 @@ static s32 sLinkFork = -1;
 /* The segment a first Split press picked, or -1. */
 static s32 sSplitStart = -1;
 
+static s32 editor_swap_to_node(s32 fork, s32 node);
+
 static void editor_export(void) {
     CourseData* courseData = &COURSE_CONTEXT()->courseData;
     s32 i;
@@ -252,6 +254,25 @@ int gdx_course_branch_editor_point_parts(int point) {
 
 void gdx_course_branch_editor_apply_extra(void) {
     GdxCourseEditExtraRequest request;
+    GdxCourseEditInt32 path;
+    GdxCourseEditInt32 fork;
+    GdxCourseEditInt32 node;
+
+    if (gCreateOption == CREATE_OPTION_COURSE && gdx_course_edit_input_take_node_pick(&fork, &node) &&
+        !gInCourseEditTestRun && gdx_course_edit_native_grab_state() == 0 &&
+        gdx_course_edit_native_context_state() == 0 && gdx_course_edit_native_mouse_owned() == 0) {
+        gdx_course_branch_editor_show_node(fork, node);
+    }
+
+    if (gdx_course_edit_input_take_path(&path) && !gInCourseEditTestRun &&
+        gdx_course_edit_native_grab_state() == 0 && gdx_course_edit_native_context_state() == 0 &&
+        gdx_course_edit_native_mouse_owned() == 0 && gdx_course_branch_editor_path_showing() != 0 &&
+        path != gdx_course_branch_editor_path_showing()) {
+        if (editor_swap_to_node(0, 0) >= 0) {
+            // Point-indexed commands from the old ring must not edit the replacement ring.
+            gdx_course_edit_input_clear();
+        }
+    }
 
     if (!gdx_course_edit_input_take_extra(&request)) {
         return;
@@ -701,7 +722,7 @@ int gdx_course_branch_editor_stored_node_at(float x, float y, int* fork, int* no
     s32 i;
 
     /* Line up builds a selection point by point, and a switch of paths would clear it. */
-    if (gInCourseEditTestRun || (gMoveOption == MOVE_OPTION_STRAIGHT)) {
+    if (gInCourseEditTestRun || ((gCreateOption == CREATE_OPTION_POINT) && (gMoveOption == MOVE_OPTION_STRAIGHT))) {
         return 0;
     }
     for (i = 0; i < D_802CB6D0.controlPointCount; i++) {
@@ -747,6 +768,7 @@ void gdx_course_branch_editor_show_node(int fork, int node) {
     s32 point = editor_swap_to_node(fork, node);
 
     if (point >= 0) {
+        gdx_course_edit_input_clear();
         gdx_course_edit_select_point(point, 0);
     }
 }

@@ -826,6 +826,14 @@ extern "C" int gdx_course_edit_mouse_buttons(void) {
     if (GdxCourseEditPartsPanelWantsMouse() != 0) {
         return 0;
     }
+    if (CourseEditEditorActive() && gCreateOption == 0 && CourseEditCtrlHeld()) {
+        int fork;
+        int node;
+        if (sDragBlockedUntilRelease || gdx_course_branch_editor_stored_node_at(
+                static_cast<float>(gCourseEditCursorXPos), static_cast<float>(gCourseEditCursorYPos), &fork, &node)) {
+            return 0;
+        }
+    }
     // The line-up tool sends no A or B from the mouse. Clicks there only select and box select.
     if (CourseEditEditorActive() && gCreateOption == 1 && gMoveOption == 6) {
         return 0;
@@ -1133,9 +1141,10 @@ static bool CourseEditPointDragRunning(void) {
     return sCourseEditDrag.state == DragState::Starting || sCourseEditDrag.state == DragState::Dragging;
 }
 
-// A typed bank value needs the Bank tool, an idle drag machine and something selected to apply it to.
-static bool CourseEditBankEntryAllowed(void) {
-    return CourseEditPointInputContextActive() && gMoveOption == 3 && CourseEditSelectionMask() != 0 &&
+static int sTypedMoveOption = -1;
+
+static bool CourseEditValueEntryAllowed(void) {
+    return CourseEditPointInputContextActive() && gMoveOption >= 2 && gMoveOption <= 4 && CourseEditSelectionMask() != 0 &&
         sCourseEditDrag.state == DragState::Idle && gdx_course_edit_native_mouse_owned() == 0;
 }
 
@@ -1322,16 +1331,21 @@ extern "C" int gdx_course_edit_mouse_on_key(int lusScancode, int isDown) {
         return 1;
     }
 
+    if (CourseEditEditorActive() && ImGui::GetIO().WantTextInput) {
+        gdx_course_edit_bank_entry_cancel();
+        return 1;
+    }
+
     auto inputWindow = CourseEditMouseWindow();
     bool editorInput = CourseEditEditorActive() && inputWindow != nullptr &&
         !inputWindow->IsMouseCaptured() && !inputWindow->GetGui()->GetMenuOrMenubarVisible() &&
-        !CourseEditMouseInSubMenu();
+        !CourseEditMouseInSubMenu() && !ImGui::GetIO().WantTextInput;
     // The selection, line-up, and history keys act only while the drag machine is idle and no native transaction runs.
     const bool dragIdle = sCourseEditDrag.state == DragState::Idle && gdx_course_edit_native_mouse_owned() == 0;
-    // While a bank value is being typed every key-down belongs to it, so the digits don't switch tools. Key-ups
+    // While a value is being typed every key-down belongs to it, so the digits don't switch tools. Key-ups
     // fall through, so a key that went down before the typing started can't stick.
     if (gdx_course_edit_bank_entry_active()) {
-        if (!editorInput || !CourseEditBankEntryAllowed()) {
+        if (!editorInput || !CourseEditValueEntryAllowed() || sTypedMoveOption != gMoveOption) {
             gdx_course_edit_bank_entry_cancel();
         } else if (isDown) {
             const int digit = CourseEditDigitFromScancode(lusScancode);
@@ -1348,15 +1362,20 @@ extern "C" int gdx_course_edit_mouse_on_key(int lusScancode, int isDown) {
             } else if (lusScancode == 28 || lusScancode == 284) {
                 sEnterOwned = true;
                 if (gdx_course_edit_bank_entry_commit(&typed)) {
-                    gdx_course_edit_input_request_bank_value(gdx_course_edit_bank_value_normalize(typed));
+                    if (sTypedMoveOption == 3) {
+                        gdx_course_edit_input_request_bank_value(gdx_course_edit_bank_value_normalize(typed));
+                    } else {
+                        gdx_course_edit_input_request_scalar_value(sTypedMoveOption, typed);
+                    }
                 }
             }
             return 1;
         }
     }
     if (isDown && !enterWasHeld && (lusScancode == 28 || lusScancode == 284) && editorInput &&
-        CourseEditBankEntryAllowed()) {
+        CourseEditValueEntryAllowed()) {
         sEnterOwned = true;
+        sTypedMoveOption = gMoveOption;
         gdx_course_edit_bank_entry_begin();
         return 1;
     }
@@ -1513,7 +1532,13 @@ extern "C" void gdx_course_edit_mouse_keyboard_tick(int gameBoundary) {
     if (CVarGetInteger("gEnhancements.Input.CourseEditMouse", 0) == 0 ||
         !CourseEditEditorActive() || CourseEditMouseInSubMenu() || wnd == nullptr || wnd->IsMouseCaptured() ||
         wnd->GetGui()->GetMenuOrMenubarVisible()) {
-        gdx_course_edit_input_clear();
+        if (CourseEditEditorActive() && !CourseEditMouseInSubMenu() && wnd != nullptr &&
+            !wnd->IsMouseCaptured() && !wnd->GetGui()->GetMenuOrMenubarVisible()) {
+            // Disabling viewport shortcuts must not discard settings-panel edits.
+            gdx_course_edit_input_clear_tools();
+        } else {
+            gdx_course_edit_input_clear();
+        }
         CourseEditCancelDrag();
         for (int i = 1; i <= 9; i++) {
             sCourseEditKeys.pressedAccum[i] = false;
@@ -1733,7 +1758,7 @@ void CourseEditDrawLineUpPreview(void) {
 // whether or not the mouse drive is on, since the controller has no other way to see the hidden path.
 void CourseEditDrawForkMarks(void) {
     std::shared_ptr<Fast::Fast3dWindow> wnd = CourseEditMouseWindow();
-    if (!CourseEditEditorActive() || CourseEditMouseInSubMenu() || gCreateOption < 1 || gCreateOption > 3 ||
+    if (!CourseEditEditorActive() || CourseEditMouseInSubMenu() || gCreateOption < 0 || gCreateOption > 3 ||
         wnd == nullptr || wnd->GetGui()->GetMenuOrMenubarVisible()) {
         return;
     }
@@ -1751,7 +1776,7 @@ void CourseEditDrawForkMarks(void) {
     // The node a press would switch to is ringed. The stored index counts the node marks of its fork, in order.
     int hoverFork = -1;
     int hoverNode = -1;
-    if (gCreateOption == 1) {
+    if (gCreateOption == 1 || (gCreateOption == 0 && CourseEditCtrlHeld())) {
         gdx_course_branch_editor_stored_node_at(static_cast<float>(gCourseEditCursorXPos),
                                                 static_cast<float>(gCourseEditCursorYPos), &hoverFork, &hoverNode);
     }
@@ -1779,21 +1804,6 @@ void CourseEditDrawForkMarks(void) {
         chainNode = marks[i].kind == GDX_BRANCH_MARK_NODE ? chainNode + 1 : 0;
         last = at;
         haveLast = visible;
-    }
-
-    ImVec2 corner(0.0f, 0.0f);
-    if (showing != 0 && CourseEditGameToWindow(312.0f, 60.0f, &corner)) {
-        const char* title = showing == 2 ? "Path B showing" : "Path A showing";
-        const char* hint = gCreateOption == 1 ? "Select a white dot to switch paths" : "Split on a fork switches paths";
-        const ImVec2 titleSize = ImGui::CalcTextSize(title);
-        const ImVec2 hintSize = ImGui::CalcTextSize(hint);
-        const float width = (std::max)(titleSize.x, hintSize.x) + 12.0f;
-        const ImVec2 a(corner.x - width, corner.y);
-        const ImVec2 b(corner.x, corner.y + titleSize.y + hintSize.y + 8.0f);
-        draw->AddRectFilled(a, b, IM_COL32(10, 13, 20, 190), 4.0f);
-        draw->AddRect(a, b, IM_COL32(70, 230, 110, 120), 4.0f);
-        draw->AddText(ImVec2(a.x + 6.0f, a.y + 4.0f), showing == 2 ? IM_COL32(120, 200, 255, 255) : green, title);
-        draw->AddText(ImVec2(a.x + 6.0f, a.y + 4.0f + titleSize.y), IM_COL32(190, 190, 190, 255), hint);
     }
 }
 
@@ -1973,12 +1983,12 @@ extern "C" void gdx_course_edit_mouse_drag_tick(void) {
     rightHeld = rmb;
 
     // A click, a tool change or an emptied selection ends the typing, not only the next key.
-    if (gdx_course_edit_bank_entry_active() && !CourseEditBankEntryAllowed()) {
+    if (gdx_course_edit_bank_entry_active() && (!CourseEditValueEntryAllowed() || sTypedMoveOption != gMoveOption)) {
         gdx_course_edit_bank_entry_cancel();
     }
     if (wnd == nullptr || wnd->IsMouseCaptured() || wnd->GetGui()->GetMenuOrMenubarVisible() ||
         CourseEditMouseInSubMenu() || CVarGetInteger("gEnhancements.Input.CourseEditMouse", 0) == 0 ||
-        !CourseEditEditorActive() || (!GdxDragEnabled() && gMoveOption != 5 && gMoveOption != 6)) {
+        !CourseEditEditorActive() || (gCreateOption != 0 && !GdxDragEnabled() && gMoveOption != 5 && gMoveOption != 6)) {
         CourseEditCancelDrag();
         sDragBlockedUntilRelease = lmb || rmb;
         return;
@@ -2022,6 +2032,17 @@ extern "C" void gdx_course_edit_mouse_drag_tick(void) {
     if (rmbDown) {
         CourseEditCancelDrag();
         return;
+    }
+
+    if (gCreateOption == 0 && lmbDown && havePos && !nativeOwned && CourseEditCtrlHeld() &&
+        !CourseEditMouseOverChrome(x, y) && gdx_course_edit_native_grab_state() == 0) {
+        int fork;
+        int node;
+        if (gdx_course_branch_editor_stored_node_at(gameX, gameY, &fork, &node)) {
+            gdx_course_edit_input_request_node_pick(fork, node);
+            sDragBlockedUntilRelease = true;
+            return;
+        }
     }
 
     switch (d.state) {

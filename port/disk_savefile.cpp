@@ -1,3 +1,4 @@
+#include "gdx_track_recovery_runtime.h"
 /* port/disk_savefile.cpp -- durable 64DD disk-save sidecar implementation.
  *
  * See disk_savefile.h for the format, validation rules, and boundary rationale.
@@ -359,6 +360,28 @@ const char* statusText(LoadStatus s) {
 
 } // namespace
 
+namespace {
+std::vector<uint8_t> encodeSidecar() {
+    std::vector<uint8_t> image;
+    image.insert(image.end(), { 'G', 'D', 'D', '1' });
+    putU32(image, kFormatVersion);
+    putU64(image, g_sourceHash);
+    putU32(image, (uint32_t)g_ranges.size());
+    // The file CRC includes its own field with that field zeroed.
+    putU32(image, 0);
+    for (const DirtyRange& range : g_ranges) {
+        putU32(image, range.offset);
+        putU32(image, (uint32_t)range.data.size());
+        image.insert(image.end(), range.data.begin(), range.data.end());
+    }
+    const uint32_t checksum = crc32(image.data(), image.size());
+    for (unsigned i = 0; i < 4; ++i) {
+        image[20 + i] = uint8_t(checksum >> (8 * i));
+    }
+    return image;
+}
+}
+
 extern "C" {
 
 unsigned long long gdx_disk_crc64(const unsigned char* data, unsigned long long length) {
@@ -465,28 +488,14 @@ void gdx_disk_save_mark_dirty(unsigned int offset, const void* data, unsigned in
 }
 
 void gdx_disk_save_flush(void) {
+    if (gdx_recovery_persistence_busy()) {
+        return;
+    }
     if (!g_active) {
         return;
     }
 
-    /* The file CRC is taken over the whole image with the CRC field zeroed, so the image
-     * has to be assembled in memory before the field can be filled in. */
-    std::vector<uint8_t> image;
-    image.insert(image.end(), { 'G', 'D', 'D', '1' });
-    putU32(image, kFormatVersion);
-    putU64(image, g_sourceHash);
-    putU32(image, (uint32_t)g_ranges.size());
-    putU32(image, 0); /* CRC placeholder at offset 20 */
-    for (const DirtyRange& r : g_ranges) {
-        putU32(image, r.offset);
-        putU32(image, (uint32_t)r.data.size());
-        image.insert(image.end(), r.data.begin(), r.data.end());
-    }
-    uint32_t crc = crc32(image.data(), image.size());
-    image[20] = (uint8_t)(crc & 0xFFu);
-    image[21] = (uint8_t)((crc >> 8) & 0xFFu);
-    image[22] = (uint8_t)((crc >> 16) & 0xFFu);
-    image[23] = (uint8_t)((crc >> 24) & 0xFFu);
+    const auto image = encodeSidecar();
 
     FILE* f = fopen(g_tmpPath.c_str(), "wb");
     if (f == nullptr) {
@@ -534,7 +543,39 @@ void gdx_disk_save_flush(void) {
     gdx_port_logf("[disk-save] flushed %zu record(s) to %s\n", g_ranges.size(), g_gddPath.c_str());
 }
 
+unsigned long long gdx_disk_save_identity(void) {
+    return g_active ? g_sourceHash : 0;
+}
+
+int gdx_disk_save_recovery_path(char* out, unsigned int capacity) {
+    const std::string path = g_gddPath + ".recovery";
+    if (!g_active || !out || capacity <= path.size()) {
+        return 0;
+    }
+    memcpy(out, path.c_str(), path.size() + 1);
+    return 1;
+}
+
+int gdx_disk_save_recovery_flush(void) {
+    if (!g_active) {
+        return 0;
+    }
+    const auto image = encodeSidecar();
+
+    g_lastFlushOk = gdx_recovery_write_await(g_gddPath.c_str(), image.data(), image.size()) != 0;
+    if (g_lastFlushOk) {
+        g_pendingFlush = false;
+        g_idleFrames = 0;
+        g_sidecarPresent = true;
+    }
+    return g_lastFlushOk;
+}
+
 void gdx_disk_save_tick(void) {
+    gdx_recovery_tick();
+    if (gdx_recovery_persistence_busy()) {
+        return;
+    }
     if (!g_active || !g_pendingFlush) {
         return;
     }

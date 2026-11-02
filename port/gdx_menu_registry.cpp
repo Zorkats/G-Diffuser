@@ -2703,6 +2703,14 @@ void GdxMenu::RegisterMenu() {
                       "magnet values, and for the track's lava rule and magnet values."))
                   .ModifiedMarker()
                   .SearchTerms("course edit part width pit dirt ice magnet lava track settings panel"));
+    AddWidget("Enhancements", "Course Edit & Machine", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Include forks in minimap",
+                          .cVar = "gEnhancements.CourseEdit.ForkMinimap",
+                          .type = GdxUI::WIDGET_CVAR_CHECKBOX }
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(false).Tooltip(
+                      "Draw alternate paths in the race minimap and Content Library track preview."))
+                  .ModifiedMarker()
+                  .SearchTerms("fork branch path minimap preview"));
     // Gates the PORT branch in course_edit/19C470.c func_xk2_800EB3B4: B inside the
     // OFFICIAL course list reopens the parent picker instead of closing the File menu.
     AddWidget("Enhancements", "Course Edit & Machine", SECTION_COLUMN_1,

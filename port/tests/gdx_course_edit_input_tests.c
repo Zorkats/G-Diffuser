@@ -2,6 +2,8 @@
 #include "gdx_course_edit_menu.h"
 
 #include <assert.h>
+#include <limits.h>
+#include <math.h>
 #include <string.h>
 
 static void test_one_shot_actions(void) {
@@ -296,7 +298,104 @@ static void test_extra_requests(void) {
     assert(!gdx_course_edit_input_take_extra(&taken));
 }
 
+static void test_absolute_scalar_values(void) {
+    float left = 200.0f;
+    float right = 300.0f;
+    int32_t option;
+    int32_t value;
+
+    assert(gdx_course_edit_scalar_value_apply(2, 70, &left, &right));
+    assert(left == 300.0f && right == 400.0f);
+    assert(gdx_course_edit_scalar_value_apply(4, -10, &left, &right));
+    assert(left == 250.0f && right == 450.0f);
+    assert(gdx_course_edit_scalar_value_apply(4, 9999, &left, &right));
+    assert(left == 650.0f && right == 50.0f);
+    assert(gdx_course_edit_scalar_value_apply(2, 10, &left, &right));
+    assert(left == 650.0f && right == 50.0f);
+    assert(!gdx_course_edit_scalar_value_apply(0, 100, &left, &right));
+    assert(!gdx_course_edit_scalar_value_apply(2, 100, 0, &right));
+    assert(left == 650.0f && right == 50.0f);
+    gdx_course_edit_input_request_scalar_value(2, 70);
+    gdx_course_edit_input_request_scalar_value(4, -10);
+    assert(gdx_course_edit_input_take_scalar_value(&option, &value));
+    assert(option == 4 && value == -10);
+    assert(!gdx_course_edit_input_take_scalar_value(&option, &value));
+    gdx_course_edit_input_request_scalar_value(2, 70);
+    gdx_course_edit_input_clear();
+    assert(!gdx_course_edit_input_take_scalar_value(&option, &value));
+    left = 1000.0f;
+    right = 1000.0f;
+    assert(gdx_course_edit_scalar_value_apply(4, INT_MIN, &left, &right));
+    assert(left == 50.0f && right == 1950.0f);
+    assert(gdx_course_edit_scalar_value_apply(4, INT_MAX, &left, &right));
+    assert(left == 1950.0f && right == 50.0f);
+    assert(gdx_course_edit_scalar_value_apply(2, INT_MAX, &left, &right));
+    assert(left + right == 2000.0f);
+    left = 50.0f;
+    right = 1940.0f;
+    assert(gdx_course_edit_scalar_value_apply(2, 200, &left, &right));
+    assert(left >= 50.0f && right >= 50.0f && left + right <= 2000.0f);
+    assert(right - left == 1890.0f);
+    left = 55.0f;
+    right = 1945.0f;
+    assert(gdx_course_edit_scalar_value_apply(2, INT_MAX, &left, &right));
+    assert(left >= 50.0f && right >= 50.0f && left + right <= 2000.0f);
+    left = NAN;
+    assert(!gdx_course_edit_scalar_value_apply(2, 100, &left, &right));
+    left = INFINITY;
+    assert(!gdx_course_edit_scalar_value_apply(4, 0, &left, &right));
+}
+
+static void test_path_requests(void) {
+    int32_t path = -1;
+
+    gdx_course_edit_input_clear();
+    assert(!gdx_course_edit_input_take_path(&path));
+    gdx_course_edit_input_request_path(1);
+    gdx_course_edit_input_request_path(2);
+    gdx_course_edit_input_request_path(3);
+    assert(gdx_course_edit_input_take_path(&path) && path == 2);
+    assert(!gdx_course_edit_input_take_path(&path));
+    gdx_course_edit_input_request_path(1);
+    gdx_course_edit_input_clear();
+    assert(!gdx_course_edit_input_take_path(&path));
+}
+
+static void test_tool_clear_preserves_panel_intents(void) {
+    GdxCourseEditExtraRequest request = {0};
+    GdxCourseEditExtraRequest taken;
+    GdxCourseEditInt32 value;
+    GdxCourseEditInt32 option;
+
+    gdx_course_edit_input_clear();
+    request.point = 3;
+    request.which = 1;
+    request.value = 20;
+    request.begin_edit = 1;
+    gdx_course_edit_input_request_extra(&request);
+    gdx_course_edit_input_request_path(2);
+    gdx_course_edit_input_request_drag_start(3);
+    gdx_course_edit_input_request_scalar_value(2, 50);
+    gdx_course_edit_input_request_bank_value(30);
+    gdx_course_edit_bank_entry_begin();
+    gdx_course_edit_input_clear_tools();
+    assert(!gdx_course_edit_input_take_drag_start(&value));
+    assert(!gdx_course_edit_input_take_scalar_value(&option, &value));
+    assert(!gdx_course_edit_input_take_bank_value(&value));
+    assert(!gdx_course_edit_bank_entry_active());
+    assert(gdx_course_edit_input_take_path(&value) && value == 2);
+    assert(gdx_course_edit_input_take_extra(&taken) && taken.point == 3 && taken.value == 20);
+    gdx_course_edit_input_request_path(1);
+    gdx_course_edit_input_request_extra(&request);
+    gdx_course_edit_input_clear();
+    assert(!gdx_course_edit_input_take_path(&value));
+    assert(!gdx_course_edit_input_take_extra(&taken));
+}
+
 int main(void) {
+    test_tool_clear_preserves_panel_intents();
+    test_absolute_scalar_values();
+    test_path_requests();
     test_extra_requests();
     test_bank_snap();
     test_bank_value_entry();

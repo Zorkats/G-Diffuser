@@ -2,6 +2,10 @@
 
 > Replace a stock machine's 3D model with your own.
 
+For a primary model with its runtime-generated textured surfaces, use
+[cached native export](#export-a-cached-native-model) instead. That export is for inspection and
+editing in a 3D tool, not the static-body replacement packer described below.
+
 A model pack swaps the body of one or more of the 30 stock machines. You edit the model as an
 ordinary OBJ file in any 3D tool, such as Blender. The packer converts it into the N64 format the
 game draws.
@@ -26,6 +30,16 @@ The loop is: **dump** the stock models, **start a project** from the machine you
 3. Click **Dump selected**, then **Open dump folder**.
 4. Copy the whole `dump/` folder into the source folder, so that `dump/models/` sits next to
    `tools/`.
+
+**This is a static-body dump, not a complete visible-machine export.** Native machine-drawing
+functions also issue geometry from C; for example, `Machine_DrawBlueFalconLod1` adds textured
+surfaces that are not reachable from the static body display-list root. Those faces can be absent
+when you open the dump in Blender. The exporter does retain textured triangles it encounters;
+the demonstrated gap is not a rule that discards all textured faces.
+
+Keep this body-replacement workflow separate from a complete-machine capture. Its triangle budget
+below is the replacement budget, not a count of every surface drawn for the machine. Complete
+runtime geometry/material capture is not implemented by **Dump selected**.
 
 ## Step 2: Start a project
 
@@ -143,6 +157,46 @@ select screen.
 **I need more detail.**
 Turn on the log file and search it for `[modelpacks]`. Each applied or restored model is logged.
 See [Logs](../MODDING_GUIDE.md#logs).
+
+## Export a cached native model
+
+1. Enter machine selection or machine settings so the game prepares native machine lists.
+   For a Machine Create assembly, prepare that assembly through the game's existing workflow.
+2. Press **F1** and open **Workshop > Content Library**.
+3. Expand **Native machine models (OBJ + glTF)** and choose the **Roster entry**.
+4. Check that **Captured** lists triangles and materials. Click **Export cached native model**.
+5. Wait for the output path, then import `machine.gltf` in Blender. Keep `machine.bin` and all
+   `material_*.png` files beside it. The folder also contains `machine.obj`, `machine.mtl`, and
+   `capture.txt`.
+
+Exports go into a fresh `exports/machines/machine_<entry>_lod1_<number>/` folder beside the
+executable. Exporting again creates another folder. **Cancel export** stops the job and attempts
+to remove only that job's partial files; a cleanup failure reports the remaining folder.
+
+The capture follows native assembly, including static body lists and triangles issued directly
+from C. It owns its geometry and texture pixels, so leaving the screen does not invalidate an
+existing snapshot. Stock, substituted super machines, and prepared custom assemblies use the
+same roster-entry cache. Model-pack replacement occurs after capture and is not exported.
+
+| Detail | Contract |
+| --- | --- |
+| Model | Primary visible model, highest-detail LOD 1, native model coordinates and winding. |
+| Paint | Paint/environment variant 0 when the native lists were prepared. Later paint or part edits require another native preparation. |
+| Materials | Native RGBA16, I4/I8, and IA4/IA8/IA16 textures, tile changes, UV scale/shift/origin, and supported native color equations. |
+| glTF | Carries vertex shade colors or normals, material alpha, and independent repeat/mirror/clamp samplers. Game lighting, fog, camera, and filtering are not a pixel-parity bake. |
+| OBJ | Geometry companion with vertex color attributes and MTL/PNG files. OBJ/MTL does not fully express independent texture wrapping or vertex alpha; prefer glTF for material inspection. |
+| Exclusions | Alternate LODs, shadows, animated booster flames and race effects, workshop model replacements, and HD texture overrides. No replacement/import support for complete assemblies is implied. |
+
+If **Unavailable** says the machine was not prepared, use machine selection/settings and retry.
+An unavailable mode-owned resource, unsupported command, matrix/segment change, texture format,
+or exceeded capture budget produces an error instead of a partial model. A failed preparation
+replaces that entry's earlier cache with the error. Capture limits are 16,384 commands, 4,096
+triangles, 256 materials, and 4 MiB of decoded material pixels. Textures must fit the native
+4 KiB TMEM model and supported tile layout. Prepared lists are not generated on demand by the menu.
+
+Keep **Asset Dump > Models (OBJ)** for `gen_model_pack.py`. Do not feed the complete native
+export into that tool as though its 106-triangle body budget covered the assembled machine.
+Game and Blender comparison is separate from the synthetic capture and file-format unit tests.
 
 ## Quick reference
 

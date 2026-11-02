@@ -41,6 +41,7 @@ void gdx_course_branch_clear(void);
 
 /* 1 when ring 2 is built for the course in gCurrentCourseInfo. */
 s32 gdx_course_branch_live(void);
+void gdx_course_branch_minimap(u8* texture, f32 scale, s32 fill);
 
 /* Racer_Init: every racer starts on the stock ring with no fork history. */
 void gdx_course_branch_reset_racers(void);
@@ -60,5 +61,7 @@ Gfx* gdx_course_branch_draw_editor(Gfx* gfx, Gfx* (*drawSurface)(Gfx*));
 
 /* NULL except while ring 2 is drawn: then one byte per chunk, 0 for a chunk the cull pass must skip. */
 extern const u8* gGdxCourseChunkDrawMask;
+
+Gfx* gdx_course_branch_chunk_mesh(const SegmentChunk* chunk, const SegmentChunk* next);
 
 #endif /* GDX_COURSE_BRANCH_H */

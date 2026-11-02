@@ -6,6 +6,7 @@
 #include "gdx_course_branch.h"
 #include "gdx_course_branch_view.h"
 #include "gdx_course_settings_view.h"
+#include "gdx_course_junction.h"
 
 extern CourseInfo* gCurrentCourseInfo;
 extern bool gInCourseEditor;
@@ -16,6 +17,8 @@ extern SegmentChunk gSegmentChunks[];
 
 /* course.c: points gSegmentChunkCount and sLastSegmentChunk at a chunk ring of count chunks. */
 extern void Course_GdxSetChunkRing(s32 count);
+extern s32 Course_GdxRoadTextureCoords(s32 trackInfo, s16* coords);
+extern void gdx_register_host_wide_command_range(void* ptr, size_t size);
 /* racer.c: the course file id ("NAME.EXT") of the course about to start; 0 when it has no file. */
 extern int gdx_racer_course_file_id(char* out, int outCap);
 extern void gdx_dbg_logf(const char* fmt, ...);
@@ -72,6 +75,25 @@ static SegmentChunk sRing1ChunkSave[BRANCH_CHUNKS];
 static u8 sRing2ChunkMask[BRANCH_CHUNKS];
 static BranchRacer sRacers[TOTAL_RACER_COUNT];
 
+#define BRANCH_JUNCTION_VERTICES 32760
+#define BRANCH_JUNCTION_LISTS 7600
+#define BRANCH_JUNCTION_CUTTERS GDX_JUNCTION_MAX_CUTTERS
+
+static Vtx sJunctionVertices[BRANCH_JUNCTION_VERTICES];
+static Gfx sJunctionLists[BRANCH_JUNCTION_LISTS];
+static s32 sJunctionListOffset[BRANCH_CHUNKS];
+static u8 sJunctionDetail[2][BRANCH_CHUNKS];
+static GdxJunctionWorkspace sJunctionWorkspace;
+static GdxJunctionTriangle sJunctionPieces[GDX_JUNCTION_MAX_PIECES];
+static GdxJunctionCutter sJunctionCutters[BRANCH_JUNCTION_CUTTERS];
+static struct {
+    double min[3];
+    double max[3];
+    s32 fork;
+} sJunctionOwners[BRANCH_CHUNKS];
+static s32 sJunctionVertexCount;
+static s32 sJunctionListCount;
+
 const u8* gGdxCourseChunkDrawMask = NULL;
 
 /* Control point of race segment 0, -1 when no rotation matched. */
@@ -100,14 +122,269 @@ void gdx_course_branch_clear(void) {
     sBranch.ring2Count = 0;
     sBranch.ring2ChunkCount = 0;
     sBranch.ring2SpanChunks = 0;
+    sJunctionVertexCount = 0;
+    sJunctionListCount = 0;
+    memset(sJunctionListOffset, -1, sizeof(sJunctionListOffset));
     gGdxCourseChunkDrawMask = NULL;
     gdx_course_branch_reset_racers();
+}
+
+static s32 branch_junction_fork(const SegmentChunk* chunk, const s8* forkOf, s32 count) {
+    s32 shape = chunk->trackSegmentInfo & TRACK_SHAPE_MASK;
+    s32 index = chunk->segmentIndex;
+    if ((shape != TRACK_SHAPE_ROAD && shape != TRACK_SHAPE_BORDERLESS_ROAD) ||
+        (chunk->trackSegmentInfo & TRACK_TYPE_MASK) == TRACK_TYPE_NONE || index < 0 || index >= count) {
+        return -1;
+    }
+    return forkOf[index];
+}
+
+static void branch_junction_vertices(const SegmentChunk* chunk, s32 corrected,
+                                     const s16* coords, GdxJunctionVertex* out) {
+    const s16* positions[8] = {chunk->referencePos1, chunk->referencePos6, chunk->referencePos7,
+                              chunk->referencePos8, chunk->referencePos2, chunk->referencePos5,
+                              chunk->referencePos4, chunk->referencePos3};
+    static const s32 sIndex[8] = {4, 3, 2, 1, 0, 1, 2, 3};
+    s32 left = corrected ? chunk->leftTextureCorrection : chunk->leftTextureCoord;
+    s32 right = corrected ? chunk->rightTextureCorrection : chunk->rightTextureCoord;
+    s32 i, j;
+    for (i = 0; i < 8; i++) {
+        for (j = 0; j < 3; j++) {
+            out[i].pos[j] = positions[i][j];
+        }
+        out[i].uv[0] = coords[sIndex[i]];
+        out[i].uv[1] = (i == 0 || i == 4) ? (left + right) >> 1 : (i < 4 ? right : left);
+    }
+}
+
+static void branch_junction_triangles(const SegmentChunk* chunk, const SegmentChunk* next,
+                                      GdxJunctionTriangle* out) {
+    GdxJunctionVertex vertices[16];
+    s16 coords[5] = {0};
+    s32 i;
+    Course_GdxRoadTextureCoords(chunk->trackSegmentInfo, coords);
+    branch_junction_vertices(chunk, chunk->trackSegmentInfo & TRACK_FLAG_80000000, coords, vertices);
+    branch_junction_vertices(next, 0, coords, vertices + 8);
+    for (i = 0; i < 8; i++) {
+        s32 k = (i + 2) % 8;
+        s32 n = (k + 1) % 8;
+        out[i * 2].v[0] = vertices[k];
+        out[i * 2].v[1] = vertices[k + 8];
+        out[i * 2].v[2] = vertices[n + 8];
+        out[i * 2 + 1].v[0] = vertices[k];
+        out[i * 2 + 1].v[1] = vertices[n + 8];
+        out[i * 2 + 1].v[2] = vertices[n];
+    }
+}
+
+static void branch_junction_bounds(const GdxJunctionTriangle* triangles, double* min, double* max) {
+    s32 i, j, k;
+    for (k = 0; k < 3; k++) {
+        min[k] = max[k] = triangles[0].v[0].pos[k];
+        for (i = 0; i < 16; i++) {
+            for (j = 0; j < 3; j++) {
+                double value = triangles[i].v[j].pos[k];
+                if (value < min[k]) {
+                    min[k] = value;
+                }
+                if (value > max[k]) {
+                    max[k] = value;
+                }
+            }
+        }
+    }
+}
+
+static s32 branch_junction_append(const GdxJunctionTriangle* triangles, s32 count) {
+    s32 i, j, k;
+    if (count > (BRANCH_JUNCTION_VERTICES - sJunctionVertexCount) / 3) {
+        return 0;
+    }
+    for (i = 0; i < count; i++) {
+        for (j = 0; j < 3; j++) {
+            Vtx* v = &sJunctionVertices[sJunctionVertexCount++];
+            memset(v, 0, sizeof(*v));
+            for (k = 0; k < 3; k++) {
+                v->v.ob[k] = gdx_junction_quantize(triangles[i].v[j].pos[k]);
+            }
+            v->v.tc[0] = gdx_junction_quantize(triangles[i].v[j].uv[0]);
+            v->v.tc[1] = gdx_junction_quantize(triangles[i].v[j].uv[1]);
+            v->v.cn[3] = 255;
+        }
+    }
+    return 1;
+}
+
+static s32 branch_junction_list(s32 first) {
+    s32 i;
+    s32 vertices = sJunctionVertexCount - first;
+    s32 needed = (vertices + 29) / 30 + (vertices / 3 + 1) / 2 + 1;
+    if (needed > BRANCH_JUNCTION_LISTS - sJunctionListCount) {
+        return 0;
+    }
+    for (i = first; i < sJunctionVertexCount; i += 30) {
+        s32 count = sJunctionVertexCount - i;
+        s32 j;
+        if (count > 30) {
+            count = 30;
+        }
+        gSPVertex(&sJunctionLists[sJunctionListCount++], &sJunctionVertices[i], count, 0);
+        for (j = 0; j + 5 < count; j += 6) {
+            gSP2Triangles(&sJunctionLists[sJunctionListCount++], j, j + 1, j + 2, 0,
+                          j + 3, j + 4, j + 5, 0);
+        }
+        if (j < count) {
+            gSP1Triangle(&sJunctionLists[sJunctionListCount++], j, j + 1, j + 2, 0);
+        }
+    }
+    gSPEndDisplayList(&sJunctionLists[sJunctionListCount++]);
+    return 1;
+}
+
+static s32 branch_junction_build(s32 mainCount, s32 mainPoints, s32 alternatePoints) {
+    static s32 registered;
+    GdxJunctionTriangle triangles[16], owner[16];
+    s32 i, j, k, axis, changedChunks = 0;
+    if (!registered) {
+        gdx_register_host_wide_command_range(sJunctionLists, sizeof(sJunctionLists));
+        registered = 1;
+    }
+    memset(sJunctionDetail, 0, sizeof(sJunctionDetail));
+    for (i = 0; i < mainCount; i++) {
+        sJunctionOwners[i].fork = branch_junction_fork(&gSegmentChunks[i], sBranch.ring1ForkOf, mainPoints);
+        if (sJunctionOwners[i].fork >= 0) {
+            branch_junction_triangles(&gSegmentChunks[i], &gSegmentChunks[(i + 1) % mainCount], triangles);
+            branch_junction_bounds(triangles, sJunctionOwners[i].min, sJunctionOwners[i].max);
+        }
+    }
+    for (i = 0; i < sBranch.ring2ChunkCount; i++) {
+        double min[3], max[3];
+        s32 candidates[BRANCH_JUNCTION_CUTTERS / 16];
+        s32 candidateCount = 0, cutterCount = 0, changed = 0;
+        s32 first = sJunctionVertexCount;
+        s32 fork = branch_junction_fork(&sRing2Chunks[i], sBranch.ring2ForkOf, alternatePoints);
+        if (fork < 0) {
+            continue;
+        }
+        branch_junction_triangles(&sRing2Chunks[i], &sRing2Chunks[(i + 1) % sBranch.ring2ChunkCount], triangles);
+        branch_junction_bounds(triangles, min, max);
+        for (j = 0; j < mainCount; j++) {
+            if (sJunctionOwners[j].fork != fork) {
+                continue;
+            }
+            for (axis = 0; axis < 3; axis++) {
+                if (min[axis] > sJunctionOwners[j].max[axis] + GDX_JUNCTION_DISTANCE ||
+                    max[axis] < sJunctionOwners[j].min[axis] - GDX_JUNCTION_DISTANCE) {
+                    break;
+                }
+            }
+            if (axis != 3) {
+                continue;
+            }
+            if (candidateCount == BRANCH_JUNCTION_CUTTERS / 16) {
+                return 0;
+            }
+            candidates[candidateCount++] = j;
+            branch_junction_triangles(&gSegmentChunks[j], &gSegmentChunks[(j + 1) % mainCount], owner);
+            for (k = 0; k < 16; k++) {
+                if (gdx_junction_cutter(&owner[k], &sJunctionCutters[cutterCount])) {
+                    cutterCount++;
+                }
+            }
+        }
+        if (cutterCount == 0) {
+            continue;
+        }
+        for (j = 0; j < 16; j++) {
+            s32 count = gdx_junction_subtract(&triangles[j], sJunctionCutters, cutterCount,
+                                              &sJunctionWorkspace, sJunctionPieces, GDX_JUNCTION_MAX_PIECES);
+            if (count < 0 || !branch_junction_append(sJunctionPieces, count)) {
+                return 0;
+            }
+            changed |= count != 1 || memcmp(sJunctionPieces, &triangles[j], sizeof(triangles[j])) != 0;
+        }
+        if (!changed) {
+            sJunctionVertexCount = first;
+            continue;
+        }
+        sJunctionListOffset[i] = sJunctionListCount;
+        if (!branch_junction_list(first)) {
+            return 0;
+        }
+        sJunctionDetail[1][i] = sJunctionDetail[1][(i + 1) % sBranch.ring2ChunkCount] = 1;
+        for (j = 0; j < candidateCount; j++) {
+            k = candidates[j];
+            sJunctionDetail[0][k] = sJunctionDetail[0][(k + 1) % mainCount] = 1;
+        }
+        changedChunks++;
+    }
+    // Native LOD chords must not bridge the fine triangles used as overlap owners.
+    for (i = 0; i < mainCount; i++) {
+        if (sJunctionDetail[0][i]) {
+            gSegmentChunks[i].trackSegmentInfo &= ~TRACK_FLAG_CONTINUOUS;
+        }
+    }
+    for (i = 0; i < sBranch.ring2ChunkCount; i++) {
+        if (sJunctionDetail[1][i]) {
+            sRing2Chunks[i].trackSegmentInfo &= ~TRACK_FLAG_CONTINUOUS;
+        }
+    }
+    gdx_dbg_logf("[fork] junctions: %d chunks, %d/%d vertices, %d/%d commands; retained %zu bytes\n",
+                 changedChunks, sJunctionVertexCount, BRANCH_JUNCTION_VERTICES,
+                 sJunctionListCount, BRANCH_JUNCTION_LISTS,
+                 sizeof(sJunctionVertices) + sizeof(sJunctionLists) + sizeof(sJunctionListOffset) +
+                 sizeof(sJunctionDetail) + sizeof(sJunctionWorkspace) + sizeof(sJunctionPieces) +
+                 sizeof(sJunctionCutters) + sizeof(sJunctionOwners));
+    return 1;
+}
+
+Gfx* gdx_course_branch_chunk_mesh(const SegmentChunk* chunk, const SegmentChunk* next) {
+    s32 index;
+    if (!gGdxCourseChunkDrawMask || !sBranch.live || chunk < gSegmentChunks ||
+        chunk >= gSegmentChunks + sBranch.ring2ChunkCount) {
+        return NULL;
+    }
+    index = (s32)(chunk - gSegmentChunks);
+    if (sJunctionListOffset[index] < 0 || next != &gSegmentChunks[(index + 1) % sBranch.ring2ChunkCount]) {
+        return NULL;
+    }
+    return &sJunctionLists[sJunctionListOffset[index]];
 }
 
 s32 gdx_course_branch_live(void) {
     return sBranch.live && (gCurrentCourseInfo == sBranch.courseInfo) &&
            (sBranch.courseInfo->courseSegments == sBranch.ring1) &&
            (sBranch.courseInfo->segmentCount == sBranch.ring1Count);
+}
+
+void gdx_course_branch_minimap(u8* texture, f32 scale, s32 fill) {
+    extern void gdx_course_minimap_plot(unsigned char*, float, float, float, int);
+    s32 i;
+
+    if (!texture || !gdx_course_branch_live()) {
+        return;
+    }
+    for (i = 0; i < sBranch.ring2Count; i++) {
+        CourseSegment* segment = &sBranch.ring2[i];
+        f32 t = 0.0f;
+        s32 samples = 0;
+
+        if (sBranch.ring2ForkOf[i] < 0) {
+            continue;
+        }
+        while (t < 1.0f && samples++ < 4096) {
+            Vec3f position;
+            Vec3f tangent;
+            f32 magnitude = Course_SplineGetTangent(segment, t, &tangent);
+
+            Course_SplineGetPosition(segment, t, &position);
+            gdx_course_minimap_plot(texture, position.x, position.z, scale, fill);
+            if (!(magnitude > 0.001f)) {
+                break;
+            }
+            t += 200.0f / magnitude;
+        }
+    }
 }
 
 /* The stock ring is the course's control points rotated so the start segment is index 0
@@ -488,6 +765,13 @@ static void branch_build(s32 editor) {
     branch_flatten_rails(sRing2Chunks, sBranch.ring2ChunkCount, sBranch.ring2ForkOf, gSegmentChunks, ring1ChunkCount,
                          sBranch.ring1ForkOf);
 
+    if (!branch_junction_build(ring1ChunkCount, count, ring2Count)) {
+        sJunctionVertexCount = 0;
+        sJunctionListCount = 0;
+        memset(sJunctionListOffset, -1, sizeof(sJunctionListOffset));
+        gdx_dbg_logf("[fork] junction capacity exceeded; keeping original geometry\n");
+    }
+
     sBranch.courseInfo = info;
     sBranch.ring1 = ring1;
     sBranch.ring1Count = count;
@@ -795,8 +1079,7 @@ f32 gdx_course_branch_lap_partial(const CourseSegment* segment, f32 partial) {
 Gfx* gdx_course_branch_draw(Gfx* gfx, s32 cameraIndex, Gfx* (*drawRing)(Gfx*, s32)) {
     s32 ring1ChunkCount = gSegmentChunkCount;
 
-    /* The stock chunk draw stops itself near the end of the course vertex buffer (EXPANSION_KIT guard), so
-     * this pass needs no budget of its own. */
+    // Unchanged chunks retain the native frame-pool guard; junctions use their audited retained pool.
     if (!gdx_course_branch_live() || (sBranch.ring2SpanChunks == 0) || (ring1ChunkCount != sBranch.ring1ChunkCount)) {
         return gfx;
     }

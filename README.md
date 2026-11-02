@@ -95,7 +95,16 @@ Options live in the enhancement menu, which opens with **F1**. Editing tools are
 - **Undo and redo:** with an optional History panel of the last 32 changes. Click a row to jump
   back to it.
 - **Forks:** the Split, Insert and Link tools build a second path. Path B can span several
-  segments, split nodes show in green, and a badge shows the active path.
+  segments. **Point and track settings** shows the active path and has A/B selectors.
+  Inactive nodes stay visible without Split; Ctrl+click one in Course mode to select it.
+  Junction rendering clips near-coincident Path B faces against Path A using a bounded retained
+  mesh. Driving and visual acceptance remain unverified; see the limits in the guide below.
+- **Fork minimaps:** optionally include alternate roads in the race minimap and Content Library
+  preview. The preference defaults off.
+- **Part and track settings:** edit pit/lava, dirt, and ice coverage, per-magnet strength and
+  range, and track-wide lava/magnet settings. These settings and forks travel in `.gdxp` exports.
+  See [Course Edit settings and limits](docs/modding/COURSE_ELEMENTS.md#course-edit-settings-and-forks)
+  before sharing tracks with older builds or adding parts to Path B.
 - **Lava strips:** left, right, middle or both sides. They drain energy and kill at zero, and CPU
   racers steer away from them. "Lava strips never kill" turns off the kill.
 - **Magnet traps:** thin pulsing rails on the left, right or middle of the road. Side magnets pull
@@ -106,8 +115,9 @@ Options live in the enhancement menu, which opens with **F1**. Editing tools are
   box select. Create Machine has a mouse cursor too.
 - **Blender-style camera:** orbit and pan with a button you choose, and zoom with the wheel.
   Sensitivity and inversion are adjustable.
-- **Shaping tools:** bank snap at 45, 90 or 180 degrees, typing an exact bank, and lining up a run
-  of three or more points.
+- **Shaping tools:** bank snap at 45, 90 or 180 degrees, typed Width, Center, and Bank values,
+  and lining up a run of three or more points. Enable Course Edit mouse input, select the tool and points, press Enter, type a
+  value, then press Enter to apply or Escape to cancel. Bank rounds to the nearest 3 degrees.
 - **Keys and help:** number-key shortcuts, rebindable tool keys, a hint strip for the current
   tool, and a Controls Help page showing your live bindings.
 - **Test drive:** choose the machine and engine, and drive in widescreen.
@@ -136,6 +146,9 @@ Options live in the enhancement menu, which opens with **F1**. Editing tools are
 
 - **Content Library:** a card-based view of your tracks and machines, with click-to-assign Edit Cup
   slots and a track preview that shows the start and direction. Thanks to airon-main.
+- **Recoverable track deletion:** remove an installed track and its cup references from the Content
+  Library, with exact-name confirmation and a retained per-track Restore record. Interrupted
+  confirmed operations finish on restart. See [deletion and recovery](docs/modding/COURSE_ELEMENTS.md#content-library-deletion-and-recovery).
 - **Shareable files:** a track or a whole Edit Cup exports as a `.gdxp` package that carries its
   custom music, and a machine as a `.gdxc` file. See the
   [sharing guide](docs/modding/SHARING_TRACKS_AND_MACHINES.md).

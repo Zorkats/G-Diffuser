@@ -1,4 +1,6 @@
+#include "gdx_track_recovery_runtime.h"
 #include "gdx_content_window.h"
+#include "gdx_machine_capture_runtime.h"
 
 #include <imgui.h>
 #include <imgui_internal.h> // ImStristr — case-insensitive substring search for the filter
@@ -154,6 +156,7 @@ void GdxContentWindow::LoadTrackPreview(int row) {
         return;
     }
     mTrackPreviewRow = row;
+    mPreviewForkRevision = gdx_branch_store_revision();
 
     uint8_t payload[GDX_CONTENT_TRACK_PAYLOAD_SIZE];
     if (gdx_content_load_track_payload(mEntries[row].name, payload, sizeof(payload)) != GDX_CONTENT_OK) {
@@ -176,43 +179,33 @@ void GdxContentWindow::LoadTrackPreview(int row) {
     }
     mTrackPreviewCount = count;
 
-    // ── Centripetal Catmull-Rom spline generation ──────────────────────────────
-    // For each control segment i → (i+1), evaluate kSplineSteps evenly-spaced
-    // positions using the classic Catmull-Rom formula with closed-loop neighbours.
-    // The t=1 point is omitted from each segment (it becomes t=0 of the next),
-    // so the dense array is exactly count × kSplineSteps vertices.
-    int out = 0;
-    for (int i = 0; i < count; i++) {
-        const int i0 = (i - 1 + count) % count; // P0
-        const int i1 = i;                        // P1
-        const int i2 = (i + 1) % count;          // P2
-        const int i3 = (i + 2) % count;          // P3
-
-        const float p0x = mTrackPreviewX[i0], p0z = mTrackPreviewZ[i0];
-        const float p1x = mTrackPreviewX[i1], p1z = mTrackPreviewZ[i1];
-        const float p2x = mTrackPreviewX[i2], p2z = mTrackPreviewZ[i2];
-        const float p3x = mTrackPreviewX[i3], p3z = mTrackPreviewZ[i3];
-
-        for (int s = 0; s < kSplineSteps; s++) {
-            const float t  = static_cast<float>(s) / static_cast<float>(kSplineSteps);
-            const float t2 = t * t;
-            const float t3 = t2 * t;
-            // Standard Catmull-Rom basis (α = 0.5)
-            mSplineX[out] = 0.5f * ((2.0f * p1x) +
-                                    (-p0x + p2x) * t +
-                                    (2.0f * p0x - 5.0f * p1x + 4.0f * p2x - p3x) * t2 +
-                                    (-p0x + 3.0f * p1x - 3.0f * p2x + p3x) * t3);
-            mSplineZ[out] = 0.5f * ((2.0f * p1z) +
-                                    (-p0z + p2z) * t +
-                                    (2.0f * p0z - 5.0f * p1z + 4.0f * p2z - p3z) * t2 +
-                                    (-p0z + 3.0f * p1z - 3.0f * p2z + p3z) * t3);
-            out++;
-        }
+    char courseId[GDX_COURSE_FILE_ID_MAX + 1];
+    snprintf(courseId, sizeof(courseId), "%s.%s", mEntries[row].name, mEntries[row].extension);
+    mPreviewForks = CVarGetInteger("gEnhancements.CourseEdit.ForkMinimap", 0) != 0;
+    GdxBranchSet storedForks;
+    uint32_t courseChecksum;
+    memcpy(&courseChecksum, payload + 4, sizeof(courseChecksum));
+    const GdxBranchSet* forks = gdx_branch_store_get(courseId, &storedForks) ? &storedForks : nullptr;
+    if (forks && forks->courseChecksum != courseChecksum) {
+        forks = nullptr;
     }
-    mSplineCount = out; // == count * kSplineSteps
+    mSplineCount = gdx_course_preview_build(mTrackPreviewX, mTrackPreviewZ, count, forks, mPreviewForks,
+                                            mSplineX, mSplineZ, mSplineNext, kSplineMax);
+    if (mSplineCount == 0) {
+        mTrackPreviewCount = 0;
+    }
 }
 
 void GdxContentWindow::DrawTrackPreview() {
+    bool includeForks = CVarGetInteger("gEnhancements.CourseEdit.ForkMinimap", 0) != 0;
+    if (ImGui::Checkbox("Include forks in minimap", &includeForks)) {
+        CVarSetInteger("gEnhancements.CourseEdit.ForkMinimap", includeForks);
+        CVarSave();
+    }
+    if ((includeForks != mPreviewForks || mPreviewForkRevision != gdx_branch_store_revision()) &&
+        mTrackPreviewRow >= 0) {
+        LoadTrackPreview(mTrackPreviewRow);
+    }
     ImGui::TextUnformatted("Track preview");
     if (mTrackPreviewRow >= 0 && mTrackPreviewRow < mEntryCount) {
         const GdxContentEntry& selected = mEntries[mTrackPreviewRow];
@@ -250,10 +243,11 @@ void GdxContentWindow::DrawTrackPreview() {
     const ImVec2 center(canvas.x + avail.x * 0.5f, canvas.y + height * 0.5f);
     ImDrawList* draw = ImGui::GetWindowDrawList();
 
-    // ── Line loop: iterate over the dense spline vertices ────────────────────
-    // The spline array is closed (last dense vertex connects back to index 0).
     for (int i = 0; i < mSplineCount; i++) {
-        const int next = (i + 1) % mSplineCount;
+        const int next = mSplineNext[i];
+        if (next < 0) {
+            continue;
+        }
         const ImVec2 a(center.x + (mSplineX[i]    - (minX + maxX) * 0.5f) * scale,
                        center.y + (mSplineZ[i]    - (minZ + maxZ) * 0.5f) * scale);
         const ImVec2 b(center.x + (mSplineX[next] - (minX + maxX) * 0.5f) * scale,
@@ -373,7 +367,10 @@ void GdxContentWindow::DrawElement() {
 
     const bool busy = gdx_content_mfs_busy() != 0;
     const bool inGameplay = gdx_input_in_gameplay() != 0;
-    const bool opsDisabled = busy || inGameplay || mCupWaiting || gdx_content_import_pending() != 0;
+    const bool opsDisabled = busy || inGameplay || mCupWaiting || gdx_content_import_pending() != 0 ||
+                             gdx_recovery_blocks_writes() != 0;
+    const bool pickerAssignable = mCupPickerTrack >= 0 && mCupPickerTrack < mEntryCount &&
+        mEntries[mCupPickerTrack].extension[3] == 'D';
 
     // E3 completion poll: on the port the disk-thread handoff is synchronous, so a begun op has
     // normally already finished; the poll keeps the UI honest if scheduling ever changes.
@@ -488,7 +485,11 @@ void GdxContentWindow::DrawElement() {
         char selTitle[GDX_COURSE_TITLE_MAX + 1];
         const bool hasSelTitle = SessionTitle(sel.name, sel.extension, selTitle, sizeof(selTitle));
         ImGui::SameLine();
-        ImGui::TextDisabled("— click a slot to place  \"%s\"", hasSelTitle ? selTitle : sel.name);
+        if (pickerAssignable) {
+            ImGui::TextDisabled("Click a slot to place \"%s\"", hasSelTitle ? selTitle : sel.name);
+        } else {
+            ImGui::TextDisabled("Locked track selected for export or deletion.");
+        }
     } else if (mCupPickerSlot >= 0 && mCupPickerSlot < GDX_CONTENT_CUP_SLOT_COUNT) {
         ImGui::SameLine();
         ImGui::TextDisabled("— choose a track for Slot %d", mCupPickerSlot + 1);
@@ -604,7 +605,7 @@ void GdxContentWindow::DrawElement() {
             // The card selects a destination when no track is selected, or assigns the selected
             // track to this slot. The unregister button above retains priority over this hit target.
             const bool canInteract = !opsDisabled &&
-                ((mCupPickerTrack >= 0 && mCupPickerTrack < mEntryCount && !isSelectedTrack) ||
+                ((pickerAssignable && !isSelectedTrack) ||
                  mCupPickerTrack < 0);
             if (canInteract) {
                 ImGui::SetCursorPos(ImVec2(0.0f, 0.0f));
@@ -812,8 +813,8 @@ void GdxContentWindow::DrawElement() {
                 ImGui::PopStyleColor(2); // Border, ChildBg
 
                 // Card click: either complete a slot-first assignment or select this track.
-                if (cardClicked && editableTrack && !opsDisabled) {
-                    if (mCupPickerSlot >= 0 && mCupPickerSlot < GDX_CONTENT_CUP_SLOT_COUNT &&
+                if (cardClicked && entry.contentType == GDX_CONTENT_TYPE_TRACK && !opsDisabled) {
+                    if (editableTrack && mCupPickerSlot >= 0 && mCupPickerSlot < GDX_CONTENT_CUP_SLOT_COUNT &&
                         (mCupPickerTrack < 0 || mCupPickerTrack >= mEntryCount)) {
                         const int targetSlot = mCupPickerSlot;
                         int rc = gdx_content_cup_register_begin(entry.name, targetSlot);
@@ -861,7 +862,15 @@ void GdxContentWindow::DrawElement() {
     }
     ImGui::EndChild();
 
-    DrawImportSection(busy, inGameplay);
+    if (GdxRecovery_Draw(mCupPickerTrack >= 0 && mCupPickerTrack < mEntryCount ? &mEntries[mCupPickerTrack] : nullptr)) {
+        mCupPickerTrack = -1;
+        LoadTrackPreview(-1);
+        RefreshLibrary();
+        RefreshCupSlots();
+    }
+
+    DrawImportSection(busy || gdx_recovery_persistence_busy(), inGameplay);
+    GdxMachineCapture_DrawExports();
 
     // ── Advanced Sources (collapsible accordions) ────────────────────────────────────────────────
     DrawImageImportSection(busy, inGameplay);

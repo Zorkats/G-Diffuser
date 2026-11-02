@@ -146,7 +146,135 @@ course-elements.gdxs
 
 ### Renames and deletes
 
-`gdx_course_store_rename(oldId, newId)` (`port/gdx_course_registry.h`) moves a course's keys and title to its new id, and `gdx_course_ext_clear_course` plus `gdx_course_title_clear` drop them on a delete. The rename and delete operations are disk ops 15 and 16 in `expansion_kit/AB150.c`, and the trim delete is in `expansion_kit/A8140.c`. Those disk ops run on the disk thread, so the calls belong in the game-thread code that sees the operation finish. Those calls are not yet wired in this build. Until they are, a renamed course keeps its keys under the old name, and a deleted course keeps its keys in the file. Neither breaks a course: keys are only read for a course that carries that exact name again.
+Successful native rename and delete operations (disk ops 15 and 16 in
+`decomp/src/overlays/expansion_kit/AB150.c`) call the state hooks in
+`port/gdx_course_state.cpp`. They rename or clear the course's keys, title, forks, and settings,
+then flush the stores. The hooks do not provide a recoverable multi-file transaction or report a
+sidecar flush failure to the native prompt. They are not a Content Library delete/restore feature.
+
+### Content Library deletion and recovery
+
+Back up your save set before using deletion. For a first check, use a disposable track, not a valued
+course. The Content Library transaction is separate from the native game's delete prompt.
+
+1. Leave gameplay and select an installed track in the Content Library. Locked `CRSE` tracks can
+   be selected for deletion, but cannot be assigned to Edit Cup slots through the library.
+2. Open **Track deletion and recovery** and choose **Prepare deletion of selected track**.
+3. Check the exact file name and affected cup-slot count. Type the track name exactly, then choose
+   **Confirm deletion**. Preparation does not delete anything. **Cancel deletion** closes the preview.
+4. Wait for **Track deleted. Its recovery record is retained for Restore.** The library and cup
+   selection refresh after completion. Shared music files remain installed.
+
+Deletion removes the track file, its referencing Edit Cup slots, and its per-track extensions,
+title, forks, settings, and music binding. The recovery record retains the complete native track
+file, including its embedded records and ghosts, plus the affected metadata and cup slots.
+
+The action rejects gameplay, disk/import/cup work, changed selections, unavailable metadata, and
+the last edited track while its editor identity remains active. Leaving Course Edit alone does not
+clear that identity. Restart the application without reopening that track if this guard applies.
+Cancellation is available only before transaction persistence starts. Do not close the application
+while it reports **Persisting transaction**.
+
+**Restart finishes confirmed operations.** An interrupted deletion resumes deletion, not automatic
+restoration. An interrupted Restore resumes restoration. Writes remain blocked until recovery
+completes or the conflict is resolved. Use **Check / retry recovery** after resolving a reported I/O
+error or conflict. Corrupt, unsupported, wrong-disk, and wrong-directory records fail closed.
+
+To restore a deleted track, find its **deleted** record, choose **Restore...**, and confirm. Restore
+requires the original track name, per-track metadata, and affected cup slots to remain unused. It
+does not replace later edits or restore a whole save image. A full metadata store or insufficient
+disk space also prevents Restore. The disk-space preflight reserves conservative block-rounding
+and temporary-file capacity, so it can refuse a restore that would fit with tighter packing.
+
+Recovery files are stored beside the writable disk-save sidecar, in `<save>.gdd.recovery/`, as
+bounded, checksummed `.gtr` records. The panel displays the resolved directory. Keep this directory
+with the matching `.gdd` and `course-elements.gdxs`, `course-forks.gbs`, and `course-settings.gks`
+when backing up or moving the save set. Do not edit recovery records or use an older build while
+an operation is pending. The recovery lock coordinates builds that support it, not older versions.
+Completed records remain retained, with a maximum of 64 records and no automatic purge.
+
+Synthetic unit tests cover interruption and conflict handling. Native startup recovery, game UI,
+and operating-system power-loss behavior still require runtime acceptance. These tests do not
+establish that a real disk, storage device, or operating system survives every interruption.
+
+## Course Edit settings and forks
+
+### Select and edit a path
+
+Open **Point and track settings** in Course Edit. Its path selector is separate from the
+collapsible settings section, so you can switch A/B without using Split. Inactive nodes remain
+visible in Course and Point modes. In Course mode, hold Ctrl and click an inactive node to switch
+paths and select it; an ordinary click keeps the course-placement gesture. In Point mode, click
+the inactive node. Switching is disabled during a native grab or viewport drag.
+
+Enable Course Edit mouse input to select inactive nodes with the mouse and use typed tool values.
+For Width, Center, or Bank, select the tool and at least one point, then press Enter. Type an
+integer and press Enter to apply, or Escape to cancel. Width is the total road width shown in the
+editor, `(radiusLeft + radiusRight) / 10`; Center is the lateral offset in the same displayed units.
+The editor clamps the radii to its native bounds and rounds them to its 10-unit grid. Bank wraps
+and rounds to the nearest 3 degrees. Controls Help shows your rebound tool keys.
+
+### Set coverage and magnet values
+
+The panel shows controls for parts present on the active point:
+
+| Control | Value |
+| --- | --- |
+| Pit or lava, dirt, and ice width | 1-100 percent coverage; 0 (**Stock**) keeps the stock strip. The **Both** placement divides coverage between both sides. |
+| Magnet strength | 0.25-3.00; 0 (**Track**) inherits the track value. |
+| Magnet range | 10-200; 0 (**Track**) inherits the track value. Physical reach still has road-width limits. |
+| Whole track: lava | **Follow the menu**, **Always kills**, or **Never kills**. Test runs never kill from lava. |
+| Whole track: strength and range | The track default for magnets; 0 (**Menu**) uses the Gameplay option. |
+
+Ctrl+click a numeric value to type it. Part settings follow points through insert, delete, reverse,
+and path swaps. A part belongs to the segment after its point. **Ignore track settings** in the
+Gameplay options bypasses saved lava and magnet values when racing; it does not erase them.
+Part widths remain part of the course geometry and still apply.
+
+### Include alternate roads in maps
+
+Enable **Include forks in minimap** in the Course Edit enhancement options or the Content Library
+preview. The saved preference affects the race minimap and library preview, not the track file.
+It defaults off. The library frames both paths when enabled; its spline preview is an approximation,
+not a pixel-identical rendering of the game's map. Race maps keep the game's fixed projection.
+
+### Save and share
+
+Installed forks live in `course-forks.gbs` (GBS1 containing GXB1 blocks). Track and per-point
+settings live in `course-settings.gks` (GKS1 containing GXK1 blocks), beside the executable.
+Keep these files with the 64DD save sidecar when making a backup.
+
+A `.gdxp` with forks or settings includes a same-stem `.gdxb` (GXD1). This is separate from the
+`.gdxe` element-key sidecar described below. A bundle can carry both. Export again after changing
+the course so the payload bindings match; copying a stale sidecar is not a migration procedure.
+
+**Compatibility:** 1.2.0 and older refuse packages containing `.gdxb`. GXB1 stays version 1 when
+both paths can share their first style. A distinct first style requires version 2; 1.2.0 rejects
+and sets aside the whole fork store containing it. Back up the stores before opening them with an
+older executable. Package refusal does not protect an already installed save from an older reader.
+
+### Limits to account for
+
+- Junction rendering gives Path A ownership of near-coincident ROAD/BORDERLESS faces in the same
+  fork. It clips Path B within 1 world unit only when face normals are nearly parallel
+  (absolute dot product at least 0.98). Separated overpasses and steeper crossings stay intact.
+  If the retained mesh exceeds a capacity, the whole build keeps the original geometry and logs
+  `[fork] junction capacity exceeded; keeping original geometry`; overlap can therefore return.
+  This is a rendering change, not a collision or bank-transition repair.
+- Path B's interior parts and settings are saved, but its race spans have no gadgets. Do not
+  expect pits, lava, magnets, or other placed parts on B to affect a race yet.
+- Both paths can have a different first road style; first-point parts and per-point settings
+  still share the main-ring point.
+- Human lane crossing requires touching or overlapping ROAD or BORDERLESS surfaces. Walled roads
+  remain walls, and a crossing that jumps more than one quarter of a lap is refused. Different
+  banks can snap the vehicle's orientation. Junction clipping and existing inner-rail flattening
+  still need driving and visual acceptance; neither establishes that a reported pop-off is fixed.
+- CPUs do not switch paths. Their avoidance uses the part type, not custom coverage or magnet
+  range, so a wide hazard can still catch them.
+- The control-point limit remains 64. The raised-limit disk/memory migration is not implemented.
+
+The A/B selection, typed Width/Center, optional-map, and junction changes have automated checks,
+not runtime acceptance. Verify save/reload and driving on a disposable track before relying on them.
 
 ## Bundles (Edit Cup)
 
@@ -197,7 +325,8 @@ A course with extension keys exports as two files inside its package:
 - `<name>.gdxc` is the course. Its layout does not change. Its flags (header offset 0x25) get bit 2, value 4, which means a sidecar exists.
 - `<name>.gdxe` is the sidecar. It holds the keys, one record for each kind and scope pair.
 
-A course without extension keys exports exactly as before: one `.gdxc`, no sidecar, and bit 2 clear.
+A course without extension keys has no `.gdxe`, and bit 2 stays clear. It can still have a `.gdxb`
+for forks or settings.
 
 The sidecar is bound to its course by the course's payload CRC-32, stored at header offset 0x2D. The importer reads a `.gdxe` only when the `.gdxc` next to it has bit 2 set, and it uses the sidecar only when the CRC matches. A `.gdxe` left in `exports/` by an earlier export therefore does nothing.
 
@@ -240,6 +369,7 @@ course-elements.gdxs       GXS1 store of keys and titles, beside the exe
 exports/<name>.gdxp        zip of the files below and the course's songs
   <name>.gdxc              flags bit 2 (value 4) set when a sidecar exists
   <name>.gdxe              GXE1 records bound to the .gdxc payload CRC-32 (header offset 0x2D)
+  <name>.gdxb              GXD1 forks/settings, when present; needs a newer build than 1.2.0
 exports/edit-cup.gdxp      zip of edit-cup.gdxc, its companion and the member songs
   edit-cup.gdxs            GXS1 companion of a bundle, bound to each member's payload CRC-32
 ```

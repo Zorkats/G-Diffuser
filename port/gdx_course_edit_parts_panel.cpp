@@ -9,6 +9,7 @@
 // = 0 turns it off.
 
 #include <cstdio>
+#include <cmath>
 #include <memory>
 
 #include "ship/Context.h"
@@ -75,15 +76,25 @@ bool ValueSlider(const char* label, const char* notSetText, int* value, int snap
     char shown[32];
 
     if (*value == 0) {
-        std::snprintf(shown, sizeof shown, "%s", notSetText);
+        std::snprintf(shown, sizeof shown, "%s (%s)", notSetText, scale > 0.0f ? "%.2f" : "%d");
     } else if (scale > 0.0f) {
-        std::snprintf(shown, sizeof shown, "%.2f", static_cast<float>(*value) / scale);
+        std::snprintf(shown, sizeof shown, "%%.2f");
     } else {
-        std::snprintf(shown, sizeof shown, "%d", *value);
+        std::snprintf(shown, sizeof shown, "%%d");
     }
     ImGui::SetNextItemWidth(kSliderWidth);
-    bool changed = ImGui::SliderInt(label, value, 0, max, shown, ImGuiSliderFlags_NoInput | ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SetItemTooltip("%s", tip);
+    bool changed;
+    if (scale > 0.0f) {
+        float scaled = static_cast<float>(*value) / scale;
+        changed = ImGui::SliderFloat(label, &scaled, 0.0f, static_cast<float>(max) / scale, shown,
+                                     ImGuiSliderFlags_AlwaysClamp);
+        if (changed) {
+            *value = static_cast<int>(std::lround(scaled * scale));
+        }
+    } else {
+        changed = ImGui::SliderInt(label, value, 0, max, shown, ImGuiSliderFlags_AlwaysClamp);
+    }
+    ImGui::SetItemTooltip("%s Ctrl+click the value to type it. 0 uses the inherited value.", tip);
     if (changed && *value > 0 && *value < snapMin) {
         *value = (*value < snapMin / 2) ? 0 : snapMin;
     }
@@ -197,9 +208,25 @@ void GdxCourseEditDrawPartsPanel(void) {
     ImGui::SetNextWindowSize(ImVec2(kPanelWidth, 0.0f), ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(0.8f);
     const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings |
-                                   ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav |
+                                   ImGuiWindowFlags_NoFocusOnAppearing |
                                    ImGuiWindowFlags_NoMove;
     if (ImGui::Begin("##CourseEditPartsPanel", nullptr, flags)) {
+        const int path = gdx_course_branch_editor_path_showing();
+        if (path != 0) {
+            ImGui::TextUnformatted(path == 2 ? "Path B showing" : "Path A showing");
+            ImGui::BeginDisabled(gdx_course_edit_native_grab_state() != 0 ||
+                                 gdx_course_edit_native_mouse_owned() != 0);
+            if (ImGui::RadioButton("Path A", path == 1)) {
+                gdx_course_edit_input_request_path(1);
+            }
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Path B", path == 2)) {
+                gdx_course_edit_input_request_path(2);
+            }
+            ImGui::EndDisabled();
+            ImGui::TextWrapped("Point: select a white node. Course: Ctrl+click a white node.");
+            ImGui::Separator();
+        }
         if (ImGui::CollapsingHeader("Point and track settings")) {
             DrawPointSection();
             ImGui::Separator();

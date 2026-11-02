@@ -52,6 +52,9 @@ void gdx_disk_save_mark_dirty(unsigned int offset, const void* data, unsigned in
  * rolling the previous file to .gdd.bak). Normally driven by the debounce tick;
  * exposed for explicit/forced flushes. */
 void gdx_disk_save_flush(void);
+unsigned long long gdx_disk_save_identity(void);
+int gdx_disk_save_recovery_flush(void);
+int gdx_disk_save_recovery_path(char* out, unsigned int capacity);
 
 /* Per-host-frame debounce tick. Flushes the journal once a write burst has
  * drained (no new mark_dirty for a short window), coalescing one game save into
