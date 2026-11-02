@@ -1,4 +1,5 @@
 #include "gdx_course_edit_input.h"
+#include <math.h>
 
 static GdxCourseEditInt32 sDragStartPending;
 static GdxCourseEditInt32 sDragStartPoint;
@@ -25,6 +26,9 @@ static GdxCourseEditInt32 sLineUpPending;
 static GdxCourseEditInt32 sNodePickPending;
 static GdxCourseEditInt32 sNodePickFork;
 static GdxCourseEditInt32 sNodePickNode;
+static GdxCourseEditInt32 sPathPending;
+static GdxCourseEditInt32 sScalarValueOption;
+static GdxCourseEditInt32 sScalarValue;
 static GdxCourseEditInt32 sExtraPending;
 static GdxCourseEditExtraRequest sExtra;
 static GdxCourseEditInt32 sBankValuePending;
@@ -349,7 +353,8 @@ GdxCourseEditInt32 gdx_course_edit_input_take_extra(GdxCourseEditExtraRequest* r
     return 1;
 }
 
-void gdx_course_edit_input_clear(void) {
+void gdx_course_edit_input_clear_tools(void) {
+    sScalarValueOption = 0;
     sSelectionAddMask = 0;
     sSelectionAddPending = 0;
     gdx_course_edit_input_clear_drag();
@@ -357,7 +362,79 @@ void gdx_course_edit_input_clear(void) {
     sSelectionPending = 0;
     sLineUpPending = 0;
     sNodePickPending = 0;
-    sExtraPending = 0;
     sBankValuePending = 0;
     sBankEntryActive = 0;
+}
+
+void gdx_course_edit_input_clear(void) {
+    gdx_course_edit_input_clear_tools();
+    sPathPending = 0;
+    sExtraPending = 0;
+}
+
+void gdx_course_edit_input_request_path(GdxCourseEditInt32 path) {
+    if (path == 1 || path == 2) {
+        sPathPending = path;
+    }
+}
+
+GdxCourseEditInt32 gdx_course_edit_input_take_path(GdxCourseEditInt32* path) {
+    if (sPathPending == 0 || path == 0) {
+        return 0;
+    }
+    *path = sPathPending;
+    sPathPending = 0;
+    return 1;
+}
+
+GdxCourseEditInt32 gdx_course_edit_scalar_value_apply(GdxCourseEditInt32 option, GdxCourseEditInt32 value,
+                                                       float* left, float* right) {
+    float delta;
+    float minimum;
+    float maximum;
+
+    if ((option != 2 && option != 4) || left == 0 || right == 0 ||
+        !(*left >= 50.0f && *right >= 50.0f && *left + *right <= 2000.0f)) {
+        return 0;
+    }
+    if (option == 2) {
+        delta = ((float)value * 10.0f - *left - *right) * 0.5f;
+        minimum = 50.0f - (*left < *right ? *left : *right);
+        maximum = 1000.0f - (*left + *right) * 0.5f;
+    } else {
+        delta = (float)value * 10.0f - (*left - *right) * 0.5f;
+        minimum = 50.0f - *left;
+        maximum = *right - 50.0f;
+    }
+    if (delta < minimum) {
+        delta = minimum;
+    }
+    if (delta > maximum) {
+        delta = maximum;
+    }
+    *left = floorf((*left + delta) / 10.0f + 0.5f) * 10.0f;
+    *right = floorf((*right + (option == 2 ? delta : -delta)) / 10.0f + 0.5f) * 10.0f;
+    if (*left + *right > 2000.0f) {
+        // An odd-width half-step can round both sides up. Keep the center without exceeding the native bound.
+        *left -= 10.0f;
+        *right -= 10.0f;
+    }
+    return 1;
+}
+
+void gdx_course_edit_input_request_scalar_value(GdxCourseEditInt32 option, GdxCourseEditInt32 value) {
+    if (option == 2 || option == 4) {
+        sScalarValueOption = option;
+        sScalarValue = value;
+    }
+}
+
+GdxCourseEditInt32 gdx_course_edit_input_take_scalar_value(GdxCourseEditInt32* option, GdxCourseEditInt32* value) {
+    if (sScalarValueOption == 0 || option == 0 || value == 0) {
+        return 0;
+    }
+    *option = sScalarValueOption;
+    *value = sScalarValue;
+    sScalarValueOption = 0;
+    return 1;
 }

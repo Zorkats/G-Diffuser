@@ -35,6 +35,8 @@ int gdx_course_state_load(void);
  * wrote, 0 when there was nothing to write or the store is not loaded yet, and a negative value on error
  * (reported in the log). Safe to call after every change. */
 int gdx_course_state_flush(void);
+int gdx_course_state_recovery_ready(void);
+int gdx_course_state_recovery_flush(int kind);
 
 /* A disk file was renamed (AB150.c disk op 15, after MFS reported success). The keys and the title of
  * the old course id move to the new one, then the state file is rewritten. Names and extensions are MFS

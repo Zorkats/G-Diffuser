@@ -1,4 +1,4 @@
-# port/ — game glue + decomp game sources compiled for the host. Kept standalone-capable so the
+# port/ â€” game glue + decomp game sources compiled for the host. Kept standalone-capable so the
 # decomp compile can iterate without rebuilding libultraship.
 cmake_minimum_required(VERSION 3.20)
 if(NOT DEFINED PROJECT_NAME)
@@ -33,7 +33,7 @@ else()
 endif()
 
 # Decomp game C compiled for PC. libultra/* is excluded (libultraship provides it) except gu/
-# (matrix math) and os/ — we run the decomp's own cooperative thread scheduler and supply only
+# (matrix math) and os/ â€” we run the decomp's own cooperative thread scheduler and supply only
 # the low-level context switch in the port. rsp/* and leo/* are handled elsewhere.
 file(GLOB_RECURSE GAME_SOURCES CONFIGURE_DEPENDS
     "${DECOMP}/src/game/*.c"
@@ -45,7 +45,7 @@ file(GLOB_RECURSE GAME_SOURCES CONFIGURE_DEPENDS
     "${DECOMP}/src/libultra/os/*.c"
 )
 
-# Time/timers come from libultraship (os_time.cpp) — exclude the decomp's to avoid duplicate
+# Time/timers come from libultraship (os_time.cpp) â€” exclude the decomp's to avoid duplicate
 # symbols. Threading/messaging/events stay decomp.
 list(FILTER GAME_SOURCES EXCLUDE REGEX "/libultra/os/gettime\\.c$")
 list(FILTER GAME_SOURCES EXCLUDE REGEX "/libultra/os/settime\\.c$")
@@ -54,19 +54,19 @@ list(FILTER GAME_SOURCES EXCLUDE REGEX "/libultra/os/timerintr\\.c$")
 # Our osCreateThread (port/n64_sched.c) captures entry+arg as full 64-bit pointers; the decomp's
 # truncates them into u32 context fields.
 list(FILTER GAME_SOURCES EXCLUDE REGEX "/libultra/os/createthread\\.c$")
-# The decomp's osInitialize does real PIF/PI register I/O — replaced in port/n64_sched.c.
+# The decomp's osInitialize does real PIF/PI register I/O â€” replaced in port/n64_sched.c.
 list(FILTER GAME_SOURCES EXCLUDE REGEX "/libultra/os/initialize\\.c$")
-# The decomp's osGetMemSize dereferences N64 bus addresses — replaced in port/n64_sched.c.
+# The decomp's osGetMemSize dereferences N64 bus addresses â€” replaced in port/n64_sched.c.
 list(FILTER GAME_SOURCES EXCLUDE REGEX "/libultra/os/getmemsize\\.c$")
 
-# Expansion Kit: EXPANSION_KIT activates the decomp's EK hooks WITHOUT VERSION_JP — the
+# Expansion Kit: EXPANSION_KIT activates the decomp's EK hooks WITHOUT VERSION_JP â€” the
 # VERSION_JP sites are JP-cart text/font differences deliberately kept on US behavior.
 # EK modes are runtime-gated by disk-image presence (port/n64_leo.c).
 option(GDX_EXPANSION_KIT "Compile Expansion Kit (64DD) support into the port" ON)
 
-# GDX_DEV_TOOLS — master switch for the behaviour-altering (Bucket B) developer gates
+# GDX_DEV_TOOLS â€” master switch for the behaviour-altering (Bucket B) developer gates
 # (port/gdx_dev_gates.h, docs/menu/DEVELOPER_TAB.md). When absent, every Bucket B gate is a
-# hard-wired 0 (no getenv, no CVar read) and the Dev Tools page omits the section — safe because
+# hard-wired 0 (no getenv, no CVar read) and the Dev Tools page omits the section â€” safe because
 # the gate table normalizes 0 == stock behaviour. ON everywhere except Release; the generator
 # expression keeps one build tree correct under both single- and multi-config generators.
 # GDX_FORCE_DEV_TOOLS keeps the gates in a Release soak/QA binary.
@@ -77,21 +77,21 @@ else()
     set(GDX_DEV_TOOLS_DEFS "$<$<NOT:$<CONFIG:Release>>:GDX_DEV_TOOLS=1>")
 endif()
 
-# GDX_ALLOW_JP_INPUTS — whether the ORDINARY (US) binary may ingest Japanese-region game data.
+# GDX_ALLOW_JP_INPUTS â€” whether the ORDINARY (US) binary may ingest Japanese-region game data.
 # Not GDX_BUILD_JP (that builds a second VERSION_JP executable).
 #
 # Defaults OFF because the JP raw-ROM path plays through US-profile binding tables and produces
-# loud static/blasting audio (observed, owner testing) — an ear-safety hazard, so release builds
+# loud static/blasting audio (observed, owner testing) â€” an ear-safety hazard, so release builds
 # refuse JP inputs outright. Gated, not deleted; JP support is a later release.
 # Covered sites: gdx_firstboot.cpp (refuses JP ROM by SHA-1 and header country code, and the
 # retail JP EK disk), rom_buffer.cpp (runtime cartridge loader), disk_buffer.cpp (drops JP disk
 # filenames, refuses the retail JP image by CRC-64). The 64DD IPL is deliberately NOT gated: the
 # drive firmware is Japanese by existence and carries no game audio.
-# The G-Diffuser-JP target always sets it — building that target is the opt-in.
+# The G-Diffuser-JP target always sets it â€” building that target is the opt-in.
 option(GDX_ALLOW_JP_INPUTS
-       "Accept Japanese-region game data (JP cartridge ROM, retail JP Expansion Kit disk). DEV ONLY — the JP raw-ROM path has broken audio." OFF)
+       "Accept Japanese-region game data (JP cartridge ROM, retail JP Expansion Kit disk). DEV ONLY â€” the JP raw-ROM path has broken audio." OFF)
 if(GDX_ALLOW_JP_INPUTS)
-    message(STATUS "G-Diffuser: GDX_ALLOW_JP_INPUTS=ON — Japanese ROM/disk inputs are ACCEPTED (experimental; JP audio is known-bad).")
+    message(STATUS "G-Diffuser: GDX_ALLOW_JP_INPUTS=ON â€” Japanese ROM/disk inputs are ACCEPTED (experimental; JP audio is known-bad).")
     set(GDX_JP_INPUT_DEFS "GDX_ALLOW_JP_INPUTS=1")
 else()
     # Empty LIST, not an empty string element, so the unquoted expansion contributes no argument.
@@ -112,12 +112,12 @@ if(NOT GDX_EXPANSION_KIT)
 else()
     # Mirrors the decomp Makefile's EXPANSION_KIT=1 exclusions: the disk-side subsystems REPLACE
     # their rom-side twins (audio/disk vs audio/rom, sys/disk vs sys/rom, dd_save.c vs
-    # save_buffer.c) — alternatives, never compiled together.
+    # save_buffer.c) â€” alternatives, never compiled together.
     list(FILTER GAME_SOURCES EXCLUDE REGEX "/sys/rom/")
     list(FILTER GAME_SOURCES EXCLUDE REGEX "/audio/rom/")
     list(FILTER GAME_SOURCES EXCLUDE REGEX "/overlays/ovl_i2/save_buffer\\.c$")
     list(FILTER GAME_SOURCES EXCLUDE REGEX "/overlays/ovl_i11/")
-    # ead_demo (64DD attract demo) has broken WIP C bodies upstream — exclude until the decomp
+    # ead_demo (64DD attract demo) has broken WIP C bodies upstream â€” exclude until the decomp
     # matures; cosmetic-only.
     list(FILTER GAME_SOURCES EXCLUDE REGEX "/overlays/ead_demo/")
     # libultraship provides the osAi* surface (same reason as aisetnextbuf.c below).
@@ -135,10 +135,10 @@ else()
     list(APPEND GAME_SOURCES ${EK_LEO_SOURCES})
 endif()
 
-# libultraship already provides these libultra functions — exclude to avoid duplicate symbols.
+# libultraship already provides these libultra functions â€” exclude to avoid duplicate symbols.
 list(FILTER GAME_SOURCES EXCLUDE REGEX "/audio/rom/lib/aisetnextbuf\\.c$")  # osAiSetNextBuffer
 
-# segment.c / cartridge_offsets.c: N64 ROM-segment system — linker segment symbols don't exist
+# segment.c / cartridge_offsets.c: N64 ROM-segment system â€” linker segment symbols don't exist
 # on host; replaced by libultraship resource loading.
 list(FILTER GAME_SOURCES EXCLUDE REGEX "/sys/segment\\.c$")
 list(FILTER GAME_SOURCES EXCLUDE REGEX "/libultra/os/virtualtophysical\\.c$")
@@ -229,7 +229,7 @@ target_compile_definitions(gdiffuser_game PRIVATE
 )
 
 # MSVC: silence IDO-era decomp noise, but keep fatal the classes that are UB on x64 and have
-# caused real crashes: C4715/C4716 (non-void falls off the end — MIPS left the value in $v0,
+# caused real crashes: C4715/C4716 (non-void falls off the end â€” MIPS left the value in $v0,
 # MSVC returns garbage) and C4013 (implicit decl truncates a 64-bit pointer return to EAX;
 # Course Edit's "Test Course" crashed this way for want of one prototype).
 # They MUST be spelled /we, not /w1NNNN: /W0 outranks /w1NNNN and would silence them again. /we
@@ -297,7 +297,7 @@ endif()
 # strip rationale). EXCLUDE_FROM_ALL keeps it out of the test targets' builds.
 add_subdirectory(third_party/discord-rpc EXCLUDE_FROM_ALL)
 
-# Lua 5.4.8: vendored static lib for the scripting layer. Dormant for now — linked by both
+# Lua 5.4.8: vendored static lib for the scripting layer. Dormant for now â€” linked by both
 # executables but no port code references it yet (the runtime core lands separately).
 add_subdirectory(third_party/lua EXCLUDE_FROM_ALL)
 
@@ -364,7 +364,11 @@ gdx_add_main_target(G-Diffuser
     gdx_course_music.cpp       # 7A custom Course Edit soundtracks: music scan, store choice, stream override
     gdx_ek_text.c              # Course Edit names and number badges composed from the stock EK textures
     gdx_edit_cup.c             # Edit Cup slot names split into CRS_ENTRY.CENT and .CENL (decomp MFS calls it)
-    gdx_course_state.cpp       # Registry phase 2: course-elements.gdxs load and flush
+    gdx_course_state.cpp
+    gdx_track_recovery.cpp
+    gdx_track_recovery_runtime.cpp
+    gdx_recovery_file.cpp
+    gdx_recovery_metadata.cpp       # Registry phase 2: course-elements.gdxs load and flush
     gdx_course_packs.cpp       # Registry phase 2: mods/<pack>/elements.txt and the custom skybox rows
     gdx_audio_thread.cpp
     gdx_audio_capture.c
@@ -389,6 +393,8 @@ gdx_add_main_target(G-Diffuser
     gdx_course_registry.c          # Course Edit element registry + GXE1 sidecar codec (pure C)
     gdx_course_branch_format.c     # Course forks: GdxBranchSet model, GXB1 block and GBS1 file (pure C)
     gdx_course_branch_view.c       # Course forks: the active set in plain types for global.h code
+    gdx_course_minimap.c
+    gdx_course_junction.c
     gdx_course_branch_edit.c       # Course forks: editor fork set, path B view swap, undo state (pure C)
     gdx_course_settings.c          # Per-track and per-point values: GXK1 block, GKS1 file, .gdxb sidecar (pure C)
     gdx_course_settings_view.c     # The active values in plain types for global.h code
@@ -427,6 +433,9 @@ gdx_add_main_target(G-Diffuser
     gdx_lua_state.c              # includes unk_structs.h directly (exe targets carry the decomp
                                  # include dirs) so gdx_lua.cpp stays decomp-header-free
     gdx_model_packs.cpp          # F4a stock-machine model packs; hooks live in decomp/src/game/racer.c
+    gdx_machine_capture.cpp
+    gdx_machine_export.cpp
+    gdx_machine_capture_runtime.cpp
     mio0_wrap.c
     gdx_segment_source.c       # in the exe, not gdiffuser_game: needs symbols from AssetLoader.cpp,
                                 # rom_buffer.cpp and gen/AssetBindings.c
@@ -465,7 +474,7 @@ if(WIN32)
     #
     # DO NOT add /DYNAMICBASE:NO. It was tried, to close the ASLR low32-collision class (a random
     # image base whose low32 lands in an N64 address window misroutes reconstructed 32-bit tokens
-    # — see the KSEG guard in decomp/src/sys/dma.c), and the fixed base 0x140000000 was worse:
+    # â€” see the KSEG guard in decomp/src/sys/dma.c), and the fixed base 0x140000000 was worse:
     # module low32s at 0x40000000..0x41FFFFFF corrupted the translated menu/text textures
     # build-wide and null-write-crashed Fast::Interpreter::ImportTextureRgba32 at startup
     # (GDX_WIDE_ASSET_RESOLVE=0 ruled out the resolver, leaving the base). Until every low32
@@ -475,7 +484,7 @@ if(WIN32)
     endif()
 endif()
 
-# ── Desktop-only deployment + the standalone extractor ───────────────────────────────────────────
+# â”€â”€ Desktop-only deployment + the standalone extractor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Everything from here to the include directories below stages files NEXT TO THE EXECUTABLE, which
 # is not a place that exists on Android: the APK has no writable install directory, and Gradle
 # assembles the same set into the app's own external files directory instead
@@ -641,7 +650,7 @@ add_custom_command(TARGET G-Diffuser POST_BUILD
     VERBATIM)
 
 else()
-    # ── Android: the extractor is linked in, not spawned from disk ───────────────────────────────
+    # â”€â”€ Android: the extractor is linked in, not spawned from disk â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # An APK cannot ship a second executable: native code is loaded from the app's library
     # directory as shared objects, and W^X has blocked exec() out of app-writable storage since
     # API 29. Torch is therefore compiled INTO libmain.so and reached through the entry point in
@@ -716,7 +725,7 @@ if(WIN32)
 elseif(ANDROID)
     include(FetchContent)
     # Ogg/Vorbis resolve to the copies fetched in cmake/dependencies/android.cmake; the rest are
-    # NDK system libraries. No Threads:: here — pthreads is inside Bionic's libc, and there is no
+    # NDK system libraries. No Threads:: here â€” pthreads is inside Bionic's libc, and there is no
     # separate libdl to link either.
     find_package(Ogg REQUIRED)
     find_package(Vorbis REQUIRED)
@@ -730,7 +739,7 @@ elseif(ANDROID)
         android    # SDL_AndroidGetActivity / the JNI attach helpers
         log)       # __android_log_print, which is where port logging surfaces on a device
 
-    # libultraship links libzip PRIVATE, so its include directories stop there — but
+    # libultraship links libzip PRIVATE, so its include directories stop there â€” but
     # O2rArchive.h includes <zip.h> and the port includes that header, so it needs them too.
     # Every other platform picks zip.h up from a system include path and never notices.
     # zipconf.h is generated, hence the binary dir.
@@ -766,7 +775,7 @@ if(GDX_PORT_WARN_FLAGS)
     target_compile_options(G-Diffuser PRIVATE ${GDX_PORT_WARN_FLAGS})
 endif()
 # Same UB-hardening as gdiffuser_game/cxd4_rsp: the port glue reinterprets N64 RDRAM through
-# host pointers and resolves host ranges by bit-pattern — all strict-aliasing-sensitive.
+# host pointers and resolves host ranges by bit-pattern â€” all strict-aliasing-sensitive.
 if(NOT MSVC)
     target_compile_options(G-Diffuser PRIVATE -fno-strict-aliasing -fwrapv)
     if(APPLE)
@@ -794,7 +803,7 @@ if(TARGET libultraship)
     )
 endif()
 
-# ── Unit tests (host platforms only) ─────────────────────────────────────────────────────────────
+# â”€â”€ Unit tests (host platforms only) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Every target below is an executable meant to be RUN by whoever built it. Cross-compiled for a
 # phone they would build fine and could never be executed, so Android skips them: `ctest` there is
 # a host concern, and the APK has no use for them.
@@ -1078,6 +1087,74 @@ else()
     target_compile_options(gdx_music_stream_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
 endif()
 
+add_executable(gdx_course_junction_tests
+    tests/gdx_course_junction_tests.c
+    gdx_course_junction.c)
+target_include_directories(gdx_course_junction_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_course_junction_tests PRIVATE /W3 /UNDEBUG)
+else()
+    target_compile_options(gdx_course_junction_tests PRIVATE ${GDX_PORT_WARN_FLAGS} -UNDEBUG)
+    target_link_libraries(gdx_course_junction_tests PRIVATE m)
+endif()
+
+add_executable(gdx_track_recovery_tests
+    tests/gdx_track_recovery_tests.cpp
+    gdx_track_recovery.cpp
+    gdx_recovery_file.cpp
+    gdx_recovery_metadata.cpp
+    gdx_course_registry.c
+    gdx_course_branch_format.c
+    gdx_course_settings.c)
+target_include_directories(gdx_track_recovery_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_track_recovery_tests PRIVATE /W3 /UNDEBUG)
+else()
+    target_compile_options(gdx_track_recovery_tests PRIVATE ${GDX_PORT_WARN_FLAGS} -UNDEBUG)
+endif()
+
+add_executable(gdx_recovery_native_tests
+    tests/gdx_recovery_native_tests.cpp
+    tests/gdx_recovery_native_fixture.c
+    "${DECOMP}/src/overlays/expansion_kit/gdx_recovery.c"
+    gdx_edit_cup.c)
+target_include_directories(gdx_recovery_native_tests PRIVATE "${DECOMP}" "${DECOMP}/include" "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_definitions(gdx_recovery_native_tests PRIVATE PORT=1 EXPANSION_KIT=1 VERSION_US=1 _LANGUAGE_C=1 F3DEX_GBI_2=1)
+if(MSVC)
+    target_compile_options(gdx_recovery_native_tests PRIVATE /W3 /UNDEBUG /we4013)
+else()
+    target_compile_options(gdx_recovery_native_tests PRIVATE ${GDX_PORT_WARN_FLAGS} -UNDEBUG)
+endif()
+
+add_executable(gdx_machine_capture_tests
+    tests/gdx_machine_capture_tests.cpp
+    tests/gdx_machine_native_fixture.c
+    gdx_machine_capture.cpp
+    gdx_machine_export.cpp)
+target_include_directories(gdx_machine_capture_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${DECOMP}/include")
+target_compile_definitions(gdx_machine_capture_tests PRIVATE
+    PORT=1 GDIFFUSER_PORT=1 F3DEX_GBI_2=1 _LANGUAGE_C=1 VERSION_US=1 _CRT_SECURE_NO_WARNINGS=1)
+if(MSVC)
+    target_compile_options(gdx_machine_capture_tests PRIVATE /W3 /UNDEBUG)
+else()
+    target_compile_options(gdx_machine_capture_tests PRIVATE ${GDX_PORT_WARN_FLAGS} -UNDEBUG)
+    find_package(Threads REQUIRED)
+    target_link_libraries(gdx_machine_capture_tests PRIVATE Threads::Threads)
+endif()
+
+add_executable(gdx_course_minimap_tests
+    tests/gdx_course_minimap_tests.c
+    gdx_course_minimap.c
+    gdx_course_branch_format.c
+    gdx_course_registry.c)
+target_include_directories(gdx_course_minimap_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_course_minimap_tests PRIVATE /W3 /UNDEBUG)
+else()
+    target_compile_options(gdx_course_minimap_tests PRIVATE ${GDX_PORT_WARN_FLAGS} -UNDEBUG)
+    target_link_libraries(gdx_course_minimap_tests PRIVATE m)
+endif()
+
 add_executable(gdx_course_edit_input_tests
     tests/gdx_course_edit_input_tests.c
     gdx_course_edit_input.c)
@@ -1264,10 +1341,10 @@ endif()
 
 endif() # NOT ANDROID (unit tests)
 
-# EXPERIMENTAL second binary — G-Diffuser-JP (VERSION_JP profile).
+# EXPERIMENTAL second binary â€” G-Diffuser-JP (VERSION_JP profile).
 # The port is US-only in three compile-time layers (binding tables, golden constants, VERSION_JP
 # decomp branches), so US+JP cannot share one executable; the frozen decision
-# (QUALITY_PARITY_ROADMAP §R5) is two binaries from one tree sharing one data dir. Default OFF so
+# (QUALITY_PARITY_ROADMAP Â§R5) is two binaries from one tree sharing one data dir. Default OFF so
 # the default build is byte-unchanged. This does not compile yet: the Torch-generated JP asset
 # headers do not exist, the VERSION_JP decomp sites have never been built here, the EK gen files
 # are US-EK placeholders, and gen/LinkStubs.jp.c needs regenerating from a JP link log.
@@ -1276,7 +1353,7 @@ option(GDX_BUILD_JP "Build the EXPERIMENTAL second binary G-Diffuser-JP (VERSION
 # NOT ANDROID: the second binary is a desktop experiment, and its deployment steps stage the
 # extractor and recipes next to an executable that does not exist there.
 if(GDX_BUILD_JP AND NOT ANDROID)
-    message(STATUS "G-Diffuser: GDX_BUILD_JP=ON — configuring EXPERIMENTAL VERSION_JP target G-Diffuser-JP.")
+    message(STATUS "G-Diffuser: GDX_BUILD_JP=ON â€” configuring EXPERIMENTAL VERSION_JP target G-Diffuser-JP.")
 
     # Mirror of gdiffuser_game with the JP profile: only the defines and the generated
     # binding/stub files differ.
@@ -1378,6 +1455,10 @@ if(GDX_BUILD_JP AND NOT ANDROID)
         gdx_ek_text.c
         gdx_edit_cup.c
         gdx_course_state.cpp
+    gdx_track_recovery.cpp
+    gdx_track_recovery_runtime.cpp
+    gdx_recovery_file.cpp
+    gdx_recovery_metadata.cpp
         gdx_course_packs.cpp
         gdx_audio_thread.cpp
         gdx_audio_capture.c
@@ -1406,6 +1487,8 @@ if(GDX_BUILD_JP AND NOT ANDROID)
         gdx_course_registry.c
         gdx_course_branch_format.c
         gdx_course_branch_view.c
+        gdx_course_minimap.c
+        gdx_course_junction.c
         gdx_course_branch_edit.c
         gdx_course_settings.c
         gdx_course_settings_view.c
@@ -1435,13 +1518,16 @@ if(GDX_BUILD_JP AND NOT ANDROID)
         gdx_lua.cpp
         gdx_lua_state.c
         gdx_model_packs.cpp
+        gdx_machine_capture.cpp
+        gdx_machine_export.cpp
+        gdx_machine_capture_runtime.cpp
         mio0_wrap.c
         gdx_segment_source.c
         "${CMAKE_CURRENT_SOURCE_DIR}/../torch/lib/libmio0/mio0.c"
         $<TARGET_OBJECTS:gdiffuser_game_jp>)
 
     # The exe TUs must see VERSION_JP too: they include decomp headers whose region branches
-    # depend on it. GDX_ALLOW_JP_INPUTS is unconditional here regardless of the option — this
+    # depend on it. GDX_ALLOW_JP_INPUTS is unconditional here regardless of the option â€” this
     # target IS the Japanese profile; refusing JP data would leave it nothing to load.
     target_compile_definitions(G-Diffuser-JP PRIVATE
         ${GDX_DEV_TOOLS_DEFS}
@@ -1451,7 +1537,7 @@ if(GDX_BUILD_JP AND NOT ANDROID)
         ASSET_VERSION=jp ASSET_REVISION=rev0)
 
     if(GDX_EXPANSION_KIT)
-        # EK-only symbols — see the matching US-target comment above.
+        # EK-only symbols â€” see the matching US-target comment above.
         target_sources(G-Diffuser-JP PRIVATE disk_buffer.cpp gen/EkTranslatedOverrides.c
                                              gdx_ek_strings.c gen/EkTranslatedStrings.c
                                              gdx_course_edit_history.cpp)
@@ -1466,7 +1552,7 @@ if(GDX_BUILD_JP AND NOT ANDROID)
         set_target_properties(G-Diffuser-JP PROPERTIES WIN32_EXECUTABLE TRUE)
         target_sources(G-Diffuser-JP PRIVATE gdiffuser.rc)
         if(MSVC)
-            # No /DYNAMICBASE:NO — see the note on the US target above.
+            # No /DYNAMICBASE:NO â€” see the note on the US target above.
             target_link_options(G-Diffuser-JP PRIVATE "/MAP")
         endif()
     endif()

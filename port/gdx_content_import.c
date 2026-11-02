@@ -10,6 +10,7 @@
 #define _CRT_SECURE_NO_WARNINGS /* plain fopen/fread below; harmless on non-MSVC */
 
 #include "gdx_content_import.h"
+#include "gdx_track_recovery_runtime.h"
 #include "gdx_content_pack.h"
 #include "gdx_course_bounds.h"
 #include "gdx_course_music.h"
@@ -458,7 +459,7 @@ static void gdx_import_check_disk_state(GdxContentImportEntry* entry, uint32_t* 
     const char* classPrefix;
     char twinExt[6];
 
-    if (gdx_content_mfs_busy()) {
+    if (gdx_content_mfs_busy() || gdx_recovery_blocks_writes()) {
         *errors |= GDX_IMPORT_ERR_STATE_UNKNOWN;
         entry->classFileCount = -1;
         return;
@@ -552,7 +553,7 @@ static void gdx_import_check_disk_state_bundle(GdxContentImportEntry* entry, con
     int i;
     int j;
 
-    if (gdx_content_mfs_busy()) {
+    if (gdx_content_mfs_busy() || gdx_recovery_blocks_writes()) {
         *errors |= GDX_IMPORT_ERR_STATE_UNKNOWN;
         entry->classFileCount = -1;
         return;
@@ -1698,7 +1699,7 @@ int gdx_content_import_begin(const char* fileName) {
     if (sImportState == GDX_IMPORT_PENDING || sCupState == GDX_CUP_PENDING) {
         return GDX_CONTENT_IMPORT_ERR_PENDING;
     }
-    if (gdx_content_mfs_busy()) {
+    if (gdx_content_mfs_busy() || gdx_recovery_blocks_writes()) {
         return GDX_CONTENT_ERR_BUSY;
     }
     if (!gdx_content_exports_directory(directory, sizeof(directory), 0)) {
@@ -1733,6 +1734,9 @@ int gdx_content_import_begin(const char* fileName) {
 
 /* The validate, read and enqueue steps of gdx_content_import_begin for one .gdxc path. */
 static int gdx_import_begin_path(const char* path) {
+    if (gdx_recovery_blocks_writes()) {
+        return GDX_CONTENT_ERR_BUSY;
+    }
     GdxContentImportEntry entry;
 
     if (gdx_import_peek_content_type(path) == GDX_CONTENT_TYPE_BUNDLE) {
@@ -1966,7 +1970,7 @@ int gdx_content_import_begin_payload(const char* name, const char* extension, in
     if (sImportState == GDX_IMPORT_PENDING || sCupState == GDX_CUP_PENDING) {
         return GDX_CONTENT_IMPORT_ERR_PENDING;
     }
-    if (gdx_content_mfs_busy()) {
+    if (gdx_content_mfs_busy() || gdx_recovery_blocks_writes()) {
         return GDX_CONTENT_ERR_BUSY;
     }
 
@@ -2011,7 +2015,7 @@ int gdx_content_cup_list(char outNames[GDX_CONTENT_CUP_SLOT_COUNT][GDX_CONTENT_C
     if (outNames == NULL) {
         return GDX_CONTENT_ERR_BAD_ARGS;
     }
-    if (gdx_content_mfs_busy()) {
+    if (gdx_content_mfs_busy() || gdx_recovery_blocks_writes()) {
         return GDX_CONTENT_ERR_BUSY;
     }
     if (gDirectoryEntryCount <= 0) {
@@ -2034,7 +2038,7 @@ static int gdx_content_cup_begin_common(int32_t slot, int32_t mode) {
     if (sCupState == GDX_CUP_PENDING || sImportState == GDX_IMPORT_PENDING) {
         return GDX_CONTENT_IMPORT_ERR_PENDING;
     }
-    if (gdx_content_mfs_busy()) {
+    if (gdx_content_mfs_busy() || gdx_recovery_blocks_writes()) {
         return GDX_CONTENT_ERR_BUSY;
     }
     sCupSlot = slot;
@@ -2069,7 +2073,7 @@ int gdx_content_cup_register_begin(const char* name, int32_t slot) {
     if (sCupState == GDX_CUP_PENDING || sImportState == GDX_IMPORT_PENDING) {
         return GDX_CONTENT_IMPORT_ERR_PENDING;
     }
-    if (gdx_content_mfs_busy()) {
+    if (gdx_content_mfs_busy() || gdx_recovery_blocks_writes()) {
         return GDX_CONTENT_ERR_BUSY;
     }
     if (gdx_content_file_exists(name, "CRSD") != 1) {

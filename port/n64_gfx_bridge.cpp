@@ -45,6 +45,7 @@
 #include "gdx_segment_source.h"
 #include "n64_rdram.h"
 #include "n64_gfx_bridge.h"
+#include "gdx_machine_capture_runtime.h"
 #include "n64_gfx_convert.h"
 #include "gdx_vi_convert.h"
 #include "gdx_interp.h"
@@ -8567,6 +8568,91 @@ extern "C" void gdx_load_venue_building_texture(unsigned int romOffset) {
    otherwise knows how large the destination actually is. */
 extern "C" size_t gdx_registered_host_capacity(const void* host) {
     return RegisteredHostRemaining(reinterpret_cast<uintptr_t>(host));
+}
+
+namespace {
+bool ReadMachineCaptureResource(void* user, uintptr_t address, gdx::machine::Resource kind,
+                                size_t bytes, gdx::machine::Span& span) {
+    using namespace gdx::machine;
+    const auto& roots = *static_cast<const std::array<Root, 3>*>(user);
+    if (kind == Resource::Commands) {
+        for (const auto& root : roots) {
+            if (root.address == address && root.commands && root.commands <= MaxCommands) {
+                const size_t length = root.commands * 16;
+                if (ReadableByteLimit(address) < length || bytes > length) {
+                    return false;
+                }
+                span = {reinterpret_cast<const uint8_t*>(address), length, Layout::Wide};
+                return true;
+            }
+        }
+    }
+    uintptr_t resolved = 0;
+    ResolvedAddress asset{};
+    if (address <= UINT32_MAX && (address >> 24) > 0 && (address >> 24) < kGfxSegmentCount) {
+        const uint8_t segment = uint8_t(address >> 24);
+        if (segment == 9) {
+            if (!gdx_resolve_mode_segment9(uint32_t(address), bytes, &resolved)) {
+                return false;
+            }
+        } else if (gSegments[segment]) {
+            resolved = gSegments[segment] + (address & 0xFFFFFF);
+        }
+    } else {
+        AssetSegmentLookup lookup{};
+        if (LookupAssetSegment(Low32(address), lookup)) {
+            // An unavailable mode-owned asset must not fall through to its readable zero stub.
+            if (lookup.offset >= lookup.imageSize || bytes > lookup.imageSize - lookup.offset ||
+                !ResolveGeneratedAssetStub(Low32(address), asset, bytes)) {
+                return false;
+            }
+            resolved = asset.full;
+        } else if (address <= UINT32_MAX) {
+            if (!G2ResolvePhysical(nullptr, uint32_t(address), bytes, &resolved)) {
+                return false;
+            }
+        } else {
+            resolved = address;
+        }
+    }
+    if (!resolved) {
+        return false;
+    }
+    const size_t registered = RegisteredHostRemaining(resolved);
+    const size_t capacity = registered ? registered : ReadableByteLimit(resolved);
+    if (capacity < bytes) {
+        return false;
+    }
+    Layout layout = Layout::Native;
+    if (kind == Resource::Commands) {
+        if (IsHostWideCommandPointer(resolved)) {
+            layout = Layout::Wide;
+        } else if (IsHostN64CommandPointer(resolved)) {
+            layout = Layout::Native;
+        } else if (IsRawN64HostPointer(resolved)) {
+            // Generated images are fixed up and registered as native command ranges.
+            layout = IsLikelyBigEndianDisplayList(reinterpret_cast<const N64Gfx*>(resolved), capacity / 8)
+                         ? Layout::BigEndian : Layout::Native;
+        } else {
+            layout = Layout::Wide;
+        }
+    }
+    span = {reinterpret_cast<const uint8_t*>(resolved), capacity, layout};
+    return true;
+}
+}
+
+extern "C" void GdxMachineCapture_Prepared(int character, const void* setup, const void* textures,
+                                           size_t textureCount, const void* model, size_t modelCount,
+                                           unsigned char red, unsigned char green, unsigned char blue) {
+    gdx::machine::Request request;
+    request.roots = {{{reinterpret_cast<uintptr_t>(setup), 0},
+                      {reinterpret_cast<uintptr_t>(textures), textureCount},
+                      {reinterpret_cast<uintptr_t>(model), modelCount}}};
+    request.environment = {red, green, blue, 255};
+    request.read = ReadMachineCaptureResource;
+    request.user = &request.roots;
+    GdxMachineCapture_Publish(character, gdx::machine::Capture(request));
 }
 
 #ifdef _WIN32

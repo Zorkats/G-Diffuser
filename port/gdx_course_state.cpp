@@ -9,6 +9,7 @@
 #include "gdx_course_registry.h"
 #include "gdx_course_settings.h"
 #include "port_log.h"
+#include "gdx_track_recovery_runtime.h"
 
 #include <cstdio>
 #include <cstring>
@@ -49,6 +50,7 @@ StoreFile sSettingsFile = { "course-settings.gks",           "course settings st
 char sEditFileId[GDX_COURSE_FILE_ID_MAX + 1] = "";
 
 bool sBooted = false;
+bool sRecoveryReady = false;
 
 std::filesystem::path exe_relative(const char* relative) {
     char buf[1024];
@@ -79,6 +81,9 @@ int store_load(StoreFile* store) {
     int rc;
 
     if (!std::filesystem::exists(path, ec)) {
+        if (ec) {
+            return -1;
+        }
         store->loaded = true;
         store->savedRevision = store->revision();
         return 0;
@@ -180,10 +185,14 @@ extern "C" int gdx_course_state_load(void) {
     const int forks = store_load(&sForkFile);
     const int elements = store_load(&sElementFile);
 
+    sRecoveryReady = settings >= 0 && forks >= 0 && elements >= 0;
     return (elements < 0) ? elements : (forks < 0) ? forks : (settings < 0) ? settings : elements;
 }
 
 extern "C" int gdx_course_state_flush(void) {
+    if (gdx_recovery_persistence_busy()) {
+        return -1;
+    }
     const int settings = store_flush(&sSettingsFile);
     const int forks = store_flush(&sForkFile);
     const int elements = store_flush(&sElementFile);
@@ -253,4 +262,28 @@ extern "C" int gdx_course_state_edit_file_id(char* out, int outCap) {
     }
     std::snprintf(out, static_cast<std::size_t>(outCap), "%s", sEditFileId);
     return 1;
+}
+
+extern "C" int gdx_course_state_recovery_ready(void) {
+    gdx_course_boot();
+    return sRecoveryReady && sElementFile.loaded && sForkFile.loaded && sSettingsFile.loaded;
+}
+
+extern "C" int gdx_course_state_recovery_flush(int kind) {
+    if (!gdx_course_state_recovery_ready()) {
+        return -1;
+    }
+    StoreFile* store = (kind == 2 || kind == 3) ? &sElementFile :
+        kind == 4 ? &sForkFile : kind == 5 ? &sSettingsFile : nullptr;
+    if (!store) {
+        return -1;
+    }
+    std::vector<unsigned char> bytes(store->maxBytes);
+    const int size = store->encode(bytes.data(), bytes.size());
+    const auto path = exe_relative(store->name).string();
+    if (size < 0 || !gdx_recovery_write_await(path.c_str(), bytes.data(), size_t(size))) {
+        return -1;
+    }
+    store->savedRevision = store->revision();
+    return 0;
 }

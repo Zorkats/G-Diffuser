@@ -2,6 +2,7 @@
 
 #include "gdx_content_import.h"
 #include "gdx_content_io.h"
+#include "gdx_course_minimap.h"
 #include "gdx_mfs_image.h"
 #include "gdx_rom_courses.h"
 #include "ship/window/gui/GuiWindow.h"
@@ -53,12 +54,12 @@ class GdxContentWindow : public Ship::GuiWindow {
     float mTrackPreviewZ[64] = {};
     int mTrackPreviewCount = 0;
     int mTrackPreviewRow = -1;
-    // Centripetal Catmull-Rom spline cache: 12 sub-steps per segment, closed loop.
-    // Max 64 control nodes × 12 = 768 dense vertices; rebuilt by LoadTrackPreview.
-    static constexpr int kSplineSteps = 12;
-    static constexpr int kSplineMax   = 64 * kSplineSteps;
+    static constexpr int kSplineMax = GDX_PREVIEW_CAPACITY;
     float mSplineX[kSplineMax] = {};
     float mSplineZ[kSplineMax] = {};
+    int mSplineNext[kSplineMax] = {};
+    bool mPreviewForks = false;
+    unsigned long mPreviewForkRevision = 0;
     int   mSplineCount = 0;
     GdxContentImportEntry mImports[GDX_CONTENT_IMPORT_MAX] = {};
     int mImportCount = 0;

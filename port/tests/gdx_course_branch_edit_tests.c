@@ -636,6 +636,59 @@ static void test_extras(void) {
     gdx_settings_store_clear();
 }
 
+static void test_reload_then_select_without_split(void) {
+    unsigned char forksFile[8192];
+    unsigned char settingsFile[8192];
+    GdxBranchEditPoint nodes[2];
+    GdxBranchEditPoint savedRing[6];
+    char reason[96];
+    int cycle;
+    int point;
+    int forksLength;
+    int settingsLength;
+
+    gdx_branch_store_clear();
+    gdx_settings_store_clear();
+    gdx_branch_edit_clear();
+    make_ring(6);
+    gdx_branch_edit_sync(sCount);
+    memcpy(savedRing, sRing, sizeof(savedRing));
+    memset(nodes, 0, sizeof(nodes));
+    nodes[0].pos[0] = 3000;
+    nodes[0].pos[2] = 900;
+    nodes[1].pos[0] = 4000;
+    nodes[1].pos[2] = 900;
+    nodes[0].parts[0] = 2;
+    gdx_branch_edit_span_commit(2, 5, nodes, 2);
+    gdx_branch_edit_set_point_extra(3, GDX_BRANCH_EDIT_EXTRA_ICE_WIDTH, 40);
+    CHECK(gdx_branch_edit_commit("RELOAD.CRSD", sRing, sCount, 1234, reason, sizeof(reason)) == 0,
+          "fixture commits before reload");
+
+    for (cycle = 0; cycle < 3; cycle++) {
+        forksLength = gdx_branch_store_encode_file(forksFile, sizeof(forksFile));
+        settingsLength = gdx_settings_store_encode_file(settingsFile, sizeof(settingsFile));
+        CHECK(forksLength > 0 && settingsLength > 0, "both stores serialize");
+        gdx_branch_edit_clear();
+        gdx_branch_store_clear();
+        gdx_settings_store_clear();
+        CHECK(gdx_branch_store_restore_file(forksFile, forksLength) == 0, "fork store restores");
+        CHECK(gdx_settings_store_restore_file(settingsFile, settingsLength) == 0, "settings store restores");
+        memcpy(sRing, savedRing, sizeof(savedRing));
+        sCount = 6;
+        CHECK(gdx_branch_edit_select("RELOAD.CRSD", sCount) == 1, "re-entry restores fork identity");
+        point = -1;
+        sCount = gdx_branch_edit_swap_to_node(sRing, sCount, GDX_BRANCH_EDIT_MAX_POINTS, 0, 0, &point);
+        CHECK(sCount == 6 && point == 3 && gdx_branch_edit_view_b(), "B node selects without Split");
+        CHECK(sRing[point].pos[2] == 900 && sRing[point].parts[0] == 2, "B geometry and parts survive reload");
+        sCount = gdx_branch_edit_swap_to_node(sRing, sCount, GDX_BRANCH_EDIT_MAX_POINTS, 0, 0, &point);
+        CHECK(sCount == 6 && !gdx_branch_edit_view_b(), "A restores without Split");
+        CHECK(gdx_branch_edit_point_extra(3, GDX_BRANCH_EDIT_EXTRA_ICE_WIDTH) == 40, "A settings survive");
+    }
+    gdx_branch_edit_clear();
+    gdx_branch_store_clear();
+    gdx_settings_store_clear();
+}
+
 int main(void) {
     test_split_and_swap();
     test_link_and_asymmetric_swap();
@@ -648,6 +701,7 @@ int main(void) {
     test_swap_to_node();
     test_first_style();
     test_extras();
+    test_reload_then_select_without_split();
     if (sFailures != 0) {
         printf("%d course branch edit test(s) failed\n", sFailures);
         return 1;

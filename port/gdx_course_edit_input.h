@@ -86,6 +86,15 @@ GdxCourseEditInt32 gdx_course_edit_input_take_line_up(void);
 void gdx_course_edit_input_request_node_pick(GdxCourseEditInt32 fork, GdxCourseEditInt32 node);
 GdxCourseEditInt32 gdx_course_edit_input_take_node_pick(GdxCourseEditInt32* fork, GdxCourseEditInt32* node);
 
+void gdx_course_edit_input_request_path(GdxCourseEditInt32 path);
+GdxCourseEditInt32 gdx_course_edit_input_take_path(GdxCourseEditInt32* path);
+
+// Absolute editor units: total width / 10 or center offset / 10. Native radii retain their 10-unit grid.
+GdxCourseEditInt32 gdx_course_edit_scalar_value_apply(GdxCourseEditInt32 option, GdxCourseEditInt32 value,
+                                                       float* left, float* right);
+void gdx_course_edit_input_request_scalar_value(GdxCourseEditInt32 option, GdxCourseEditInt32 value);
+GdxCourseEditInt32 gdx_course_edit_input_take_scalar_value(GdxCourseEditInt32* option, GdxCourseEditInt32* value);
+
 // Bank snap. Banks are 0 to 359 degrees. A step of 0 means snap is off and returns the bank unchanged.
 // The next multiple of step strictly past bank, in the direction of the sign of direction.
 GdxCourseEditInt32 gdx_course_edit_bank_snap_next(GdxCourseEditInt32 bank, GdxCourseEditInt32 step,
@@ -110,6 +119,7 @@ void gdx_course_edit_input_request_bank_value(GdxCourseEditInt32 bank);
 GdxCourseEditInt32 gdx_course_edit_input_take_bank_value(GdxCourseEditInt32* bank);
 
 void gdx_course_edit_input_clear(void);
+void gdx_course_edit_input_clear_tools(void);
 void gdx_course_edit_input_clear_drag(void);
 void gdx_course_edit_native_update(void);
 const void* gdx_course_edit_native_menu_id(void);

@@ -134,6 +134,7 @@ void DrawToolLines(int tool) {
             break;
         case 2: // Track width
             ImGui::TextUnformatted("Drag a point left or right: sets width");
+            ImGui::TextUnformatted("Enter: type total width for the selected points");
             ImGui::TextDisabled("Right-click or Esc: cancel the drag");
             DrawModifierLine();
             break;
@@ -146,6 +147,7 @@ void DrawToolLines(int tool) {
             break;
         case 4: // Center offset
             ImGui::TextUnformatted("Drag a point left or right: sets offset");
+            ImGui::TextUnformatted("Enter: type center offset for the selected points");
             ImGui::TextDisabled("Right-click or Esc: cancel the drag");
             DrawModifierLine();
             break;
@@ -174,6 +176,7 @@ void DrawSegmentLines(int createOption) {
         ImGui::TextColored(title, "Course");
         ImGui::TextUnformatted("Click: set a point");
         ImGui::TextUnformatted("Ctrl+click the track: select that segment");
+        ImGui::TextUnformatted("Ctrl+click a white node: select the other path");
         return;
     }
     if (createOption == 3 /* CREATE_OPTION_PARTS */) {
@@ -307,7 +310,8 @@ void GdxCourseEditDrawHintStrip(void) {
             ImGui::SameLine();
             ImGui::TextUnformatted(gdx_course_edit_action_name(key));
             if (gdx_course_edit_bank_entry_active()) {
-                ImGui::Text("Bank: %s_", gdx_course_edit_bank_entry_text());
+                const char* label = gMoveOption == 2 ? "Width" : (gMoveOption == 4 ? "Center" : "Bank");
+                ImGui::Text("%s: %s_", label, gdx_course_edit_bank_entry_text());
                 ImGui::TextDisabled("Enter: apply. Esc: cancel. Minus: flip the sign");
             } else {
                 DrawToolLines(gMoveOption);
