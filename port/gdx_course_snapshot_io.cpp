@@ -96,7 +96,8 @@ template<class F> int repository(F fn) {
             !gdx_disk_save_recovery_path(path, sizeof(path))) {
             return 0;
         }
-        const auto root = std::filesystem::u8path(std::string(path) + ".snapshots");
+        const auto root = std::filesystem::absolute(
+            std::filesystem::u8path(std::string(path) + ".snapshots")).lexically_normal();
         gdx::recovery::FileLock lock(root.string() + ".lock");
         if (!root.is_absolute() || !lock.held()) {
             return 0;

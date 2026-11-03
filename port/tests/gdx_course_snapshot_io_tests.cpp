@@ -20,6 +20,7 @@ std::filesystem::path root;
 unsigned long long disk = 17;
 void* fiber = reinterpret_cast<void*>(1);
 bool blocked = false;
+bool relativeRecoveryPath = false;
 }
 extern "C" {
 int gGdxDevGateCache[GDX_GATE_COUNT];
@@ -27,7 +28,8 @@ int gGdxDevGateCacheReady = 1;
 void (*gdx_port_log_tap)(const char*) = nullptr;
 unsigned long long gdx_disk_save_identity(void) { return disk; }
 int gdx_disk_save_recovery_path(char* out, unsigned int capacity) {
-    const auto value = (root / "recovery").string();
+    const auto value = relativeRecoveryPath ? std::string("./saves/test.gdd.recovery") :
+        (root / "recovery").string();
     return std::snprintf(out, capacity, "%s", value.c_str()) > 0;
 }
 int gdx_course_boot(void) { return 0; }
@@ -43,11 +45,17 @@ int gdx_course_music_adopt(const char*, const char* key, char* out, int cap) {
 }
 }
 
-int main() {
+int main(int argc, char** argv) {
     using namespace gdx::snapshot;
     root = std::filesystem::temp_directory_path() / ("gdx-snapshot-io-" +
         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     assert(std::filesystem::create_directory(root));
+    const auto originalDirectory = std::filesystem::current_path();
+    relativeRecoveryPath = argc == 2 && std::strcmp(argv[1], "--relative-path") == 0;
+    if (relativeRecoveryPath) {
+        assert(std::filesystem::create_directory(root / "saves"));
+        std::filesystem::current_path(root);
+    }
 #ifndef GDX_SNAPSHOT_MFS_TEST
     assert(gdx_snapshot_begin(1));
     assert(gdx_snapshot_busy());
@@ -64,6 +72,10 @@ int main() {
 #endif
 
     Bytes base(BaseBytes), restored(gdx_course_snapshot_runtime_bytes(), 0x31);
+    GdxBranchEditPoint legacyTail[GDX_BRANCH_EDIT_MAX_POINTS - 64]{};
+    assert(gdx_course_snapshot_capture(GdxSnapshotTest_Create(6), base.data(), legacyTail) == 7);
+    assert(gdx_snapshot_load(3, "GHOST00", "GOST", base.data(), restored.data()));
+    assert(restored[1] == 6);
     assert(gdx_course_title_set("LONG.CRSD", "Saved generation") == 0);
     assert(gdx_snapshot_prepare(3, "LONG", "CRSD", GdxSnapshotTest_Create(127), nullptr, base.data()));
     assert(base[8] & 0x80);
@@ -133,6 +145,10 @@ int main() {
     gdx_course_store_clear();
     assert(std::filesystem::equivalent(root.parent_path(), std::filesystem::temp_directory_path()) &&
            root.filename().string().find("gdx-snapshot-io-") == 0);
+    if (relativeRecoveryPath) {
+        assert(std::filesystem::is_directory(root / "saves/test.gdd.recovery.snapshots"));
+        std::filesystem::current_path(originalDirectory);
+    }
     std::filesystem::remove_all(root);
     std::puts("All complete snapshot I/O tests passed");
 }
