@@ -1665,6 +1665,8 @@ if(GDX_BUILD_JP AND NOT ANDROID)
         VERBATIM)
 endif()
 
+if(NOT ANDROID)
+
 add_executable(gdx_user_folders_tests
     tests/gdx_user_folders_tests.cpp
     gdx_user_folders.cpp)
@@ -1884,3 +1886,5 @@ else()
     target_compile_options(gdx_music_folders_tests PRIVATE ${GDX_PORT_WARN_FLAGS} -UNDEBUG)
     target_link_libraries(gdx_music_folders_tests PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
 endif()
+
+endif() # NOT ANDROID (unit tests)
