@@ -5,44 +5,110 @@ name: Release
 # step: until then the release is invisible to players and to the update check.
 #
 # The builds are the release workflows themselves, called rather than copied, the same way
-# nightly.yml does it. Nothing is drafted unless every platform built.
+# nightly.yml does it. Recovery reuses verified desktop packages and builds only Android.
 
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      recovery_tag:
+        description: 'Existing failed release tag, for example v1.2.1 (never moved)'
+        required: true
+        type: string
+      source_run:
+        description: 'Failed Release run with four successful desktop artifacts'
+        required: true
+        type: string
+      android_commit:
+        description: 'Full repair commit SHA contained in the selected default-branch commit'
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.recovery_tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
   gate:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     outputs:
-      version: ${{ steps.version.outputs.value }}
+      version: ${{ steps.recovery.outputs.version || steps.version.outputs.value }}
+      recovery: ${{ github.event_name == 'workflow_dispatch' }}
+      android_commit: ${{ steps.recovery.outputs.android_commit }}
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Test recovery policy
+        run: python3 -m unittest discover -s tools -p test_release_recovery.py -v
+
       - name: Resolve version
+        if: github.event_name == 'push'
         id: version
-        run: echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        run: |
+          python3 - <<'PY'
+          import os
+          import sys
+          sys.path.insert(0, 'tools')
+          from release_recovery import packages
+          tag = os.environ['GITHUB_REF_NAME']
+          packages(tag)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'value={tag[1:]}\n')
+          PY
+
+      - name: Validate recovery sources
+        if: github.event_name == 'workflow_dispatch'
+        id: recovery
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RECOVERY_TAG: ${{ inputs.recovery_tag }}
+          SOURCE_RUN: ${{ inputs.source_run }}
+          ANDROID_COMMIT: ${{ inputs.android_commit }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
+            echo "::error::Recovery must run from the default branch."
+            exit 1
+          fi
+          python3 tools/release_recovery.py plan --repo "$GITHUB_REPOSITORY" \
+            --tag "$RECOVERY_TAG" --source-run "$SOURCE_RUN" \
+            --android-commit "$ANDROID_COMMIT" --controller-commit "$GITHUB_SHA" \
+            --output recovery-plan.json
+
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          name: recovery-plan-${{ github.run_id }}
+          path: recovery-plan.json
+          if-no-files-found: error
+          overwrite: true
 
   windows:
     needs: gate
+    if: needs.gate.outputs.recovery != 'true'
     uses: ./.github/workflows/release-windows.yml
     with:
       version: ${{ needs.gate.outputs.version }}
 
   linux:
     needs: gate
+    if: needs.gate.outputs.recovery != 'true'
     uses: ./.github/workflows/release-linux.yml
     with:
       version: ${{ needs.gate.outputs.version }}
 
   macos:
     needs: gate
+    if: needs.gate.outputs.recovery != 'true'
     uses: ./.github/workflows/release-macos.yml
     with:
       version: ${{ needs.gate.outputs.version }}
@@ -51,25 +117,58 @@ jobs:
   # the other.
   android:
     needs: gate
-    uses: ./.github/workflows/android.yml
+    uses: ./.github/workflows/release-android.yml
     with:
       version: ${{ needs.gate.outputs.version }}
+      source-commit: ${{ needs.gate.outputs.android_commit }}
     secrets: inherit
 
   draft:
     needs: [gate, windows, linux, macos, android]
+    if: >-
+      always() && !cancelled() && needs.gate.result == 'success' && needs.android.result == 'success' &&
+      ((needs.gate.outputs.recovery == 'true' && needs.windows.result == 'skipped' &&
+        needs.linux.result == 'skipped' && needs.macos.result == 'skipped') ||
+       (needs.gate.outputs.recovery != 'true' && needs.windows.result == 'success' &&
+        needs.linux.result == 'success' && needs.macos.result == 'success'))
     runs-on: ubuntu-latest
     # The only job that can write: it creates the draft release and uploads its assets.
     permissions:
       contents: write
+      actions: read
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
+        if: needs.gate.outputs.recovery != 'true'
         with:
           pattern: G-Diffuser-v${{ needs.gate.outputs.version }}-*
           path: dist
           merge-multiple: true
 
+      - uses: actions/download-artifact@v4
+        if: needs.gate.outputs.recovery == 'true'
+        with:
+          name: recovery-plan-${{ github.run_id }}
+          path: recovery
+
+      - name: Assemble verified recovery packages
+        if: needs.gate.outputs.recovery == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 tools/release_recovery.py assemble --plan recovery/recovery-plan.json \
+            --run-id "$GITHUB_RUN_ID" --directory dist
+
+      - name: Prepare recovered draft
+        if: needs.gate.outputs.recovery == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 tools/release_recovery.py draft --plan recovery/recovery-plan.json --directory dist
+
       - name: Draft the release
+        if: needs.gate.outputs.recovery != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -94,6 +193,10 @@ jobs:
           esac
 
           if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            if [ "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" != true ]; then
+              echo "::error::Refusing to modify a published release."
+              exit 1
+            fi
             # A rerun of the same tag: replace the assets, keep the notes someone may have edited.
             gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
           else

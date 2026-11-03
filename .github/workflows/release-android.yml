@@ -1,15 +1,17 @@
-name: Android
+name: Release (Android)
 
-# Android on its own, so a device test does not wait on the desktop release jobs.
-# Runs on demand, and on pushes that touch something the APK actually contains; both of those
-# build the debug APK. nightly.yml and release.yml call it with a version instead, which builds the
-# release APK signed with the project keystore, so each one installs over the last.
+# Release and Nightly share the signing key so either APK can update the other.
 on:
   workflow_call:
     inputs:
       version:
         description: 'Version for the APK name, without the leading v'
         required: true
+        type: string
+      source-commit:
+        description: 'Validated repair commit for Release recovery; empty uses the caller commit'
+        required: false
+        default: ''
         type: string
     # Optional here so a missing one reaches the decode step, which says which secret to add.
     secrets:
@@ -21,28 +23,13 @@ on:
         required: false
       ANDROID_KEY_PASSWORD:
         required: false
-  workflow_dispatch:
-  push:
-    paths:
-      - 'android/**'
-      - 'port/**'
-      - 'cmake/**'
-      - 'shaders/**'
-      - 'tools/gen_f3d_o2r.py'
-      - 'tools/gen_dump_tables_data.py'
-      - 'CMakeLists.txt'
-      - 'libultraship'
-      - 'decomp'
-      - 'torch'
-      - '.github/workflows/android.yml'
 
 permissions:
   contents: read
 
 concurrency:
-  # Separate groups, so a push to main does not cancel the nightly's release build.
-  group: android-${{ inputs.version && 'release' || 'debug' }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: release-android-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build-apk:
@@ -50,6 +37,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.source-commit || github.sha }}
           submodules: recursive
           # Full history so the submodule gitlinks resolve.
           fetch-depth: 0
@@ -78,16 +66,10 @@ jobs:
       - name: Install Python dependencies
         run: pip install pyyaml pillow
 
-      # Debug-signed and debuggable, which is what you want for sideloading a test build.
-      - name: Build debug APK
-        if: ${{ !inputs.version }}
-        run: android/gradlew -p android assembleDebug
-
       # A release build without the keystore silently falls back to the debug key
       # (build.gradle.kts), and a nightly signed that way could never be updated by one signed
       # properly. So a missing secret fails the job instead.
       - name: Decode the release keystore
-        if: ${{ inputs.version }}
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         run: |
@@ -101,24 +83,23 @@ jobs:
       # Native code is Release in both variants; this one is not debuggable and is signed with
       # the project key.
       - name: Build release APK
-        if: ${{ inputs.version }}
         env:
           KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: android/gradlew -p android assembleRelease
 
+      - name: Verify release signature
+        run: >-
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose
+          android/app/build/outputs/apk/release/app-release.apk
+
       - name: Check the APK carries its game data
         env:
           VERSION: ${{ inputs.version }}
         run: |
-          if [ -n "$VERSION" ]; then
-            APK=android/app/build/outputs/apk/release/app-release.apk
-            OUT="G-Diffuser-v$VERSION-android-arm64.apk"
-          else
-            APK=android/app/build/outputs/apk/debug/app-debug.apk
-            OUT=G-Diffuser-debug.apk
-          fi
+          APK=android/app/build/outputs/apk/release/app-release.apk
+          OUT="G-Diffuser-v$VERSION-android-arm64.apk"
           echo "OUT=$OUT" >> "$GITHUB_ENV"
           ls -la "$APK" || { echo "ERROR: APK not found"; exit 1; }
 
@@ -144,9 +125,34 @@ jobs:
 
           cp "$APK" "$OUT"
 
+      - name: Record actual Android source
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+          source = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          Path('android-source.json').write_text(json.dumps({
+              'source_sha': source, 'run_id': int(os.environ['GITHUB_RUN_ID']),
+              'version': os.environ['VERSION']
+          }) + '\n', encoding='utf-8')
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-source-${{ github.run_id }}
+          path: android-source.json
+          if-no-files-found: error
+          overwrite: true
+
       # The release name matches the G-Diffuser-v<version>-* download pattern of nightly.yml and
       # release.yml.
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.version && format('G-Diffuser-v{0}-android-arm64', inputs.version) || 'G-Diffuser-debug-apk' }}
+          name: G-Diffuser-v${{ inputs.version }}-android-arm64
           path: ${{ env.OUT }}
+          if-no-files-found: error
+          overwrite: true

@@ -53,7 +53,6 @@ jobs:
 
           # A scheduled run is always on the default branch; a manual one can be started from any
           # branch, and a nightly built from a feature branch would replace the one players use.
-          # The release workflows' own manual run is the way to test a branch build.
           if [ "$EVENT" = workflow_dispatch ] && [ "$GITHUB_REF_NAME" != "$DEFAULT_BRANCH" ]; then
             echo "::error::Nightlies are published from $DEFAULT_BRANCH only, not $GITHUB_REF_NAME."
             exit 1
@@ -103,7 +102,7 @@ jobs:
   android:
     needs: gate
     if: needs.gate.outputs.build == 'true'
-    uses: ./.github/workflows/android.yml
+    uses: ./.github/workflows/release-android.yml
     with:
       version: ${{ needs.gate.outputs.version }}
     secrets: inherit

@@ -107,8 +107,11 @@ Release signing reads `android/key.properties` if it exists, and the environment
 release build falls back to the debug key so a fresh clone still produces an installable APK.
 See `android/key.properties.example`.
 
-`.github/workflows/android.yml` builds the same debug APK on CI and checks that it really
-carries its game data before publishing the artifact.
+**Release** and **Nightly** call `.github/workflows/release-android.yml` to build the signed
+release APK. The worker requires the project keystore, verifies the APK signature, and checks
+the bundled game data. It has no independent push or manual trigger; use the local command above
+for debug builds. See [Release recovery](RELEASING.md#recover-only-android) to repair Android
+without rebuilding successful desktop packages.
 
 ---
 

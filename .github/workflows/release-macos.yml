@@ -17,12 +17,6 @@ on:
         description: 'Version for the tarball name, without the leading v'
         required: true
         type: string
-  workflow_dispatch:
-    inputs:
-      version:
-        description: 'Version for the tarball name, without the leading v'
-        required: true
-        default: '0.0.0-test'
 
 permissions:
   contents: read
