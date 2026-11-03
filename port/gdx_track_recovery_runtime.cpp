@@ -5,6 +5,7 @@
 #include "gdx_content_io.h"
 #include "gdx_content_import.h"
 #include "gdx_course_state.h"
+#include "gdx_course_snapshot_io.h"
 #include "gdx_edit_cup.h"
 #include "disk_savefile.h"
 #include "port_log.h"
@@ -282,6 +283,10 @@ bool captureTrack() {
         if (!backend.read(r, c, c.before)) {
             return false;
         }
+        if (k == 1 && (c.before.size() != 16 + GDX_CONTENT_TRACK_PAYLOAD_SIZE ||
+            !gdx_snapshot_import_restore(r.directory, r.name.c_str(), r.extension.c_str(), c.before.data() + 16))) {
+            return false;
+        }
         r.changes.push_back(std::move(c));
     }
     if (r.changes.front().before.size() != 16 + GDX_CONTENT_TRACK_PAYLOAD_SIZE) {
@@ -340,12 +345,14 @@ void enqueue(Command next) {
 }
 
 extern "C" int gdx_recovery_blocks_writes(void) {
-    return !(inside && ownerThread && ownerThread == gdx_recovery_native_thread()) && gdx_disk_save_identity() &&
-        (!checked || checkedDisk != gdx_disk_save_identity() || blocked || busy);
+    return gdx_snapshot_blocks_writes() ||
+        (!(inside && ownerThread && ownerThread == gdx_recovery_native_thread()) && gdx_disk_save_identity() &&
+         (!checked || checkedDisk != gdx_disk_save_identity() || blocked || busy));
 }
 
 extern "C" int gdx_recovery_persistence_busy(void) {
-    return gdx_disk_save_identity() && (!checked || checkedDisk != gdx_disk_save_identity() || blocked || busy);
+    return gdx_snapshot_busy() ||
+        (gdx_disk_save_identity() && (!checked || checkedDisk != gdx_disk_save_identity() || blocked || busy));
 }
 
 extern "C" void gdx_recovery_disk_ready(void) {
@@ -353,7 +360,7 @@ extern "C" void gdx_recovery_disk_ready(void) {
 }
 
 extern "C" void gdx_recovery_tick(void) {
-    if (!busy && queueReady && gdx_disk_save_identity() && (!checked || checkedDisk != gdx_disk_save_identity())) {
+    if (!gdx_snapshot_busy() && !busy && queueReady && gdx_disk_save_identity() && (!checked || checkedDisk != gdx_disk_save_identity())) {
         enqueue(Command::Recover);
     }
 }

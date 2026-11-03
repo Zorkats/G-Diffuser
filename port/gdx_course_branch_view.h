@@ -34,6 +34,11 @@ int gdx_branch_view_node(int fork, int node, float pos[3], short* radiusLeft, sh
 /* Returns 1 and fills trackSegmentInfo when the fork's stored path has a first segment style of its own. */
 int gdx_branch_view_fork_first_info(int fork, int* trackSegmentInfo);
 
+#define GDX_BRANCH_SETTINGS_BASE 256
+#define GDX_BRANCH_SETTINGS_STRIDE 33
+int gdx_branch_view_part(int fork, int node, int part, int fallback);
+int gdx_branch_view_settings_point(int fork, int node);
+
 /* A racer's place on one road: distance from the center line (positive to the left), distance above the road, and
  * the road's radii there. */
 typedef struct GdxBranchLaneSample {

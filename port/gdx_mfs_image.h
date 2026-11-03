@@ -45,6 +45,7 @@ extern "C" {
 #define GDX_MFSIMG_ERR_NOT_MFS (-3)  /* size/layout, "64dd-Multi" id, or checksum: not an MFS image */
 #define GDX_MFSIMG_ERR_CORRUPT (-4)  /* FAT chain broken / entry out of range / read past EOF */
 #define GDX_MFSIMG_ERR_ENCODED (-5)  /* MFS_FILE_ATTR_ENCODE payload: extraction refused */
+#define GDX_MFSIMG_ERR_STALE (-6)
 
 typedef struct GdxMfsImage GdxMfsImage; /* opaque */
 
@@ -56,6 +57,9 @@ typedef struct GdxMfsImageEntry {
     int32_t fileSize;
     int contentType; /* GDX_MFSIMG_TYPE_* */
     int encoded;     /* MFS_FILE_ATTR_ENCODE set: gdx_mfsimg_read_file refuses */
+    int sourceBigEndian;
+    int sourceKind;  // 0 SDK, 1 RAM, 2 physical, 3 D64
+    int64_t payloadOffset; // first payload block; a FAT chain need not be contiguous
 } GdxMfsImageEntry;
 
 int gdx_mfsimg_open(const char* path, GdxMfsImage** out);
@@ -70,6 +74,9 @@ int gdx_mfsimg_list(GdxMfsImage* img, GdxMfsImageEntry* out, int capacity);
 
 /* Extract the payload of the listed entry into buf (entry.fileSize bytes). */
 int gdx_mfsimg_read_file(GdxMfsImage* img, uint16_t entryId, uint8_t* buf, int32_t bufSize);
+
+// Refuses a changed source file before handing any bytes to the import queue.
+int gdx_mfsimg_read_file_current(GdxMfsImage* img, uint16_t entryId, uint8_t* buf, int32_t bufSize);
 
 #ifdef __cplusplus
 }

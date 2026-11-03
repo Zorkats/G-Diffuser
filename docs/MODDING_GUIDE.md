@@ -11,7 +11,7 @@ changes packs cannot make, you can edit the source code and build your own versi
 | I want to... | Guide | Tools needed |
 | --- | --- | --- |
 | Repaint textures, logos, or the HUD | [Texture packs](modding/TEXTURE_PACKS.md) | Python, Pillow, an image editor |
-| Replace a song with my own recording | [Custom music](modding/CUSTOM_MUSIC.md) | Python, an audio editor |
+| Replace a song with my own recording | [Custom music](modding/CUSTOM_MUSIC.md) | An audio editor; Python only for native sample packs |
 | Replace sound effects or the announcer | [Sound effects and voices](modding/SOUND_EFFECTS.md) | Python, an audio editor |
 | Change the instruments of note-based music | [Instruments](modding/INSTRUMENTS.md) | Python |
 | Replace a machine's 3D model | [Machine models](modding/MACHINE_MODELS.md) | Python, a 3D editor |
@@ -32,6 +32,7 @@ These folders live next to the game executable. The game creates them when it ne
 | Folder | What it holds |
 | --- | --- |
 | `mods/` | Installed `.o2r` packs. Scanned at boot and on **Reload packs**. |
+| `music/` | Streamed game replacements, such as `bgm_select.flac`, and selectable Course Edit songs, such as `My Racing Song.ogg`. Recognized game-slot names are reserved for replacements. Startup creates this folder beside the executable. See [Custom music](modding/CUSTOM_MUSIC.md). |
 | `dump/` | Assets written by **Workshop > Tools > Asset Dump**, for you to edit. |
 | `shaders/` | Shader files and presets. See [Shaders](modding/SHADERS.md). |
 | `exports/` | Shared `.gdxp` tracks (with their music) and `.gdxc` machines. See [Sharing](modding/SHARING_TRACKS_AND_MACHINES.md). |
@@ -43,8 +44,8 @@ the release download. On the [G-Diffuser GitHub page](https://github.com/Zorkats
 click **Code**, then **Download ZIP**, and extract it anywhere. Players who install your pack do not
 need Python or the tools.
 
-Several tools read the game's dump. Copy the game's `dump/` folder into the extracted source folder
-before you run them.
+Several tools read the game's dump. Follow the selected guide's dump-path instructions. Native
+audio pack commands use an explicit `--dump-dir`, so the dump can remain beside the game.
 
 ### Master switches
 
@@ -165,8 +166,10 @@ python tools/gen_texture_pack.py <your-edit-folder> my-pack.o2r --name "My Pack"
 4. A custom course's scenery is limited to the venue and skybox choices in Course Edit's
    Background menu. The buildings and landmarks of official courses are baked into each course
    and cannot be reused or replaced yet.
-5. All sample pack replacements share 1 MiB of memory: about 80 seconds of cartridge music in
-   total, or about 29 seconds for one Expansion Kit song.
+5. All native sample pack replacements share 1 MiB of memory: roughly 80 seconds for one
+   22050-Hz mono resource, or 29 seconds for two simultaneous 32000-Hz resources. These are
+   rate/part examples, not cartridge/EK-wide limits. [Streamed custom music](modding/CUSTOM_MUSIC.md)
+   does not use this native sample budget.
 6. Lua scripts are read-only: they cannot change the game yet.
 
 ## Logs

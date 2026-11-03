@@ -1,9 +1,10 @@
 /* port/gdx_course_music.h -- custom soundtracks for Course Edit tracks (plan section 7A).
  *
- * Music files in music/custom/ and mods/music/custom/ (*.ogg, *.flac, *.wav) are registered as BGM
- * extension entries with the key "bgm.custom.<stem>". The Course Edit BGM menu lists them after the
- * 14 stock entries. A choice is stored per course in the element store (gdx_course_registry.h); the
- * course's own BGM byte keeps the stock fallback. On a race, gdx_course_music_arm_for_course sets the
+ * Non-slot music files in music/ (*.ogg, *.flac, *.wav) are registered as BGM extension entries
+ * with the key "bgm.custom.<stem>". Legacy custom folders remain readable. The Course Edit BGM menu
+ * lists them after the 14 stock entries. A choice is stored per course in the element store
+ * (gdx_course_registry.h); the course's own BGM byte keeps the stock fallback. On a race,
+ * gdx_course_music_arm_for_course sets the
  * stream course override, and the stock start then plays the file through gdx_music_stream.
  *
  * Threading: all functions run on the game thread (menu, race start, export and import).
@@ -16,8 +17,8 @@
 extern "C" {
 #endif
 
-/* Registers the music files found in mods/music/custom/ and music/custom/ beside the exe. The first
- * call scans; later calls return the count without rescanning. Returns the number of extension BGM
+/* Registers music/ songs beside the exe, excluding global slot names, then legacy custom folders.
+ * The first call scans; later calls return the count without rescanning. Returns the number of extension BGM
  * entries (0 when there are none). Boots the rest of the course element store (gdx_course_state.h). */
 int gdx_course_music_scan(void);
 
@@ -53,16 +54,18 @@ void gdx_course_music_arm_for_course(const char* courseId, int bgmId);
 
 /* Export: copies the file of every extension BGM choice of the course into directory, named after its
  * key suffix. Returns the number copied. Failures are logged and skipped. */
+int gdx_course_music_export_key(const char* key, const char* directory);
 int gdx_course_music_export_course(const char* courseId, const char* directory);
 
 /* Import: makes the song for an extension BGM key available and writes the key the course must store
  * into outKey (outCap bytes, GDX_COURSE_KEY_MAX + 1 is enough). The song is <gdxcDirectory>/<suffix>.<ext>.
  * - No song beside the .gdxc: returns 1 when the key is registered, else 0.
- * - The key's own file holds the same bytes, or there is none yet: the song is copied into music/custom/
+ * - The key's own file holds the same bytes, or there is none yet: the song is copied into music/
  *   under its suffix when absent, and outKey is key.
  * - The key's file holds a different song: the song is stored under
  *   gdx_course_registry_music_fingerprint_key instead (reused when that file already holds the same
- *   bytes), and outKey is that key.
+ *   bytes), and outKey is that key. Reserved global slot names also get a fingerprint key unless
+ *   the same song is already registered in a legacy custom folder.
  * Returns 1 when outKey is registered, and -1 when the song is over 32 MB, could not be copied, or its
  * fingerprint name holds yet another song (reported in the log). Non-music keys return 0. outKey holds
  * key whenever the return is not 1. */

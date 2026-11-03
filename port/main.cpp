@@ -33,6 +33,7 @@
 #include "port_log.h"
 #include "rom_buffer.h"
 #include "gdx_firstboot.h"
+#include "gdx_user_folders.h"
 #include "gdx_firstboot_gui.h"
 #include "gdx_fps_overlay.h"
 #include "gdx_update_ui.h"
@@ -913,6 +914,13 @@ int main(int argc, char** argv) {
     gdx::FirstBootResult firstBoot = gdx::FirstBootRun((argc > 0) ? argv[0] : nullptr);
     if (firstBoot.status == gdx::FirstBootStatus::Aborted) {
         return 1;
+    }
+
+    std::string folderErrors;
+    char exportFolder[4096];
+    const std::filesystem::path exportRoot = gdx_exe_relative_path(exportFolder, sizeof(exportFolder), "exports");
+    if (!gdx::EnsureUserFolders(firstBoot.dataDir, exportRoot, folderErrors)) {
+        gdx_port_logf("[G-Diffuser] user folders: %s\n", folderErrors.c_str());
     }
 
     // The ROM Hacks window builds hack archives with the packaged extractor, which ships beside the

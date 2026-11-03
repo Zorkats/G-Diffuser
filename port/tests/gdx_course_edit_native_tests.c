@@ -5,7 +5,7 @@
 // Use the game's types so a host-side layout guess cannot make both code and fixture pass.
 unk_807B3C20 D_802CB6D0;
 unk_800D6CA0 D_800D6CA0;
-unk_80128690 D_80128690[64];
+unk_80128690 D_80128690[GDX_COURSE_POINT_CAPACITY];
 s32 D_xk2_80119918;
 
 // Stand-ins for the decomp side of the line-up and for the input queue. This test links native.c only.
@@ -13,7 +13,6 @@ static s32 sUndoBackups;
 static s32 sNativeLineUps;
 static s32 sBackupBeforeLineUp;
 static u8 sLastSfx;
-static s32 sLineUpPending;
 
 void func_xk2_800EF78C(void) {
     sBackupBeforeLineUp = (sNativeLineUps == 0);
@@ -32,12 +31,7 @@ void Audio_TriggerSystemSE(u8 sfxId) {
     sLastSfx = sfxId;
 }
 
-GdxCourseEditInt32 gdx_course_edit_input_take_line_up(void) {
-    GdxCourseEditInt32 pending = sLineUpPending;
 
-    sLineUpPending = 0;
-    return pending;
-}
 
 static int expect_int(long actual, long expected) {
     return actual == expected;
@@ -60,7 +54,7 @@ static void reset_fixture(s32 count) {
     memset(&D_802CB6D0, 0, sizeof(D_802CB6D0));
     memset(D_80128690, 0, sizeof(D_80128690));
     D_802CB6D0.controlPointCount = count;
-    for (i = 0; i < 64; i++) {
+    for (i = 0; i < GDX_COURSE_POINT_CAPACITY; i++) {
         D_802CB6D0.unk_0000[i].pos.x = (f32)(100 + i);
         D_802CB6D0.unk_0000[i].pos.y = (f32)(200 + i);
         D_802CB6D0.unk_0000[i].pos.z = (f32)(300 + i);
@@ -73,7 +67,7 @@ static void reset_line_up_stubs(void) {
     sNativeLineUps = 0;
     sBackupBeforeLineUp = 0;
     sLastSfx = 0xFF;
-    sLineUpPending = 0;
+    gdx_course_edit_input_clear();
 }
 
 static void set_position(s32 index, float x, float y, float z) {
@@ -96,8 +90,8 @@ static void link_ring(s32 count) {
 static void select_mask(GdxCourseEditMask mask) {
     s32 i;
 
-    for (i = 0; i < 64; i++) {
-        D_80128690[i].unk_08 = (((mask >> i) & 1) != 0) ? 1 : 0;
+    for (i = 0; i < GDX_COURSE_POINT_CAPACITY; i++) {
+        D_80128690[i].unk_08 = gdx_course_mask_test(mask, i) ? 1 : 0;
     }
 }
 
@@ -114,7 +108,10 @@ static int test_count_bounds(void) {
     passed &= expect_int(gdx_course_edit_native_point_count(), 64);
 
     reset_fixture(65);
-    passed &= expect_int(gdx_course_edit_native_point_count(), 64);
+    passed &= expect_int(gdx_course_edit_native_point_count(), 65);
+
+    reset_fixture(128);
+    passed &= expect_int(gdx_course_edit_native_point_count(), 127);
 
     reset_fixture(-1);
     passed &= expect_int(gdx_course_edit_native_point_count(), 0);
@@ -158,8 +155,8 @@ static int test_selection_mask_round_trip(void) {
     int passed = 1;
 
     reset_fixture(5);
-    gdx_course_edit_native_set_selection_mask(0x05);
-    passed &= expect_int((long)gdx_course_edit_native_selection_mask(), 0x05);
+    gdx_course_edit_native_set_selection_mask(gdx_course_mask_low(0x05));
+    passed &= expect_int((long)gdx_course_edit_native_selection_mask().words[0], 0x05);
     passed &= expect_int(gdx_course_edit_native_point_selected(0), 1);
     passed &= expect_int(gdx_course_edit_native_point_selected(1), 0);
     passed &= expect_int(gdx_course_edit_native_point_selected(2), 1);
@@ -167,14 +164,14 @@ static int test_selection_mask_round_trip(void) {
 
     // Bits past the point count are dropped, and the stale flag past the count is cleared too.
     D_80128690[63].unk_08 = 1;
-    gdx_course_edit_native_set_selection_mask(~(GdxCourseEditMask)0);
-    passed &= expect_int((long)gdx_course_edit_native_selection_mask(), 0x1F);
+    gdx_course_edit_native_set_selection_mask(gdx_course_mask_all());
+    passed &= expect_int((long)gdx_course_edit_native_selection_mask().words[0], 0x1F);
     passed &= expect_int(D_80128690[63].unk_08, 0);
 
     // An empty mask clears the selection and leaves the active point alone.
     D_800D6CA0.unk_0C = 3;
-    gdx_course_edit_native_set_selection_mask(0);
-    passed &= expect_int((long)gdx_course_edit_native_selection_mask(), 0);
+    gdx_course_edit_native_set_selection_mask(gdx_course_mask_low(0));
+    passed &= expect_int((long)gdx_course_edit_native_selection_mask().words[0], 0);
     passed &= expect_int(gdx_course_edit_native_active_point(), 3);
     return passed;
 }
@@ -185,15 +182,15 @@ static int test_line_up_scan_needs_three_points_in_a_row(void) {
 
     reset_fixture(6);
     link_ring(6);
-    select_mask(0x03);
+    select_mask(gdx_course_mask_low(0x03));
     passed &= expect_int(gdx_course_edit_native_line_up_scan(&preview), GDX_COURSE_EDIT_LINE_UP_TOO_FEW);
     passed &= expect_int(preview.count, 0);
 
     // Every point selected leaves no anchor, so there is nothing to line up.
-    select_mask(0x3F);
+    select_mask(gdx_course_mask_low(0x3F));
     passed &= expect_int(gdx_course_edit_native_line_up_scan(&preview), GDX_COURSE_EDIT_LINE_UP_TOO_FEW);
 
-    select_mask(0);
+    select_mask(gdx_course_mask_low(0));
     passed &= expect_int(gdx_course_edit_native_line_up_scan(&preview), GDX_COURSE_EDIT_LINE_UP_TOO_FEW);
 
     reset_fixture(0);
@@ -213,7 +210,7 @@ static int test_line_up_scan_takes_the_longest_run(void) {
     for (i = 0; i < 8; i++) {
         set_position(i, 1000.0f * (float)i, 0.0f, 0.0f);
     }
-    select_mask(0xF6);
+    select_mask(gdx_course_mask_low(0xF6));
 
     passed &= expect_int(gdx_course_edit_native_line_up_scan(&preview), GDX_COURSE_EDIT_LINE_UP_OK);
     passed &= expect_int(preview.count, 4);
@@ -238,7 +235,7 @@ static int test_line_up_scan_takes_the_first_of_equal_runs(void) {
     for (i = 0; i < 8; i++) {
         set_position(i, 1000.0f * (float)i, 0.0f, 0.0f);
     }
-    select_mask(0x77);
+    select_mask(gdx_course_mask_low(0x77));
 
     passed &= expect_int(gdx_course_edit_native_line_up_scan(&preview), GDX_COURSE_EDIT_LINE_UP_OK);
     passed &= expect_int(preview.count, 3);
@@ -258,7 +255,7 @@ static int test_line_up_scan_projects_the_middle_point(void) {
     set_position(1, 1000.0f, 0.0f, 400.0f);
     set_position(2, 2000.0f, 0.0f, 0.0f);
     set_position(3, 500.0f, 0.0f, 900.0f);
-    select_mask(0x07);
+    select_mask(gdx_course_mask_low(0x07));
 
     passed &= expect_int(gdx_course_edit_native_line_up_scan(&preview), GDX_COURSE_EDIT_LINE_UP_OK);
     passed &= expect_int(preview.count, 3);
@@ -279,7 +276,7 @@ static int test_line_up_scan_refuses_points_under_498_apart(void) {
     set_position(1, 100.0f, 0.0f, 300.0f);
     set_position(2, 1000.0f, 0.0f, 0.0f);
     set_position(3, 500.0f, 0.0f, 900.0f);
-    select_mask(0x07);
+    select_mask(gdx_course_mask_low(0x07));
 
     passed &= expect_int(gdx_course_edit_native_line_up_scan(&preview), GDX_COURSE_EDIT_LINE_UP_TOO_CLOSE);
     passed &= expect_int(preview.count, 0);
@@ -297,7 +294,7 @@ static int test_line_up_scan_refuses_a_run_with_no_line(void) {
     set_position(1, 1000.0f, 0.0f, 0.0f);
     set_position(2, 0.0f, 0.0f, 0.0f);
     set_position(3, 500.0f, 0.0f, 900.0f);
-    select_mask(0x07);
+    select_mask(gdx_course_mask_low(0x07));
 
     passed &= expect_int(gdx_course_edit_native_line_up_scan(&preview), GDX_COURSE_EDIT_LINE_UP_TOO_CLOSE);
     passed &= expect_int(preview.count, 0);
@@ -314,7 +311,7 @@ static int test_line_up_scan_handles_a_run_across_the_array_end(void) {
     set_position(5, 0.0f, 0.0f, 0.0f);
     set_position(0, 500.0f, 0.0f, 300.0f);
     set_position(1, 1000.0f, 0.0f, 0.0f);
-    select_mask(0x23);
+    select_mask(gdx_course_mask_low(0x23));
 
     passed &= expect_int(gdx_course_edit_native_line_up_scan(&preview), GDX_COURSE_EDIT_LINE_UP_OK);
     passed &= expect_int(preview.count, 3);
@@ -331,7 +328,7 @@ static int test_apply_line_up_needs_a_request(void) {
     reset_line_up_stubs();
     reset_fixture(4);
     link_ring(4);
-    select_mask(0x07);
+    select_mask(gdx_course_mask_low(0x07));
     gdx_course_edit_native_apply_line_up();
     passed &= expect_int(sUndoBackups, 0);
     passed &= expect_int(sNativeLineUps, 0);
@@ -345,13 +342,13 @@ static int test_apply_line_up_refusal_plays_the_sound_and_keeps_data(void) {
     reset_line_up_stubs();
     reset_fixture(4);
     link_ring(4);
-    select_mask(0x03);
-    sLineUpPending = 1;
+    select_mask(gdx_course_mask_low(0x03));
+    gdx_course_edit_input_request_line_up();
     gdx_course_edit_native_apply_line_up();
     passed &= expect_int(sUndoBackups, 0);
     passed &= expect_int(sNativeLineUps, 0);
     passed &= expect_int(sLastSfx, NA_SE_32);
-    passed &= expect_int(sLineUpPending, 0);
+    passed &= expect_int(gdx_course_edit_input_take_line_up(), 0);
     return passed;
 }
 
@@ -365,14 +362,14 @@ static int test_apply_line_up_takes_the_backup_then_lines_up(void) {
     for (i = 0; i < 8; i++) {
         set_position(i, 1000.0f * (float)i, 0.0f, 0.0f);
     }
-    select_mask(0xF6);
-    sLineUpPending = 1;
+    select_mask(gdx_course_mask_low(0xF6));
+    gdx_course_edit_input_request_line_up();
     gdx_course_edit_native_apply_line_up();
     passed &= expect_int(sUndoBackups, 1);
     passed &= expect_int(sBackupBeforeLineUp, 1);
     passed &= expect_int(sNativeLineUps, 1);
     passed &= expect_int(sLastSfx, 0xFF);
-    passed &= expect_int(sLineUpPending, 0);
+    passed &= expect_int(gdx_course_edit_input_take_line_up(), 0);
     return passed;
 }
 

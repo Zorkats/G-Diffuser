@@ -134,6 +134,7 @@ typedef struct GdxMfsImgRawEntry {
 
 struct GdxMfsImage {
     uint8_t* data; /* whole image file */
+    char* path;
     int64_t size;
     int diskType;     /* 0..5 */
     int kind;         /* GDX_MFSIMG_KIND_* */
@@ -476,6 +477,13 @@ int gdx_mfsimg_open(const char* path, GdxMfsImage** out) {
         return GDX_MFSIMG_ERR_IO;
     }
     img->size = fileSize;
+    img->path = (char*) malloc(strlen(path) + 1);
+    if (img->path == NULL) {
+        gdx_mfsimg_close(img);
+        fclose(f);
+        return GDX_MFSIMG_ERR_IO;
+    }
+    strcpy(img->path, path);
     if (fileSize > 0 && fread(img->data, 1, (size_t)fileSize, f) != (size_t)fileSize) {
         gdx_mfsimg_close(img);
         fclose(f);
@@ -555,6 +563,7 @@ void gdx_mfsimg_close(GdxMfsImage* img) {
     }
     free(img->entries);
     free(img->data);
+    free(img->path);
     free(img);
 }
 
@@ -574,6 +583,8 @@ const char* gdx_mfsimg_strerror(int err) {
             return "corrupt filesystem (broken FAT chain or data past end of image)";
         case GDX_MFSIMG_ERR_ENCODED:
             return "file is encoded on disk; extraction is not supported";
+        case GDX_MFSIMG_ERR_STALE:
+            return "source image changed; close and reopen it before importing";
         default:
             return "unknown error";
     }
@@ -618,10 +629,34 @@ int gdx_mfsimg_list(GdxMfsImage* img, GdxMfsImageEntry* out, int capacity) {
             o->fileSize = e->fileSize;
             o->contentType = type;
             o->encoded = (e->attr & GDX_MFSIMG_ATTR_ENCODE) ? 1 : 0;
+            o->sourceBigEndian = img->bigEndian;
+            o->sourceKind = img->kind;
+            o->payloadOffset = e->fatId < GDX_MFSIMG_FAT_COUNT
+                                   ? gdx_mfsimg_lba_offset(img, img->startLBA + e->fatId) : -1;
         }
         count++;
     }
     return count;
+}
+
+int gdx_mfsimg_read_file_current(GdxMfsImage* img, uint16_t entryId, uint8_t* buf, int32_t bufSize) {
+    GdxMfsImage* fresh = NULL;
+    int rc;
+    if (img == NULL || buf == NULL) {
+        return GDX_MFSIMG_ERR_BAD_ARGS;
+    }
+    rc = gdx_mfsimg_open(img->path, &fresh);
+    if (rc != GDX_MFSIMG_OK) {
+        return rc;
+    }
+    // Reject even unrelated edits: the displayed collision/confirmation snapshot is no longer current.
+    if (fresh->size != img->size || memcmp(fresh->data, img->data, (size_t) img->size) != 0) {
+        rc = GDX_MFSIMG_ERR_STALE;
+    } else {
+        rc = gdx_mfsimg_read_file(fresh, entryId, buf, bufSize);
+    }
+    gdx_mfsimg_close(fresh);
+    return rc;
 }
 
 int gdx_mfsimg_read_file(GdxMfsImage* img, uint16_t entryId, uint8_t* buf, int32_t bufSize) {

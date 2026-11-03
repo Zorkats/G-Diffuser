@@ -94,6 +94,8 @@ Options live in the enhancement menu, which opens with **F1**. Editing tools are
   file next to the game; your original `.ndd` disk image is **never** modified.
 - **Undo and redo:** with an optional History panel of the last 32 changes. Click a row to jump
   back to it.
+- **Up to 127 control points:** the combined main and alternate paths share this limit.
+  Geometry and gadget budgets are separate; an over-budget course refuses generation or test drive.
 - **Forks:** the Split, Insert and Link tools build a second path. Path B can span several
   segments. **Point and track settings** shows the active path and has A/B selectors.
   Inactive nodes stay visible without Split; Ctrl+click one in Course mode to select it.
@@ -104,13 +106,17 @@ Options live in the enhancement menu, which opens with **F1**. Editing tools are
 - **Part and track settings:** edit pit/lava, dirt, and ice coverage, per-magnet strength and
   range, and track-wide lava/magnet settings. These settings and forks travel in `.gdxp` exports.
   See [Course Edit settings and limits](docs/modding/COURSE_ELEMENTS.md#course-edit-settings-and-forks)
-  before sharing tracks with older builds or adding parts to Path B.
+  before sharing tracks with older builds. Both paths support segment parts; their outgoing
+  fork-start parts and settings can differ. Shared gate, building, and sign placement stays shared.
 - **Lava strips:** left, right, middle or both sides. They drain energy and kill at zero, and CPU
   racers steer away from them. "Lava strips never kill" turns off the kill.
 - **Magnet traps:** thin pulsing rails on the left, right or middle of the road. Side magnets pull
   machines toward the track edge and middle magnets pull them onto the center line, with their own
   warning sound and adjustable pull strength and range. CPU racers
   steer away from them. They can't be placed on pipes, half-pipes or cylinders.
+- **CPU hazard coverage:** an optional **CPU track-hazard avoidance** setting uses saved strip
+  widths and magnet ranges when choosing a lateral target. It defaults off and does not route CPUs
+  onto alternate paths. A full-width hazard can leave no safe target.
 - **Mouse editing:** drag point position, height, width, bank and offset, with multi-select and
   box select. Create Machine has a mouse cursor too.
 - **Blender-style camera:** orbit and pan with a button you choose, and zoom with the wheel.
@@ -121,7 +127,7 @@ Options live in the enhancement menu, which opens with **F1**. Editing tools are
 - **Keys and help:** number-key shortcuts, rebindable tool keys, a hint strip for the current
   tool, and a Controls Help page showing your live bindings.
 - **Test drive:** choose the machine and engine, and drive in widescreen.
-- **Per-track options:** names up to 20 characters, custom music from `music/custom/`, and an
+- **Per-track options:** names up to 20 characters, custom music from `music/`, and an
   ending scene option. An experimental toggle raises the height ceiling from 5,000 to 30,000, but
   those tracks won't load on real hardware or in other Expansion Kit tools.
 
@@ -140,7 +146,7 @@ Options live in the enhancement menu, which opens with **F1**. Editing tools are
 
 - **Separate volume sliders:** master, music and sound effects.
 - **Streamed music replacement:** play your own `.ogg`, `.flac` or `.wav` for any BGM from `music/`
-  or `mods/music/`. See the [custom music guide](docs/modding/CUSTOM_MUSIC.md).
+  beside the executable. See the [custom music guide](docs/modding/CUSTOM_MUSIC.md).
 
 ### Sharing and mods
 
@@ -206,6 +212,12 @@ as a selectable profile. Feature requests live in the forum on the
    IPL ROM. Extraction begins only after you select **Build game data and continue**. Everything
    remains beside the executable so later launches boot directly into the game.
 4. **Play.** Press **F1** at any time to open the enhancement menu.
+
+Startup creates supported drop folders on first and subsequent launches without replacing your
+files: `mods/~romhacks/` in the resolved game-data directory, plus `music/` and
+`exports/machines/` beside the executable. Use `music/` for both game replacements and selectable
+Course Edit songs. Old music locations remain readable fallbacks; startup does not create them. Folder-creation failures are logged;
+other folders are still attempted. Cached native machine export is in **F1 > Workshop > Tools**.
 
 **Updating.** From 1.2 on, Windows, Linux and macOS builds can update themselves from the
 enhancement menu. Android installs new versions from the APK. Coming from 1.1.0 or older, update

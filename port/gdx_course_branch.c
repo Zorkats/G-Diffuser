@@ -4,6 +4,7 @@
 #include "fzx_course.h"
 #include "fzx_racer.h"
 #include "gdx_course_branch.h"
+#include "gdx_course_contact.h"
 #include "gdx_course_branch_view.h"
 #include "gdx_course_settings_view.h"
 #include "gdx_course_junction.h"
@@ -25,7 +26,7 @@ extern void gdx_dbg_logf(const char* fmt, ...);
 extern f32 Course_SplineGetTangent(CourseSegment* segment, f32 t, Vec3f* tangentVec);
 extern void Course_SplineGetPosition(CourseSegment* segment, f32 t, Vec3f* pos);
 
-#define BRANCH_SEGMENTS 64
+#define BRANCH_SEGMENTS GDX_COURSE_POINT_CAPACITY
 /* The larger of the two stock gSegmentChunks sizes (game_context.c), so a copy never runs past a buffer. */
 #define BRANCH_CHUNKS 1025
 /* Steps for a walk onto the other ring. The walk starts from a point of the old spline, a few steps settle
@@ -68,6 +69,8 @@ static struct {
     s8 ring2ForkOf[BRANCH_SEGMENTS];  /* fork whose B span (F..last B node) holds the segment, else -1 */
     s32 ring2ChunkCount;
     s32 ring2SpanChunks;
+    s16 gadgetRing2[BRANCH_SEGMENTS];
+    s32 gadgetCount;
 } sBranch;
 
 static SegmentChunk sRing2Chunks[BRANCH_CHUNKS];
@@ -81,11 +84,12 @@ static BranchRacer sRacers[TOTAL_RACER_COUNT];
 
 static Vtx sJunctionVertices[BRANCH_JUNCTION_VERTICES];
 static Gfx sJunctionLists[BRANCH_JUNCTION_LISTS];
-static s32 sJunctionListOffset[BRANCH_CHUNKS];
+static s32 sJunctionListOffset[2][BRANCH_CHUNKS];
 static u8 sJunctionDetail[2][BRANCH_CHUNKS];
 static GdxJunctionWorkspace sJunctionWorkspace;
 static GdxJunctionTriangle sJunctionPieces[GDX_JUNCTION_MAX_PIECES];
 static GdxJunctionCutter sJunctionCutters[BRANCH_JUNCTION_CUTTERS];
+static GdxJunctionCutter sJunctionRailCutters[BRANCH_JUNCTION_CUTTERS / 4];
 static struct {
     double min[3];
     double max[3];
@@ -115,6 +119,7 @@ void gdx_course_branch_reset_racers(void) {
 
 void gdx_course_branch_clear(void) {
     sBranch.live = 0;
+    sBranch.gadgetCount = 0;
     sBranch.courseInfo = NULL;
     sBranch.ring1 = NULL;
     sBranch.ring1Count = 0;
@@ -241,34 +246,58 @@ static s32 branch_junction_list(s32 first) {
     return 1;
 }
 
-static s32 branch_junction_build(s32 mainCount, s32 mainPoints, s32 alternatePoints) {
-    static s32 registered;
-    GdxJunctionTriangle triangles[16], owner[16];
-    s32 i, j, k, axis, changedChunks = 0;
-    if (!registered) {
-        gdx_register_host_wide_command_range(sJunctionLists, sizeof(sJunctionLists));
-        registered = 1;
-    }
-    memset(sJunctionDetail, 0, sizeof(sJunctionDetail));
-    for (i = 0; i < mainCount; i++) {
-        sJunctionOwners[i].fork = branch_junction_fork(&gSegmentChunks[i], sBranch.ring1ForkOf, mainPoints);
-        if (sJunctionOwners[i].fork >= 0) {
-            branch_junction_triangles(&gSegmentChunks[i], &gSegmentChunks[(i + 1) % mainCount], triangles);
-            branch_junction_bounds(triangles, sJunctionOwners[i].min, sJunctionOwners[i].max);
+static s32 branch_junction_road_overlap(const GdxJunctionTriangle* road, const GdxJunctionTriangle* owner) {
+    GdxJunctionCutter cutters[4];
+    s32 i, count = 0;
+    for (i = 2; i < 6; i++) {
+        if (gdx_junction_cutter(&owner[i], &cutters[count])) {
+            count++;
         }
     }
-    for (i = 0; i < sBranch.ring2ChunkCount; i++) {
+    for (i = 2; i < 6; i++) {
+        s32 pieces = gdx_junction_subtract(&road[i], cutters, count, &sJunctionWorkspace,
+                                           sJunctionPieces, GDX_JUNCTION_MAX_PIECES);
+        if (pieces < 0) {
+            return -1;
+        }
+        if (pieces != 1 || memcmp(sJunctionPieces, &road[i], sizeof(road[i])) != 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static s32 branch_junction_pass(s32 side, s32 mainCount, s32 mainPoints, s32 alternatePoints) {
+    SegmentChunk* chunks = side ? sRing2Chunks : gSegmentChunks;
+    SegmentChunk* other = side ? gSegmentChunks : sRing2Chunks;
+    const s8* forks = side ? sBranch.ring2ForkOf : sBranch.ring1ForkOf;
+    const s8* otherForks = side ? sBranch.ring1ForkOf : sBranch.ring2ForkOf;
+    s32 count = side ? sBranch.ring2ChunkCount : mainCount;
+    s32 otherCount = side ? mainCount : sBranch.ring2ChunkCount;
+    s32 points = side ? alternatePoints : mainPoints;
+    s32 otherPoints = side ? mainPoints : alternatePoints;
+    GdxJunctionTriangle triangles[16], owner[16];
+    s32 i, j, k, axis;
+    for (i = 0; i < otherCount; i++) {
+        sJunctionOwners[i].fork = branch_junction_fork(&other[i], otherForks, otherPoints);
+        if (sJunctionOwners[i].fork >= 0) {
+            branch_junction_triangles(&other[i], &other[(i + 1) % otherCount], owner);
+            branch_junction_bounds(owner, sJunctionOwners[i].min, sJunctionOwners[i].max);
+        }
+    }
+    for (i = 0; i < count; i++) {
         double min[3], max[3];
         s32 candidates[BRANCH_JUNCTION_CUTTERS / 16];
-        s32 candidateCount = 0, cutterCount = 0, changed = 0;
+        s32 candidateCount = 0, cutterCount = 0, railCount = 0, changed = 0;
         s32 first = sJunctionVertexCount;
-        s32 fork = branch_junction_fork(&sRing2Chunks[i], sBranch.ring2ForkOf, alternatePoints);
+        s32 fork = branch_junction_fork(&chunks[i], forks, points);
         if (fork < 0) {
             continue;
         }
-        branch_junction_triangles(&sRing2Chunks[i], &sRing2Chunks[(i + 1) % sBranch.ring2ChunkCount], triangles);
+        branch_junction_triangles(&chunks[i], &chunks[(i + 1) % count], triangles);
         branch_junction_bounds(triangles, min, max);
-        for (j = 0; j < mainCount; j++) {
+        for (j = 0; j < otherCount; j++) {
+            s32 overlap;
             if (sJunctionOwners[j].fork != fork) {
                 continue;
             }
@@ -285,40 +314,75 @@ static s32 branch_junction_build(s32 mainCount, s32 mainPoints, s32 alternatePoi
                 return 0;
             }
             candidates[candidateCount++] = j;
-            branch_junction_triangles(&gSegmentChunks[j], &gSegmentChunks[(j + 1) % mainCount], owner);
-            for (k = 0; k < 16; k++) {
-                if (gdx_junction_cutter(&owner[k], &sJunctionCutters[cutterCount])) {
-                    cutterCount++;
+            branch_junction_triangles(&other[j], &other[(j + 1) % otherCount], owner);
+            if (side) {
+                for (k = 0; k < 16; k++) {
+                    if (gdx_junction_cutter(&owner[k], &sJunctionCutters[cutterCount])) {
+                        cutterCount++;
+                    }
+                }
+            }
+            overlap = branch_junction_road_overlap(triangles, owner);
+            if (overlap < 0) {
+                return 0;
+            }
+            if (overlap) {
+                for (k = 2; k < 6; k++) {
+                    // Native road rails rise 10 units and their outer sides descend 40.
+                    if (gdx_junction_rail_cutter(&owner[k], 50, &sJunctionRailCutters[railCount])) {
+                        railCount++;
+                    }
                 }
             }
         }
-        if (cutterCount == 0) {
+        if (!cutterCount && !railCount) {
             continue;
         }
         for (j = 0; j < 16; j++) {
-            s32 count = gdx_junction_subtract(&triangles[j], sJunctionCutters, cutterCount,
-                                              &sJunctionWorkspace, sJunctionPieces, GDX_JUNCTION_MAX_PIECES);
-            if (count < 0 || !branch_junction_append(sJunctionPieces, count)) {
+            s32 pieces;
+            s32 road = j >= 2 && j < 6;
+            if (!road && railCount) {
+                pieces = gdx_junction_subtract(&triangles[j], sJunctionRailCutters, railCount,
+                                               &sJunctionWorkspace, sJunctionPieces, GDX_JUNCTION_MAX_PIECES);
+            } else {
+                pieces = gdx_junction_subtract(&triangles[j], sJunctionCutters, cutterCount,
+                                               &sJunctionWorkspace, sJunctionPieces, GDX_JUNCTION_MAX_PIECES);
+            }
+            if (pieces < 0 || !branch_junction_append(sJunctionPieces, pieces)) {
                 return 0;
             }
-            changed |= count != 1 || memcmp(sJunctionPieces, &triangles[j], sizeof(triangles[j])) != 0;
+            changed |= pieces != 1 || memcmp(sJunctionPieces, &triangles[j], sizeof(triangles[j])) != 0;
         }
         if (!changed) {
             sJunctionVertexCount = first;
             continue;
         }
-        sJunctionListOffset[i] = sJunctionListCount;
+        sJunctionListOffset[side][i] = sJunctionListCount;
         if (!branch_junction_list(first)) {
             return 0;
         }
-        sJunctionDetail[1][i] = sJunctionDetail[1][(i + 1) % sBranch.ring2ChunkCount] = 1;
+        sJunctionDetail[side][i] = sJunctionDetail[side][(i + 1) % count] = 1;
         for (j = 0; j < candidateCount; j++) {
             k = candidates[j];
-            sJunctionDetail[0][k] = sJunctionDetail[0][(k + 1) % mainCount] = 1;
+            sJunctionDetail[side ^ 1][k] = sJunctionDetail[side ^ 1][(k + 1) % otherCount] = 1;
         }
-        changedChunks++;
     }
-    // Native LOD chords must not bridge the fine triangles used as overlap owners.
+    return 1;
+}
+
+static s32 branch_junction_build(s32 mainCount, s32 mainPoints, s32 alternatePoints) {
+    static s32 registered;
+    s32 i;
+    if (!registered) {
+        gdx_register_host_wide_command_range(sJunctionLists, sizeof(sJunctionLists));
+        registered = 1;
+    }
+    memset(sJunctionDetail, 0, sizeof(sJunctionDetail));
+    if (!branch_junction_pass(1, mainCount, mainPoints, alternatePoints) ||
+        !branch_junction_pass(0, mainCount, mainPoints, alternatePoints)) {
+        return 0;
+    }
+    // Both rings must use the same fine-chunk boundaries as the retained cuts.
     for (i = 0; i < mainCount; i++) {
         if (sJunctionDetail[0][i]) {
             gSegmentChunks[i].trackSegmentInfo &= ~TRACK_FLAG_CONTINUOUS;
@@ -329,26 +393,24 @@ static s32 branch_junction_build(s32 mainCount, s32 mainPoints, s32 alternatePoi
             sRing2Chunks[i].trackSegmentInfo &= ~TRACK_FLAG_CONTINUOUS;
         }
     }
-    gdx_dbg_logf("[fork] junctions: %d chunks, %d/%d vertices, %d/%d commands; retained %zu bytes\n",
-                 changedChunks, sJunctionVertexCount, BRANCH_JUNCTION_VERTICES,
-                 sJunctionListCount, BRANCH_JUNCTION_LISTS,
-                 sizeof(sJunctionVertices) + sizeof(sJunctionLists) + sizeof(sJunctionListOffset) +
-                 sizeof(sJunctionDetail) + sizeof(sJunctionWorkspace) + sizeof(sJunctionPieces) +
-                 sizeof(sJunctionCutters) + sizeof(sJunctionOwners));
+    gdx_dbg_logf("[fork] junctions: %d/%d vertices, %d/%d commands\n",
+                 sJunctionVertexCount, BRANCH_JUNCTION_VERTICES,
+                 sJunctionListCount, BRANCH_JUNCTION_LISTS);
     return 1;
 }
 
 Gfx* gdx_course_branch_chunk_mesh(const SegmentChunk* chunk, const SegmentChunk* next) {
     s32 index;
-    if (!gGdxCourseChunkDrawMask || !sBranch.live || chunk < gSegmentChunks ||
-        chunk >= gSegmentChunks + sBranch.ring2ChunkCount) {
+    s32 side = gGdxCourseChunkDrawMask != NULL;
+    s32 count = side ? sBranch.ring2ChunkCount : sBranch.ring1ChunkCount;
+    if (!sBranch.live || chunk < gSegmentChunks || chunk >= gSegmentChunks + count) {
         return NULL;
     }
     index = (s32)(chunk - gSegmentChunks);
-    if (sJunctionListOffset[index] < 0 || next != &gSegmentChunks[(index + 1) % sBranch.ring2ChunkCount]) {
+    if (sJunctionListOffset[side][index] < 0 || next != &gSegmentChunks[(index + 1) % count]) {
         return NULL;
     }
-    return &sJunctionLists[sJunctionListOffset[index]];
+    return &sJunctionLists[sJunctionListOffset[side][index]];
 }
 
 s32 gdx_course_branch_live(void) {
@@ -419,67 +481,6 @@ static s32 branch_find_rotation(const CourseData* courseData, const CourseSegmen
 }
 
 /* Is the point on the other road of fork f? chunks and forkOf are that road's ring. */
-static s32 branch_edge_on_other_road(const s16 point[3], const SegmentChunk* chunks, s32 count, const s8* forkOf, s32 f) {
-    const SegmentChunk* nearest = NULL;
-    f32 nearestSq = 0.0f;
-    s32 i;
-
-    for (i = 0; i < count; i++) {
-        const SegmentChunk* chunk = &chunks[i];
-        s32 shape = chunk->trackSegmentInfo & TRACK_SHAPE_MASK;
-        f32 dx;
-        f32 dy;
-        f32 dz;
-        f32 distanceSq;
-
-        if ((chunk->segmentIndex < 0) || (chunk->segmentIndex >= BRANCH_SEGMENTS) || (forkOf[chunk->segmentIndex] != f) ||
-            ((shape != TRACK_SHAPE_ROAD) && (shape != TRACK_SHAPE_BORDERLESS_ROAD))) {
-            continue;
-        }
-        dx = (f32) point[0] - chunk->referencePos2[0];
-        dy = (f32) point[1] - chunk->referencePos2[1];
-        dz = (f32) point[2] - chunk->referencePos2[2];
-        distanceSq = (dx * dx) + (dy * dy) + (dz * dz);
-        if ((nearest == NULL) || (distanceSq < nearestSq)) {
-            nearest = chunk;
-            nearestSq = distanceSq;
-        }
-    }
-    return (nearest != NULL) &&
-           gdx_branch_view_chunk_covers_point(point, nearest->referencePos2, nearest->referencePos5,
-                                              nearest->referencePos8, nearest->referencePos1);
-}
-
-/* Where a road's edge lies on the other road, ships cross it, so it draws no rail. Moving the rail top onto the
- * road edge flattens the rail, and the shared vertices make it taper from the chunk where the roads part, the V of
- * a GX lane split. Only the plain road has a rail to lose: a walled road's walls stay and stop the ship. */
-static void branch_flatten_rails(SegmentChunk* chunks, s32 count, const s8* forkOf, const SegmentChunk* otherChunks,
-                                 s32 otherCount, const s8* otherForkOf) {
-    s32 i;
-
-    for (i = 0; i < count; i++) {
-        SegmentChunk* chunk = &chunks[i];
-        s32 f;
-
-        if ((chunk->segmentIndex < 0) || (chunk->segmentIndex >= BRANCH_SEGMENTS) ||
-            ((chunk->trackSegmentInfo & TRACK_SHAPE_MASK) != TRACK_SHAPE_ROAD)) {
-            continue;
-        }
-        f = forkOf[chunk->segmentIndex];
-        if (f < 0) {
-            continue;
-        }
-        if (branch_edge_on_other_road(chunk->referencePos5, otherChunks, otherCount, otherForkOf, f)) {
-            memcpy(chunk->referencePos4, chunk->referencePos5, sizeof(chunk->referencePos4));
-        }
-        if (branch_edge_on_other_road(chunk->referencePos8, otherChunks, otherCount, otherForkOf, f)) {
-            memcpy(chunk->referencePos7, chunk->referencePos8, sizeof(chunk->referencePos7));
-        }
-    }
-}
-
-/* editor: the ring is the Course Edit ring (control point order, uncentered, its own trackSegmentInfo),
- * which the course data's control points do not describe until the course is saved. */
 static void branch_build(s32 editor) {
     static const CourseSegment sFreshSegment;
     CourseInfo* info = gCurrentCourseInfo;
@@ -722,7 +723,7 @@ static void branch_build(s32 editor) {
     }
 
     /* Outside the B spans ring 2 mirrors the stock ring, so it shares the stock gadgets and lengths; a racer
-     * that lands there moves back to the stock ring on its next walk. A B span has no gadgets yet. Every
+     * that lands there moves back to the stock ring on its next walk. B spans get their own gadget links after this build. Every
      * ring 2 segment reports a stock segment index, so the per-segment tables (CPU, hazards) stay in range;
      * a B segment reports its fork point. */
     for (j = 0; j < ring2Count; j++) {
@@ -759,12 +760,6 @@ static void branch_build(s32 editor) {
         sBranch.ring2SpanChunks += sRing2ChunkMask[i];
     }
 
-    /* The two passes read each other's edges, and a flattened rail keeps its road edge, so the order is free. */
-    branch_flatten_rails(gSegmentChunks, ring1ChunkCount, sBranch.ring1ForkOf, sRing2Chunks, sBranch.ring2ChunkCount,
-                         sBranch.ring2ForkOf);
-    branch_flatten_rails(sRing2Chunks, sBranch.ring2ChunkCount, sBranch.ring2ForkOf, gSegmentChunks, ring1ChunkCount,
-                         sBranch.ring1ForkOf);
-
     if (!branch_junction_build(ring1ChunkCount, count, ring2Count)) {
         sJunctionVertexCount = 0;
         sJunctionListCount = 0;
@@ -778,8 +773,187 @@ static void branch_build(s32 editor) {
     sBranch.ring1ChunkCount = ring1ChunkCount;
     sBranch.ring2Count = ring2Count;
     sBranch.live = 1;
+    for (i = 0; i < ring2Count; i++) {
+        if (sBranch.ring2ForkOf[i] >= 0) {
+            sBranch.gadgetRing2[sBranch.gadgetCount++] = (s16) i;
+        }
+    }
     gdx_dbg_logf("[fork] %d fork(s) live: %d stock points, %d on the second ring, %d chunks (%d drawn)\n",
                  sBranch.forkCount, count, ring2Count, sBranch.ring2ChunkCount, sBranch.ring2SpanChunks);
+}
+
+static s32 branch_ring2_index(const CourseSegment* segment) {
+    u64 offset = (u64) segment - (u64) sBranch.ring2;
+
+    if (!gdx_course_branch_live() || offset >= sizeof(sBranch.ring2) || offset % sizeof(CourseSegment) != 0) {
+        return -1;
+    }
+    return (s32) (offset / sizeof(CourseSegment));
+}
+
+s32 gdx_course_branch_gadget_count(s32 courseIndex) {
+    if (gdx_course_branch_live() && !gInCourseEditor && &gCourseInfos[courseIndex] == sBranch.courseInfo) {
+        return sBranch.ring1Count + sBranch.gadgetCount;
+    }
+    if (gdx_course_branch_live() && gInCourseEditTestRun && &gCourseInfos[courseIndex] == sBranch.courseInfo) {
+        return sBranch.ring1Count + sBranch.gadgetCount;
+    }
+    return gCourseInfos[courseIndex].segmentCount;
+}
+
+CourseSegment* gdx_course_branch_gadget_segment(s32 courseIndex, s32 index) {
+    s32 mainCount = gCourseInfos[courseIndex].segmentCount;
+
+    if (index < 0) {
+        return NULL;
+    }
+    if (index < mainCount) {
+        return &gCourseInfos[courseIndex].courseSegments[index];
+    }
+    if (index < gdx_course_branch_gadget_count(courseIndex)) {
+        return &sBranch.ring2[sBranch.gadgetRing2[index - mainCount]];
+    }
+    return NULL;
+}
+
+s32 gdx_course_branch_gadget_source(s32 index) {
+    if (gdx_course_branch_live() && index >= sBranch.ring1Count &&
+        index < sBranch.ring1Count + sBranch.gadgetCount) {
+        s32 ringIndex = sBranch.gadgetRing2[index - sBranch.ring1Count];
+
+        return sBranch.forks[sBranch.ring2ForkOf[ringIndex]].ring1Fork;
+    }
+    return index;
+}
+
+s32 gdx_course_branch_gadget_part(s32 index, s32 part, s32 fallback) {
+    s32 ringIndex;
+    s32 f;
+    BranchFork* fork;
+
+    if (!gdx_course_branch_live() || index < sBranch.ring1Count) {
+        return fallback;
+    }
+    index -= sBranch.ring1Count;
+    if (index < 0 || index >= sBranch.gadgetCount) {
+        return -1;
+    }
+    ringIndex = sBranch.gadgetRing2[index];
+    f = sBranch.ring2ForkOf[ringIndex];
+    fork = &sBranch.forks[f];
+    return gdx_branch_view_part(fork->setFork, ringIndex - fork->ring2Fork - 1, part, fallback);
+}
+
+s32 gdx_course_branch_settings_point(const CourseSegment* segment) {
+    s32 index = branch_ring2_index(segment);
+
+    if (index >= 0 && sBranch.ring2ForkOf[index] >= 0) {
+        BranchFork* fork = &sBranch.forks[sBranch.ring2ForkOf[index]];
+
+        return gdx_branch_view_settings_point(fork->setFork, index - fork->ring2Fork - 1);
+    }
+    return gdx_course_branch_control_point(segment->segmentIndex);
+}
+
+f32 gdx_course_branch_gadget_next_t(const CourseSegment* segment, f32 t) {
+    s32 index = branch_ring2_index(segment);
+    s32 i;
+    s32 found = 0;
+    SegmentChunk* chunks = index >= 0 ? sRing2Chunks : gSegmentChunks;
+    s32 count = index >= 0 ? sBranch.ring2ChunkCount : gSegmentChunkCount;
+
+    if (index < 0) {
+        index = segment->segmentIndex;
+    }
+    for (i = 0; i < count; i++) {
+        if (chunks[i].segmentIndex == index) {
+            found = 1;
+            if (chunks[i].segmentTValue > t) {
+                return chunks[i].segmentTValue;
+            }
+        }
+    }
+    return !found && t <= 0.00001f ? 0.0001f : 1.0f;
+}
+
+s32 gdx_course_branch_gadget_chunk(const CourseSegment* segment, f32 t) {
+    s32 index = branch_ring2_index(segment);
+    SegmentChunk* chunks = index >= 0 ? sRing2Chunks : gSegmentChunks;
+    s32 count = index >= 0 ? sBranch.ring2ChunkCount : gSegmentChunkCount;
+    s32 found = 0;
+    s32 i;
+
+    if (index < 0) {
+        index = segment->segmentIndex;
+    }
+    for (i = 0; i < count; i++) {
+        if (chunks[i].segmentIndex == index && chunks[i].segmentTValue <= t) {
+            found = i;
+        }
+    }
+    return branch_ring2_index(segment) >= 0 ? BRANCH_CHUNKS + found : found;
+}
+
+s32 gdx_course_branch_gadget_chunk_visible(s32 encoded) {
+    if (encoded >= BRANCH_CHUNKS) {
+        encoded -= BRANCH_CHUNKS;
+        return encoded < sBranch.ring2ChunkCount && sRing2Chunks[encoded].drawState != 0;
+    }
+    return encoded >= 0 && encoded < gSegmentChunkCount && gSegmentChunks[encoded].drawState != 0;
+}
+
+s32 gdx_course_branch_gadget_adjacent(const CourseSegment* previous, const CourseSegment* current) {
+    s32 nextIndex;
+
+    if (previous->next == current) {
+        return 1;
+    }
+    nextIndex = branch_ring2_index(previous->next);
+    return nextIndex >= 0 && sBranch.ring2ForkOf[nextIndex] < 0 &&
+           &sBranch.ring1[sBranch.ring2Source[nextIndex]] == current;
+}
+
+SegmentChunk* gdx_course_branch_gadget_load_chunk(const CourseSegment* segment, const Vec3f* pos) {
+    s32 alternate = branch_ring2_index(segment) >= 0;
+    SegmentChunk* chunks = alternate ? sRing2Chunks : gSegmentChunks;
+    s32 count = alternate ? sBranch.ring2ChunkCount : gSegmentChunkCount;
+    SegmentChunk* closest = chunks;
+    f32 distance = 1.0e30f;
+    s32 i;
+
+    for (i = 0; i < count; i++) {
+        f32 x = chunks[i].pos.x - pos->x;
+        f32 y = chunks[i].pos.y - pos->y;
+        f32 z = chunks[i].pos.z - pos->z;
+        f32 candidate = x * x + y * y + z * z;
+
+        if (candidate < distance) {
+            closest = &chunks[i];
+            distance = candidate;
+        }
+    }
+    return closest;
+}
+
+void gdx_course_branch_sync_gadgets(void) {
+    s32 i;
+
+    if (!gdx_course_branch_live()) {
+        return;
+    }
+    for (i = 0; i < sBranch.ring2Count; i++) {
+        if (sBranch.ring2ForkOf[i] < 0) {
+            CourseSegment* segment = &sBranch.ring2[i];
+            CourseSegment* source = &sBranch.ring1[sBranch.ring2Source[i]];
+
+            segment->jumpsStart = source->jumpsStart;
+            segment->jumpsEnd = source->jumpsEnd;
+            segment->landminesStart = source->landminesStart;
+            segment->landminesEnd = source->landminesEnd;
+            segment->effectsStart = source->effectsStart;
+            segment->effectsEnd = source->effectsEnd;
+        }
+    }
 }
 
 void gdx_course_branch_build(void) {
@@ -833,11 +1007,7 @@ void gdx_course_branch_on_course_init(void) {
 
 /* Walks a copy of info on another segment from the point info last stood on. Returns 0 when it settled. */
 static s32 branch_walk_copy(RacerSegmentPositionInfo* out, const RacerSegmentPositionInfo* info, CourseSegment* segment) {
-    *out = *info;
-    out->courseSegment = segment;
-    out->lastGroundedPos = out->segmentPos;
-    /* A negative threshold makes the walker step until it converges or runs out of steps. */
-    return func_8009EBEC(out, info->pos.x, info->pos.y, info->pos.z, BRANCH_REWALK_STEPS, -1.0f);
+    return gdx_course_contact_project(out, info, segment, BRANCH_REWALK_STEPS);
 }
 
 /* Moves info onto segment. Returns 1 when it moved. */
@@ -1089,6 +1259,7 @@ Gfx* gdx_course_branch_draw(Gfx* gfx, s32 cameraIndex, Gfx* (*drawRing)(Gfx*, s3
     Course_GdxSetChunkRing(sBranch.ring2ChunkCount);
     gGdxCourseChunkDrawMask = sRing2ChunkMask;
     gfx = drawRing(gfx, cameraIndex);
+    memcpy(sRing2Chunks, gSegmentChunks, (sBranch.ring2ChunkCount + 1) * sizeof(SegmentChunk));
     gGdxCourseChunkDrawMask = NULL;
     memcpy(gSegmentChunks, sRing1ChunkSave, (ring1ChunkCount + 1) * sizeof(SegmentChunk));
     Course_GdxSetChunkRing(ring1ChunkCount);

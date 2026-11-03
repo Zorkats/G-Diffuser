@@ -19,6 +19,7 @@ typedef struct {
     double plane[5][4];
     double min[3];
     double max[3];
+    int railVolume;
 } GdxJunctionCutter;
 
 typedef struct {
@@ -26,6 +27,7 @@ typedef struct {
 } GdxJunctionWorkspace;
 
 int gdx_junction_cutter(const GdxJunctionTriangle* owner, GdxJunctionCutter* out);
+int gdx_junction_rail_cutter(const GdxJunctionTriangle* road, double depth, GdxJunctionCutter* out);
 short gdx_junction_quantize(double value);
 // Negative means invalid input or capacity exhaustion; no partial result is published.
 int gdx_junction_subtract(const GdxJunctionTriangle* input, const GdxJunctionCutter* cutters,

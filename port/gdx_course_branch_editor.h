@@ -16,7 +16,7 @@ void gdx_course_branch_editor_on_translate(float dx, float dz);
 
 void gdx_course_branch_editor_rebuilt(void);
 void gdx_course_branch_editor_force_path_a(void);
-void gdx_course_branch_editor_saved(void);
+int gdx_course_branch_editor_saved(void);
 void gdx_course_branch_editor_loaded(void);
 void gdx_course_branch_editor_new_course(void);
 void gdx_course_branch_editor_tools(void);

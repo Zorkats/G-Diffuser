@@ -189,7 +189,7 @@ void DrawSegmentLines(int createOption) {
     if (gDesignStyleOption == 9 /* TRACK_DESIGN_STYLE_INSERT */) {
         ImGui::TextColored(title, "Insert");
         ImGui::TextUnformatted("Click a segment: add a point halfway along it");
-        ImGui::TextDisabled("Not the start segment. Up to 60 points");
+        ImGui::TextDisabled("Not the start segment. Up to 127 points, including fork nodes");
         return;
     }
     if (gDesignStyleOption == 10 /* TRACK_DESIGN_STYLE_SPLIT */) {
@@ -382,7 +382,7 @@ void GdxCourseEditDrawControlsHelp(void) {
                                            "Course, Design, and Parts. The same as the controller's Z");
     HelpRow("Left-click a segment (Insert design)",
             "Adds a point halfway along the segment. Refused, with the reason in the hint strip, on the start "
-            "segment, under 4 or at 60 points, on a track at the length limit, or when a neighbour would be under "
+            "segment, under 4 points, above the combined 127-point budget, on a track at the length limit, or when a neighbour would be under "
             "498 units away");
     HelpRow("Left-click a segment (Split design)",
             "Forks the segment into two paths, one point each, on either side of the road. Insert inside a split "

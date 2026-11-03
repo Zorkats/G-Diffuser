@@ -67,13 +67,31 @@ int main(void) {
         }
         count = gdx_course_preview_build(ringX, ringZ, 60, &maximum, 1,
                                          outX, outZ, next, GDX_PREVIEW_CAPACITY);
-        assert(count == GDX_PREVIEW_CAPACITY);
+        assert(count == 60 * GDX_PREVIEW_STEPS + 4 * (2 * GDX_PREVIEW_STEPS + 1));
         assert(next[719] == 0);
         for (i = 0; i < 4; i++) {
             assert(next[720 + i * 25 + 24] == -1);
         }
         assert(gdx_course_preview_build(ringX, ringZ, 60, &maximum, 1,
-                                        outX, outZ, next, GDX_PREVIEW_CAPACITY - 1) == 0);
+                                        outX, outZ, next, count - 1) == 0);
+        {
+            float extendedX[GDX_BRANCH_MAX_TOTAL_POINTS];
+            float extendedZ[GDX_BRANCH_MAX_TOTAL_POINTS];
+            const int ringCount = GDX_BRANCH_MAX_TOTAL_POINTS - GDX_BRANCH_MAX_FORKS;
+            maximum.ringCount = (unsigned char)ringCount;
+            maximum.extendedCount = (unsigned char)(ringCount - 64);
+            for (i = 0; i < ringCount; i++) {
+                extendedX[i] = (float)i * 100;
+                extendedZ[i] = (float)(i % 3) * 100;
+            }
+            count = gdx_course_preview_build(extendedX, extendedZ, ringCount, &maximum, 1,
+                                             outX, outZ, next, GDX_PREVIEW_CAPACITY);
+            assert(count == GDX_PREVIEW_CAPACITY);
+            assert(next[ringCount * GDX_PREVIEW_STEPS - 1] == 0);
+            assert(next[count - 1] == -1);
+            assert(gdx_course_preview_build(extendedX, extendedZ, ringCount, &maximum, 1,
+                                            outX, outZ, next, count - 1) == 0);
+        }
         assert(gdx_course_preview_build(x, z, 6, NULL, 0, legacyX, legacyZ, legacyNext, 72) == 72);
         // Disabled fork rendering must not depend on the contents of the fork store.
         assert(gdx_course_preview_build(x, z, 6, &forks, 0, outX, outZ, next, GDX_PREVIEW_CAPACITY) == 72);

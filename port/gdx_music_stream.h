@@ -2,12 +2,12 @@
 #define GDX_MUSIC_STREAM_H
 
 // Streamed BGM replacement (plan section 6A). When a BGM id starts and a file exists for its key
-// (music/<bgm key>.ogg|.flac|.wav beside the exe, or mods/music/...), the file is decoded on a worker
+// (music/<bgm key>.ogg|.flac|.wav beside the exe, then legacy mods/music/...), the file is decoded on a worker
 // thread into a ring of stereo float frames. libultraship's osAiSetNextBuffer mixes that ring into the
 // output buffer before the low-pass and master volume. Stock seq player 1 is muted while a stream is
 // live (gdx_audio_seq_player_stream_mute), so the stream is the only music.
 //
-// The stream gain is the Music slider times the raw seq player 1 fade (fadeVolume x fadeVolumeScale),
+// Native replacement gain is the Music slider times the seq player 1 fade (fadeVolume x fadeVolumeScale),
 // so the stock fade-out on Audio_DDBgmStop and the pause ducking carry over. Implemented in
 // port/gdx_music_stream.cpp; the decoders are in port/third_party/music_decoders.
 //
@@ -26,11 +26,12 @@ extern "C" {
 // file, logs one line, and starts a stream when a file exists and gEnhancements.Audio.StreamedMusic is on.
 void gdx_music_stream_bgm_start(int bgmId);
 
-// Called from decomp Audio_DDBgmStop. A live stream follows the stock fade-out to silence and then closes.
+// Native replacements drain with the stock fade; explicit previews stop immediately, including pending loads.
 void gdx_music_stream_bgm_stop(void);
 
 // Plays an arbitrary file with no BGM key lookup. This is the entry point for the 7A custom soundtrack
-// feature. Returns 1 when the request was accepted. label is used only for logging and may be NULL.
+// feature. Preview gain follows pause (40%) rather than native BGM activation. Returns 1 when accepted.
+// label is used only for logging and may be NULL.
 int gdx_music_stream_play_file(const char* path, const char* label);
 
 // Course override (7A): while set, gdx_music_stream_bgm_start with this bgmId plays path instead of the

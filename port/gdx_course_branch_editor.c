@@ -15,7 +15,7 @@
 #include "gdx_course_edit_undo.h"
 
 extern unk_807B3C20 D_802CB6D0;
-extern unk_80128690 D_80128690[64];
+extern unk_80128690 D_80128690[GDX_COURSE_POINT_CAPACITY];
 extern unk_800D6CA0 D_800D6CA0;
 extern CourseInfo* gCurrentCourseInfo;
 extern bool gInCourseEditTestRun;
@@ -185,23 +185,7 @@ void gdx_course_branch_editor_force_path_a(void) {
     }
 }
 
-/* The editor saved its course under the current edit file. */
-void gdx_course_branch_editor_saved(void) {
-    char courseId[32];
-    char reason[EDITOR_LABEL_CAP];
-    char text[EDITOR_LABEL_CAP + 32];
-
-    if (!gdx_course_state_edit_file_id(courseId, sizeof(courseId))) {
-        return;
-    }
-    editor_export();
-    if (gdx_branch_edit_commit(courseId, sPoints, D_802CB6D0.controlPointCount, COURSE_CONTEXT()->courseData.checksum,
-                               reason, sizeof(reason)) != 0) {
-        sprintf(text, "Forks not saved: %s", reason);
-        gdx_course_edit_flash_message(text);
-    }
-    gdx_course_state_flush();
-}
+#include "gdx_course_branch_save.inc"
 
 /* The editor ring now holds a loaded course (func_xk2_800EACB0). */
 void gdx_course_branch_editor_loaded(void) {
@@ -441,10 +425,6 @@ static void editor_split_segment(s32 segment) {
     }
     if (count < 4) {
         editor_refuse("Split: the course needs 4 or more points");
-        return;
-    }
-    if (count >= 60) {
-        editor_refuse("Split: the course already has 60 points");
         return;
     }
     if (gCurrentCourseInfo->length > 300000.0f) {

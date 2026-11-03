@@ -127,7 +127,7 @@ Code can register an element directly. A pack is the same registration, from a m
    | Music | `Audio_DDBgmStart2` in `decomp/src/audio/disk/external.c` |
 
 5. **Export and check.** Export the course from the Content Library. The `.gdxp` it writes should
-   hold a `.gdxe` beside the `.gdxc` (open it as a zip). Run `gdx_course_registry_tests` after any
+   hold a `.gcs` beside the `.gdxc` (open it as a zip). Run `gdx_course_registry_tests` after any
    change to the registry code.
 
 ## Saved keys and titles
@@ -240,72 +240,99 @@ not a pixel-identical rendering of the game's map. Race maps keep the game's fix
 
 ### Save and share
 
-Installed forks live in `course-forks.gbs` (GBS1 containing GXB1 blocks). Track and per-point
-settings live in `course-settings.gks` (GKS1 containing GXK1 blocks), beside the executable.
-Keep these files with the 64DD save sidecar when making a backup.
+The editor supports up to **127 control points across the main ring and stored alternate nodes**.
+The fixed ROM and MFS record layouts do not grow. Extra ring points and all required per-track
+metadata live in verified complete snapshots. The game publishes and reads back a snapshot before
+changing its MFS base. A marked base loads only its exact disk, directory, file, and content
+snapshot; a missing or damaged snapshot is an error, not a truncated 64-point course.
 
-A `.gdxp` with forks or settings includes a same-stem `.gdxb` (GXD1). This is separate from the
-`.gdxe` element-key sidecar described below. A bundle can carry both. Export again after changing
-the course so the payload bindings match; copying a stale sidecar is not a migration procedure.
+Snapshots live in `<active .gdd>.recovery.snapshots/`. Earlier generations stay there; there is no
+automatic history pruning. A snapshot is limited to 128 KiB, but the directory grows with retained
+generations. Do not delete it to reclaim space while keeping its disk save.
 
-**Compatibility:** 1.2.0 and older refuse packages containing `.gdxb`. GXB1 stays version 1 when
-both paths can share their first style. A distinct first style requires version 2; 1.2.0 rejects
-and sets aside the whole fork store containing it. Back up the stores before opening them with an
-older executable. Package refusal does not protect an already installed save from an older reader.
+**Back up the complete save set with the game closed:** the active `.gdd`, its
+`.recovery.snapshots/` and `.recovery/` directories, and `course-elements.gdxs`,
+`course-forks.gbs`, and `course-settings.gks` beside the executable. Include your custom music
+folders if you need those songs. The three stores remain editable metadata; they are not a
+replacement for snapshots. Existing unmarked tracks receive verified backups before migration.
+
+A track `.gdxp` contains its `.gdxc`, a required same-stem `.gcs` (GCP1), and bundled songs.
+The `.gcs` carries a complete saved generation, including keys, title, forks, settings, and extra
+points. Export after saving; exports use the saved generation, not unsaved editor values.
+
+**Older executables are unsupported for snapshot-backed saves and exports**, including tracks
+with 64 or fewer points. Keep a complete pre-update backup if you need to return to an old build.
+Do not strip the `.gcs` or remove a snapshot marker to make a package import. Legacy sidecars are
+accepted on the legacy import path; they do not make a marked track self-contained.
+
+### Parts on both paths
+
+Path B generates native pits, lava, magnets, dirt, ice, dash plates, jumps, and landmines. Its
+first segment can have different parts and settings from Path A. A gate, building, or sign at
+the shared fork point still belongs to that shared point. Swapping paths moves segment values
+with their path; it does not duplicate shared-point decorations.
+
+Generation preflights the combined paths against the native tables and terrain vertex budget.
+An over-budget course shows a warning instead of writing partial gadgets. Test drive also checks
+the stricter race budget: the editor can display up to eight jumps, but racing allows four.
+Reduce parts when test drive refuses the course. Geometry length and density matter, not only
+point count.
 
 ### Limits to account for
 
 - Junction rendering gives Path A ownership of near-coincident ROAD/BORDERLESS faces in the same
   fork. It clips Path B within 1 world unit only when face normals are nearly parallel
-  (absolute dot product at least 0.98). Separated overpasses and steeper crossings stay intact.
+  (absolute dot product at least 0.98). Rail clipping covers partial intervals on both paths and
+  is enabled only where their road tops overlap. Separated overpasses remain intact.
   If the retained mesh exceeds a capacity, the whole build keeps the original geometry and logs
   `[fork] junction capacity exceeded; keeping original geometry`; overlap can therefore return.
-  This is a rendering change, not a collision or bank-transition repair.
-- Path B's interior parts and settings are saved, but its race spans have no gadgets. Do not
-  expect pits, lava, magnets, or other placed parts on B to affect a race yet.
-- Both paths can have a different first road style; first-point parts and per-point settings
-  still share the main-ring point.
+  This is a rendering change, not a general collision or bank-transition repair.
 - Human lane crossing requires touching or overlapping ROAD or BORDERLESS surfaces. Walled roads
-  remain walls, and a crossing that jumps more than one quarter of a lap is refused. Different
-  banks can snap the vehicle's orientation. Junction clipping and existing inner-rail flattening
-  still need driving and visual acceptance; neither establishes that a reported pop-off is fixed.
-- CPUs do not switch paths. Their avoidance uses the part type, not custom coverage or magnet
-  range, so a wide hazard can still catch them.
-- The control-point limit remains 64. The raised-limit disk/memory migration is not implemented.
+  remain walls, and a crossing that jumps more than one quarter of a lap is refused. Destination
+  projection now seeds the destination spline tangent rather than the source tangent. Different
+  banks still need driving acceptance; this is not a global smoothing or pop-off fix.
+- CPUs do not switch paths. **Enhancements > Gameplay > CPU track-hazard avoidance** is off by
+  default. When enabled, it uses the current segment's saved strip coverage and magnet range,
+  respects **Ignore track settings**, and changes only the lateral target. It does not look ahead
+  across segments. A hazard that covers the whole road can still catch a CPU.
+- The combined point limit is 127, not a promise that every 127-point layout fits native chunk,
+  gadget, or retained-junction budgets. Shorten or simplify a course that fails those checks.
 
-The A/B selection, typed Width/Center, optional-map, and junction changes have automated checks,
-not runtime acceptance. Verify save/reload and driving on a disposable track before relying on them.
+Automated tests cover these numeric, codec, and native-generation seams. They do not establish
+native UI behavior, minimap pixels, or driving acceptance. Use disposable tracks for runtime checks.
 
 ## Bundles (Edit Cup)
 
-A bundle export (`contentType` 3, the six-slot Edit Cup) carries the keys and titles of each member.
+A bundle export (`contentType` 3, the six-slot Edit Cup) carries a complete snapshot for each
+unique track in `edit-cup.gcs`, beside `edit-cup.gdxc` and the member songs inside
+`exports/edit-cup.gdxp`. GCP1 holds one to six members, rejects duplicate identities, and binds
+all members to the container payload CRC. Its maximum encoded size is 768 KiB plus 44 bytes.
 
-- The bundle `.gdxc` keeps its layout. Its flags (header offset 0x25) gain bit 2 (keys) and bit 3 (title) when the companion carries them. The payload CRC at 0x2D does not change.
-- The companion is `edit-cup.gdxs`, inside `exports/edit-cup.gdxp`. It is a GXS1 file whose entries are the members, with the id `<slot>.CRSD` and a bind CRC equal to the member's payload CRC. A stale companion is removed when the cup has nothing to carry.
-- Member music files travel in the same package, beside the `.gdxc`.
-- **Long slot names.** A cup slot holds up to 20 characters. On disk, `CRS_ENTRY.CENT` keeps its stock 24 x 9-byte rows and `CRS_ENTRY.CENL` holds the names over 8 characters (`port/gdx_edit_cup.h`). A bundle carries the CENL image as entry 1 only when the cup has such a name. Older builds refuse those bundles.
-- **Old bundles** have no companion and flag bits 2 and 3 clear. They import as before. Their members install with no keys and no title, and any keys a previous install of the same name left behind are cleared.
-- **Old builds** ignore the companion and the two flags, and install the bundle as before.
+A cup slot holds up to 20 characters. On disk, `CRS_ENTRY.CENT` keeps its stock 24 x 9-byte rows;
+`CRS_ENTRY.CENL` holds names over 8 characters. A bundle carries CENL only when needed.
+Snapshot-backed bundles require a build that understands `.gcs`, regardless of slot-name length.
 
-## How import treats a sidecar
+Import preflights the combined metadata demand before replacing tracks. A later native disk error
+can still leave earlier bundle members installed; bundle import is not an all-or-nothing transaction.
+The status reports the error. Keep a complete backup before replacing a cup.
 
-A single course can still carry a `.gdxe` sidecar. This is the older form, used by a course export on its own.
+## Legacy sidecars
 
-- The course always installs from its own data. The sidecar never blocks an import.
-- An unknown key plays the fallback stored in the course.
-- A sidecar that is missing, damaged, bound to another payload, or names a control point the course does not have is ignored, and the import records why.
-- The importer counts unknown keys and keeps the first 16 names.
-- Builds without this feature ignore bit 2 and never read the `.gdxe`, so they install the course from its fallbacks.
+Older unmarked packages can carry `.gdxe` keys, `.gdxt` titles, `.gdxb` forks/settings, or an
+Edit Cup `.gdxs` companion. A missing or invalid optional `.gdxe` is ignored with an import status;
+unknown keys use their saved stock fallbacks. The importer keeps the first 16 unknown key names.
+Code can read this status through `gdx_content_import_last_extension`.
 
-After an import, the Content Library status line adds these results: whether the sidecar was applied or why it was ignored, and any unknown keys. Code can read them through `gdx_content_import_last_extension`.
+These optional-sidecar rules apply only to legacy imports. A snapshot-marked track or container
+requires valid complete `.gcs` data and is refused if that data is missing, corrupt, or mismatched.
 
 ### The share package
 
-A course export is one file, `exports/<name>.gdxp`. It is a plain zip of the files below, unchanged,
+A course export is one file, `exports/<name>.gdxp`. It is a plain zip of the container and snapshot,
 plus the songs of its custom music keys (`<key suffix>.ogg`, `.flac` or `.wav`, stored uncompressed).
 The importer unpacks it into `exports/.gdxp-import`, runs the steps below on the `.gdxc` inside, and
-removes the folder. A `.gdxc` with its sidecars beside it, unzipped by hand or from an older build,
-still imports the same way.
+removes the folder. A `.gdxc` can also be imported with its matching companion files beside it. Keep the `.gcs`
+with a snapshot-backed container even when unpacking by hand.
 
 A package is refused before anything is unpacked when a member is not a plain ASCII file name, has an
 unknown extension, or is a Windows device name; when it holds no `.gdxc`, two of them, or a sidecar
@@ -313,19 +340,22 @@ with another stem; when two names differ only in case; or when it holds more tha
 file over 4 MB or a song over 32 MB. Every member is checked against its zip CRC as it is unpacked.
 The code is `port/gdx_content_pack.cpp`, and `gdx_content_pack_tests` covers it.
 
-**Music on import.** A song is copied into `music/custom/` under its key suffix. When that name already
+**Music on import.** A song is copied into `music/` beside the executable under its key suffix. When that name already
 holds a different song, the imported one is stored as `<suffix>_<crc>` (the CRC-32 of its bytes, eight
 hex digits) and the course's key is rewritten to match, so neither song replaces the other
-(`gdx_course_music_adopt`, `gdx_course_registry_music_fingerprint_key`).
+(`gdx_course_music_adopt`, `gdx_course_registry_music_fingerprint_key`). Reserved global slot
+names also get a content code when copied, preventing a course import from replacing menu music.
+Identical songs already resolved in legacy custom folders are reused without moving their files.
 
-### The sidecar format
+### Legacy element-key sidecar format
 
-A course with extension keys exports as two files inside its package:
+This is a reference for older `.gdxe` files, not the complete snapshot export format.
+An older course with extension keys contains these files:
 
 - `<name>.gdxc` is the course. Its layout does not change. Its flags (header offset 0x25) get bit 2, value 4, which means a sidecar exists.
 - `<name>.gdxe` is the sidecar. It holds the keys, one record for each kind and scope pair.
 
-A course without extension keys has no `.gdxe`, and bit 2 stays clear. It can still have a `.gdxb`
+A legacy course without extension keys has no `.gdxe`, and bit 2 stays clear. It can still have a `.gdxb`
 for forks or settings.
 
 The sidecar is bound to its course by the course's payload CRC-32, stored at header offset 0x2D. The importer reads a `.gdxe` only when the `.gdxc` next to it has bit 2 set, and it uses the sidecar only when the CRC matches. A `.gdxe` left in `exports/` by an earlier export therefore does nothing.
@@ -339,9 +369,15 @@ The sidecar is bound to its course by the course's payload CRC-32, stored at hea
 | 0x0C | varies | Records: kind (1 byte), scope (1 byte), fallback stock ID (1 byte), key length (1 byte), key text |
 | end minus 4 | 4 | CRC-32 of every byte before it |
 
-A record's kind is 0 for venue, 1 for skybox, 2 for music, 3 for part style and 4 for track effect. Its scope is 255 (0xFF) for the whole course, or 0 to 63 for one control point. Its fallback is the stock ID the course stores in its own data. The CRC is the same IEEE CRC-32 the `.gdxc` container uses.
+A record's kind is 0 for venue, 1 for skybox, 2 for music, 3 for part style and 4 for track effect. Its scope is 255 (0xFF) for the whole course, or 0 to 126 for one control point (legacy 64-point courses use 0 to 63). Its fallback is the stock ID the course stores in its own data. The CRC is the same IEEE CRC-32 the `.gdxc` container uses.
 
 ## If something goes wrong
+
+**A snapshot-backed track or import is refused.**
+Keep its `.gdxc` and `.gcs` together. Re-export from the original intact save, or restore the
+complete save set from one backup with the game closed. Do not mix snapshot directories from
+another disk or remove the marker to bypass validation. Retain the refused data for diagnosis.
+
 
 **A course plays a stock venue, skybox or song instead of the one it names.**
 The build does not know the key, or the sidecar or companion was ignored. The import status says which. Unknown keys are expected when a course moves to a build that lacks the element.
@@ -366,10 +402,11 @@ The format and the registry API are in `port/gdx_course_registry.h`. The import 
 ```text
 mods/<pack>/elements.txt   kind|key|name|fallback[|path], one element per line
 course-elements.gdxs       GXS1 store of keys and titles, beside the exe
-exports/<name>.gdxp        zip of the files below and the course's songs
-  <name>.gdxc              flags bit 2 (value 4) set when a sidecar exists
-  <name>.gdxe              GXE1 records bound to the .gdxc payload CRC-32 (header offset 0x2D)
-  <name>.gdxb              GXD1 forks/settings, when present; needs a newer build than 1.2.0
-exports/edit-cup.gdxp      zip of edit-cup.gdxc, its companion and the member songs
-  edit-cup.gdxs            GXS1 companion of a bundle, bound to each member's payload CRC-32
+exports/<name>.gdxp        zip of container, complete snapshot, and bundled songs
+  <name>.gdxc              snapshot flag bit 5 (value 32); fixed container layout
+  <name>.gcs               GCP1 complete saved generation, required with that flag
+exports/edit-cup.gdxp      zip of edit-cup.gdxc, edit-cup.gcs, and member songs
+<active .gdd>.recovery.snapshots/  immutable GCS1 history; back up with the disk
+course-forks.gbs           editable GBS1 store; GXB1 v4 supports extra ring points
+course-settings.gks        editable GKS1 settings store
 ```

@@ -315,7 +315,38 @@ static void test_view(void) {
     gdx_settings_store_clear();
 }
 
+static void test_branch_view(void) {
+    GdxBranchSet forks;
+    GdxCourseSettings settings;
+    const int first = 256;
+    const int node = first + 1;
+
+    make_forks(&forks);
+    forks.forks[0].flags |= GDX_BRANCH_FLAG_FIRST_VALUES;
+    forks.forks[0].firstExtras.pitWidth = 73;
+    forks.forks[0].firstExtras.magnetRange = 144;
+    forks.forks[0].firstExtras.magnetStrength = 90;
+    gdx_branch_set_active(&forks);
+    gdx_settings_set_active(NULL);
+    CHECK(gdx_settings_view_pit_width(first) == 73 && gdx_settings_view_magnet_range(first) == 144.0f &&
+          fabsf(gdx_settings_view_magnet_strength(first) - 1.125f) < 0.001f,
+          "independent first values work without a settings sidecar");
+    CHECK(gdx_settings_view_pit_width(node) == 0, "a missing node sidecar has no custom width");
+    make_settings(&settings);
+    settings.nodes[0][0].pitWidth = 62;
+    settings.nodes[0][0].magnetRange = 111;
+    gdx_settings_set_active(&settings);
+    CHECK(gdx_settings_view_pit_width(node) == 62 && gdx_settings_view_magnet_range(node) == 111.0f,
+          "alternate node settings do not alias the main ring");
+    CHECK(gdx_settings_view_pit_width(first + 2) == 0 && gdx_settings_view_pit_width(first + 33) == 0 &&
+          gdx_settings_view_pit_width(2147483647) == 0,
+          "invalid alternate settings handles are bounded");
+    gdx_branch_set_active(NULL);
+    gdx_settings_set_active(NULL);
+}
+
 int main(void) {
+    test_branch_view();
     test_block();
     test_store();
     test_sidecar();

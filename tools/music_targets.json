@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "game_version": "us.rev0",
+  "scope": "title-selection-and-ek-big-blue",
+  "targets": [
+    {
+      "id": "title",
+      "label": "Title screen",
+      "bgm_id": 14,
+      "stream_key": "bgm_title",
+      "native": {
+        "cartridge": [
+          {
+            "key": "SAMPLE_BGM__0x437740__473374",
+            "rate_hz": 22050,
+            "channel": "mono"
+          }
+        ],
+        "expansion_kit": [
+          {
+            "key": "SAMPLE_DDBGM_TITLE__0x0__473374",
+            "rate_hz": 22050,
+            "channel": "mono"
+          }
+        ]
+      }
+    },
+    {
+      "id": "selection",
+      "label": "Selection menus",
+      "bgm_id": 15,
+      "stream_key": "bgm_select",
+      "native": {
+        "cartridge": [
+          {
+            "key": "SAMPLE_BGM__0x4AB060__249084",
+            "rate_hz": 22050,
+            "channel": "mono"
+          }
+        ],
+        "expansion_kit": [
+          {
+            "key": "SAMPLE_DDBGM_SELECT__0x0__249084",
+            "rate_hz": 22050,
+            "channel": "mono"
+          }
+        ]
+      }
+    },
+    {
+      "id": "big_blue",
+      "label": "Big Blue",
+      "bgm_id": 4,
+      "stream_key": "bgm_big_blue",
+      "native": {
+        "expansion_kit": [
+          {
+            "key": "SAMPLE_DDBGM_BIG_BLUE__0x0__1095310",
+            "rate_hz": 32000,
+            "channel": "part_0"
+          },
+          {
+            "key": "SAMPLE_DDBGM_BIG_BLUE__0x10B690__1095310",
+            "rate_hz": 32000,
+            "channel": "part_1"
+          }
+        ]
+      },
+      "native_input_policy": "Each native part is a mono WAV; the CLI downmixes stereo WAVs to mono. No automatic stereo split or duplication."
+    }
+  ]
+}

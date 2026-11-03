@@ -45,10 +45,8 @@ bytes carrying 16 nibbles -> 16 s16 samples. Book layout coefs[pred*8*order + ta
 coefficients via the i-1-k indexing), matching decode_adpcm() below and
 tools/gen_dump_all_audio.py / torch/src/gdx/dump_audio.cpp decodeAdpcm.
 
-Pitch: if dump/audio/fonts/*.json (or dump/audio/manifest.tsv) is present, the stock per-sample
-playbackRateHz (tuning x 32000) is the resample target. Without dump data the WAV's own rate is
-kept — the runtime deliberately excludes tuning overrides, so pitch correctness then depends on
-the modder matching the stock rate.
+Pitch: dump/audio/fonts/*.json (or manifest.tsv) supplies the stock playbackRateHz
+(tuning x 32000). Missing rate metadata refuses packing rather than guessing the playback speed.
 
 The encoder is stdlib-only: least-squares codebook training (normal equations solved with
 in-house Gaussian elimination, deterministic quantile-seeded k-means refinement into
@@ -93,12 +91,13 @@ LOOP_SUFFIX = ".loop.json"
 # ════════════════════════════════════════════════════════════════════════════════════════════════
 # Dump-derived knowledge: accepted sample keys + stock per-sample playback rates.
 # ════════════════════════════════════════════════════════════════════════════════════════════════
-def load_dump_info():
+def load_dump_info(dump_audio=None):
     """Return (keys, rates) from dump/audio: keys = set of known sample keys, rates =
     {key: playbackRateHz}. Empty when the repo has no dump data."""
     keys = set()
     rates = {}
-    fonts_dir = os.path.join(_DUMP_AUDIO, "fonts")
+    dump_audio = _DUMP_AUDIO if dump_audio is None else dump_audio
+    fonts_dir = os.path.join(dump_audio, "fonts")
     if os.path.isdir(fonts_dir):
         for f in sorted(os.listdir(fonts_dir)):
             if not f.endswith(".json"):
@@ -113,7 +112,7 @@ def load_dump_info():
                 rate = meta.get("playbackRateHz")
                 if isinstance(rate, (int, float)) and rate > 0:
                     rates[key] = int(round(rate))
-    manifest = os.path.join(_DUMP_AUDIO, "manifest.tsv")
+    manifest = os.path.join(dump_audio, "manifest.tsv")
     if os.path.isfile(manifest):
         with open(manifest, encoding="utf-8") as fh:
             for line in fh:
@@ -129,7 +128,7 @@ def load_dump_info():
                             rates[key] = rate
                     except ValueError:
                         pass
-    samples_dir = os.path.join(_DUMP_AUDIO, "samples")
+    samples_dir = os.path.join(dump_audio, "samples")
     if os.path.isdir(samples_dir):
         for f in os.listdir(samples_dir):
             if f.endswith(KEY_SUFFIX):
@@ -752,17 +751,28 @@ def plan_pack(input_dir, rates, known_keys, npred, check_only=False):
         return entries, errors, warnings, reports
 
     seen = set()
+    skipped = 0
     for key, full in wavs:
         if key in seen:
             warnings.append("%s: duplicate (case-insensitive .wav match) - skipped" % key)
+            skipped += 1
             continue
         seen.add(key)
         if not KEY_RE.match(key):
+            candidates = [candidate for candidate in sorted(known_keys)
+                          if candidate.replace("__", "_") == key]
+            hint = "; Did you mean %s?" % candidates[0] if len(candidates) == 1 else ""
             warnings.append('%s: not a valid sample key ("<BANK>__0x<ADDR>__<SIZE>") - skipped'
-                            % key)
+                            '%s' % (key, hint))
+            skipped += 1
             continue
         if known_keys and key not in known_keys:
             warnings.append("%s: not a known sample key (see --names) - skipped" % key)
+            skipped += 1
+            continue
+        if key not in rates:
+            errors.append("%s: stock playback rate unavailable; use --dump-dir with "
+                          "the matching dump/audio fonts or manifest metadata" % key)
             continue
         try:
             loop_req = read_loop_sidecar(input_dir, key)
@@ -785,9 +795,11 @@ def plan_pack(input_dir, rates, known_keys, npred, check_only=False):
                 if start % FRAME_SAMPLES != 0:
                     errors.append("%s: loop.start %d is not frame-aligned (%% 16 != 0)"
                                   % (key, start))
+                    continue
                 elif not (0 <= start < end <= decoded_length):
                     errors.append("%s: loop bounds invalid: start %d, end %d, decodedLength %d"
                                   % (key, start, end, decoded_length))
+                    continue
             reports.append("%s: %d samples @ %d Hz -> %d decoded samples%s"
                            % (key, len(samples), rate, decoded_length,
                               ", loop %d..%d" % loop_req if loop_req else ", one-shot"))
@@ -805,6 +817,9 @@ def plan_pack(input_dir, rates, known_keys, npred, check_only=False):
     if known_keys and missing:
         print("info:  %d known sample(s) have no .wav in this pack (left as stock)"
               % len(missing))
+    accepted = len(reports) if check_only else len(entries)
+    print("summary: %d accepted, %d skipped, %d failed" %
+          (accepted, skipped, len(wavs) - accepted - skipped))
     return entries, errors, warnings, reports
 
 
@@ -905,6 +920,9 @@ def check_dir(input_dir, rates, known_keys, npred):
     if errors:
         print("FAILED")
         return 1
+    if not reports:
+        sys.stderr.write("error: nothing to pack (every .wav was skipped)\n")
+        return 2
     print("OK")
     return 0
 
@@ -925,6 +943,10 @@ def main():
                     help="validate the input directory or an existing .o2r pack; write nothing")
     ap.add_argument("--names", action="store_true",
                     help="list the known sample keys (from dump/audio) and exit")
+    ap.add_argument("--dump-dir", default=None,
+                    help="matching dump/audio directory (default: source-tree dump/audio)")
+    ap.add_argument("--targets", action="store_true",
+                    help="show the versioned logical music-target catalog as JSON and exit")
     ap.add_argument("--manifest", default=None,
                     help="pack metadata json (default <input>/workshop.json or manifest.json)")
     ap.add_argument("--name", default=None, help="pack name for synthesized metadata")
@@ -938,13 +960,19 @@ def main():
                     help="codebook predictors per sample, 1..8 (default 2, matching stock)")
     args = ap.parse_args()
 
-    known_keys, rates = load_dump_info()
+    if args.targets:
+        with open(os.path.join(os.path.dirname(__file__), "music_targets.json"), encoding="utf-8") as fh:
+            print(json.dumps(json.load(fh), indent=2))
+        return 0
+    if args.dump_dir is not None and not os.path.isdir(args.dump_dir):
+        sys.stderr.write("error: --dump-dir directory not found: %s\n" % args.dump_dir)
+        return 2
+    known_keys, rates = load_dump_info(args.dump_dir)
 
     if args.names:
         if not known_keys:
-            print("no dump data found under dump/audio — any key of the form "
-                  '"<BANK>__0x<ADDR>__<SIZE>" is accepted')
-            return 0
+            sys.stderr.write("error: no sample catalog found; use --dump-dir with a matching dump/audio\n")
+            return 2
         for i, key in enumerate(sorted(known_keys)):
             rate = rates.get(key)
             print("%3d %-45s %s" % (i, key, "%d Hz" % rate if rate else "rate unknown"))

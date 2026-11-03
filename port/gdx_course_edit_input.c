@@ -1,6 +1,42 @@
 #include "gdx_course_edit_input.h"
 #include <math.h>
 
+GdxCourseEditMask gdx_course_mask_low(GdxCourseEditWord value) {
+    GdxCourseEditMask mask = {{ value, 0 }};
+    return mask;
+}
+
+GdxCourseEditMask gdx_course_mask_bit(int point) {
+    GdxCourseEditMask mask = {{ 0, 0 }};
+    if (point >= 0 && point < 127) {
+        mask.words[point / 64] = (GdxCourseEditWord) 1 << (point % 64);
+    }
+    return mask;
+}
+
+GdxCourseEditMask gdx_course_mask_all(void) {
+    GdxCourseEditMask mask = {{ ~(GdxCourseEditWord) 0, (~(GdxCourseEditWord) 0) >> 1 }};
+    return mask;
+}
+
+int gdx_course_mask_empty(GdxCourseEditMask mask) {
+    return (mask.words[0] | mask.words[1]) == 0;
+}
+
+int gdx_course_mask_equal(GdxCourseEditMask a, GdxCourseEditMask b) {
+    return a.words[0] == b.words[0] && a.words[1] == b.words[1];
+}
+
+int gdx_course_mask_test(GdxCourseEditMask mask, int point) {
+    return point >= 0 && point < 127 && ((mask.words[point / 64] >> (point % 64)) & 1) != 0;
+}
+
+GdxCourseEditMask gdx_course_mask_union(GdxCourseEditMask a, GdxCourseEditMask b) {
+    a.words[0] |= b.words[0];
+    a.words[1] |= b.words[1];
+    return a;
+}
+
 static GdxCourseEditInt32 sDragStartPending;
 static GdxCourseEditInt32 sDragStartPoint;
 static GdxCourseEditInt32 sDragCommitPending;
@@ -81,8 +117,8 @@ void gdx_course_edit_input_request_delete(GdxCourseEditMask selection, GdxCourse
 }
 
 GdxCourseEditInt32 gdx_course_edit_input_take_delete(GdxCourseEditMask selection, GdxCourseEditInt32 count) {
-    GdxCourseEditInt32 pending = sDeletePending && selection != 0 &&
-        selection == sDeleteSelection && count == sDeleteCount;
+    GdxCourseEditInt32 pending = sDeletePending && !gdx_course_mask_empty(selection) &&
+        gdx_course_mask_equal(selection, sDeleteSelection) && count == sDeleteCount;
     sDeletePending = 0;
     return pending;
 }
@@ -104,7 +140,7 @@ GdxCourseEditInt32 gdx_course_edit_input_take_selection(GdxCourseEditInt32* poin
 }
 
 void gdx_course_edit_input_request_selection_add_mask(GdxCourseEditMask mask) {
-    sSelectionAddMask |= mask;
+    sSelectionAddMask = gdx_course_mask_union(sSelectionAddMask, mask);
     sSelectionAddPending = 1;
 }
 
@@ -115,7 +151,7 @@ GdxCourseEditInt32 gdx_course_edit_input_take_selection_add_mask(GdxCourseEditMa
     if (mask != 0) {
         *mask = sSelectionAddMask;
     }
-    sSelectionAddMask = 0;
+    sSelectionAddMask = gdx_course_mask_low(0);
     sSelectionAddPending = 0;
     return 1;
 }
@@ -355,7 +391,7 @@ GdxCourseEditInt32 gdx_course_edit_input_take_extra(GdxCourseEditExtraRequest* r
 
 void gdx_course_edit_input_clear_tools(void) {
     sScalarValueOption = 0;
-    sSelectionAddMask = 0;
+    sSelectionAddMask = gdx_course_mask_low(0);
     sSelectionAddPending = 0;
     gdx_course_edit_input_clear_drag();
     sDeletePending = 0;

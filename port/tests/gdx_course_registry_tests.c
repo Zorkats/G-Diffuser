@@ -206,6 +206,10 @@ static void test_store(void) {
           "store: setting the same (kind, scope) again replaces instead of adding");
     check(gdx_course_ext_set("MYTRK.CRSD", GDX_COURSE_KIND_PART_STYLE, 17, "ext.part.ramp") == GDX_COURSE_OK,
           "store: a point-scoped record is a second record for the course");
+    check(gdx_course_ext_set("MYTRK.CRSD", GDX_COURSE_KIND_PART_STYLE, 126, "ext.part.ramp") == GDX_COURSE_OK,
+          "store: last extended point scope accepted");
+    check(gdx_course_ext_clear("MYTRK.CRSD", GDX_COURSE_KIND_PART_STYLE, 126) == GDX_COURSE_OK,
+          "store: last extended point scope clears");
     records = gdx_course_ext_records("MYTRK.CRSD", &count);
     check(count == 2 && records != NULL && records[0].kind == GDX_COURSE_KIND_VENUE &&
               records[0].scope == GDX_COURSE_SCOPE_COURSE && records[0].fallbackId == 3 &&
@@ -218,9 +222,9 @@ static void test_store(void) {
     check(gdx_course_ext_set("MYTRK.CRSD", GDX_COURSE_KIND_VENUE, GDX_COURSE_SCOPE_COURSE, "ext.nope") ==
               GDX_COURSE_ERR_UNKNOWN,
           "store: an unregistered key is refused");
-    check(gdx_course_ext_set("MYTRK.CRSD", GDX_COURSE_KIND_VENUE, 64, "ext.venue.mount_mega") ==
+    check(gdx_course_ext_set("MYTRK.CRSD", GDX_COURSE_KIND_VENUE, 127, "ext.venue.mount_mega") ==
               GDX_COURSE_ERR_SCOPE,
-          "store: scope 64 is refused");
+          "store: scope 127 is refused");
     check(gdx_course_ext_set("MYTRK.CRSD", GDX_COURSE_KIND_VENUE, -2, "ext.venue.mount_mega") ==
               GDX_COURSE_ERR_SCOPE,
           "store: a negative scope other than course-wide is refused");
@@ -417,7 +421,7 @@ static void expect_crafted(const char* label, unsigned count, const unsigned cha
 static void test_codec_malformed(void) {
     static const unsigned char kGood[] = { 0, 255, 3, 3, 'e', 'x', 't' };
     static const unsigned char kBadKind[] = { 9, 255, 3, 3, 'e', 'x', 't' };
-    static const unsigned char kBadScope[] = { 0, 64, 3, 3, 'e', 'x', 't' };
+    static const unsigned char kBadScope[] = { 0, 127, 3, 3, 'e', 'x', 't' };
     static const unsigned char kBadFallback[] = { 0, 255, 11, 3, 'e', 'x', 't' };
     static const unsigned char kEmptyKey[] = { 0, 255, 3, 0 };
     static const unsigned char kUpperKey[] = { 0, 255, 3, 3, 'E', 'x', 't' };
@@ -430,7 +434,7 @@ static void test_codec_malformed(void) {
                    GDX_COURSE_OK);
     expect_crafted("malformed: a kind outside the five kinds is rejected", 1, kBadKind, sizeof(kBadKind),
                    GDX_COURSE_EXT_ERR_RECORD);
-    expect_crafted("malformed: a point index of 64 is rejected", 1, kBadScope, sizeof(kBadScope),
+    expect_crafted("malformed: a point index of 127 is rejected", 1, kBadScope, sizeof(kBadScope),
                    GDX_COURSE_EXT_ERR_RECORD);
     expect_crafted("malformed: a venue fallback past the stock table is rejected", 1, kBadFallback,
                    sizeof(kBadFallback), GDX_COURSE_EXT_ERR_RECORD);
@@ -970,11 +974,11 @@ static void test_store_revision_and_restore(void) {
 
     memset(&bad, 0, sizeof(bad));
     bad.kind = GDX_COURSE_KIND_BGM;
-    bad.scope = 70;
+    bad.scope = 127;
     bad.fallbackId = 0;
     snprintf(bad.key, sizeof(bad.key), "%s", "bgm.custom.rev");
     check(gdx_course_ext_restore("REV.CRSD", &bad, 1) == GDX_COURSE_ERR_SCOPE,
-          "ext_restore refuses a scope outside 0..63 and 0xFF");
+          "ext_restore refuses a scope outside 0..126 and 0xFF");
     check(gdx_course_ext_count("REV.CRSD") == 1, "a refused ext_restore leaves the course unchanged");
 
     check(gdx_course_ext_restore("REV.CRSD", NULL, 0) == GDX_COURSE_OK, "ext_restore with count 0 is accepted");

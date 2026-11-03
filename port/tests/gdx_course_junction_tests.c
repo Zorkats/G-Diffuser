@@ -232,11 +232,65 @@ static void benchmark(void) {
     }
 }
 
+static void test_rail_intervals(void) {
+    int direction;
+
+    for (direction = -1; direction <= 1; direction += 2) {
+        GdxJunctionTriangle owner = triangle(0, 0, 10, 0, 0);
+        GdxJunctionTriangle rail = {{{{2, 0, 2}, {2, 2}}, {{12, 0, 2}, {12, 2}},
+                                     {{2, 10, 2}, {2, 2}}}};
+        GdxJunctionTriangle inside = rail;
+        GdxJunctionCutter cutter;
+        int i;
+        int count;
+
+        inside.v[1].pos[0] = 3;
+        for (i = 0; i < 3; i++) {
+            owner.v[i].pos[0] *= direction;
+            rail.v[i].pos[0] *= direction;
+            inside.v[i].pos[0] *= direction;
+        }
+        assert(gdx_junction_rail_cutter(&owner, 50, &cutter));
+        assert(gdx_junction_subtract(&inside, &cutter, 1, &workspace, output, 128) == 0);
+        count = gdx_junction_subtract(&rail, &cutter, 1, &workspace, output, 128);
+        assert(count > 0);
+        for (i = 0; i < count; i++) {
+            int v;
+            for (v = 0; v < 3; v++) {
+                double x = output[i].v[v].pos[0] * direction;
+                assert(x >= 8 - 1e-8);
+                assert(gdx_junction_quantize(x) >= 8);
+            }
+        }
+        for (i = 0; i < 3; i++) {
+            owner.v[i].pos[1] += 200;
+        }
+        assert(gdx_junction_rail_cutter(&owner, 50, &cutter));
+        assert(gdx_junction_subtract(&rail, &cutter, 1, &workspace, output, 128) == 1);
+        assert(memcmp(output, &rail, sizeof(rail)) == 0);
+    }
+}
+
 int main(void) {
     GdxJunctionTriangle a = triangle(0, 0, 10, 0, 0);
     GdxJunctionTriangle b = a;
     GdxJunctionCutter cutter;
     int count;
+    {
+        GdxJunctionTriangle rail = {{{{2, 0, 2}, {2, 2}}, {{12, 0, 2}, {12, 2}},
+                                     {{2, 10, 2}, {2, 2}}}};
+        GdxJunctionCutter volume;
+        assert(gdx_junction_rail_cutter(&a, 50, &volume));
+        count = gdx_junction_subtract(&rail, &volume, 1, &workspace, output, GDX_JUNCTION_MAX_PIECES);
+        assert(count > 0);
+        for (int n = 0; n < count; n++) {
+            for (int v = 0; v < 3; v++) {
+                assert(output[n].v[v].pos[0] >= 8 - 1e-8);
+            }
+        }
+        assert(!gdx_junction_rail_cutter(&a, NAN, &volume));
+        assert(!gdx_junction_rail_cutter(&a, 0, &volume));
+    }
     assert(gdx_junction_cutter(&a, &cutter));
     count = gdx_junction_subtract(&b, &cutter, 1, &workspace, output, GDX_JUNCTION_MAX_PIECES);
     assert(count == 0);
@@ -249,6 +303,7 @@ int main(void) {
     b = triangle(0, 0, 10, 0, 0.5);
     count = gdx_junction_subtract(&b, &cutter, 1, &workspace, output, GDX_JUNCTION_MAX_PIECES);
     assert(count == 1 && memcmp(output, &b, sizeof(b)) == 0);
+    test_rail_intervals();
     test_winding_and_coverage();
     test_vertical_and_bounds();
     test_workspace_exhaustion();

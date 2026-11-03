@@ -7,6 +7,7 @@
 namespace gdx::recovery {
 bool readFile(const std::filesystem::path&, Bytes&, size_t limit = MaxJournalBytes);
 bool writeFile(const std::filesystem::path&, const Bytes&);
+bool publishFile(const std::filesystem::path&, const Bytes&);
 bool prepareDirectory(const std::filesystem::path&);
 class FileLock {
   public:

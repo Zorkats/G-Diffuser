@@ -3,16 +3,28 @@
 
 #ifdef GLOBAL_H
 typedef s32 GdxCourseEditInt32;
-typedef u64 GdxCourseEditMask;
+typedef u64 GdxCourseEditWord;
 #else
 #include <stdint.h>
 typedef int32_t GdxCourseEditInt32;
-typedef uint64_t GdxCourseEditMask;
+typedef uint64_t GdxCourseEditWord;
 #endif
+
+typedef struct GdxCourseEditMask {
+    GdxCourseEditWord words[2];
+} GdxCourseEditMask;
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+GdxCourseEditMask gdx_course_mask_low(GdxCourseEditWord value);
+GdxCourseEditMask gdx_course_mask_bit(int point);
+GdxCourseEditMask gdx_course_mask_all(void);
+int gdx_course_mask_empty(GdxCourseEditMask mask);
+int gdx_course_mask_equal(GdxCourseEditMask a, GdxCourseEditMask b);
+int gdx_course_mask_test(GdxCourseEditMask mask, int point);
+GdxCourseEditMask gdx_course_mask_union(GdxCourseEditMask a, GdxCourseEditMask b);
 
 typedef struct GdxCourseEditVec3 {
     float x;
@@ -25,7 +37,7 @@ typedef struct GdxCourseEditVec3 {
 #define GDX_COURSE_EDIT_LINE_UP_OK 0
 #define GDX_COURSE_EDIT_LINE_UP_TOO_FEW 1
 #define GDX_COURSE_EDIT_LINE_UP_TOO_CLOSE 2
-#define GDX_COURSE_EDIT_LINE_UP_MAX_POINTS 64
+#define GDX_COURSE_EDIT_LINE_UP_MAX_POINTS 127
 
 // The run that the line-up would use, in ring order from start to end, and where each point of it would land.
 typedef struct GdxCourseEditLineUpPreview {

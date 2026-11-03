@@ -7,9 +7,10 @@
 #include "gdx_course_registry.h"
 #include "gdx_course_state.h"
 #include "gdx_music_stream.h"
+#include "gdx_music_files.h"
 #include "port_log.h"
 
-#include <cctype>
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -25,7 +26,6 @@ constexpr int kStockBgmCount = 14;                       // stock BGM menu entri
 constexpr uintmax_t kMaxCopyBytes = 32u * 1024u * 1024u; // larger music files are not copied
 constexpr const char* kKeyPrefix = GDX_COURSE_MUSIC_KEY_PREFIX;
 constexpr size_t kKeyPrefixLen = sizeof(GDX_COURSE_MUSIC_KEY_PREFIX) - 1;
-constexpr const char* kExts[] = { ".ogg", ".flac", ".wav" };
 
 bool sScanned = false;
 
@@ -36,22 +36,13 @@ std::filesystem::path exe_relative(const char* relative) {
 }
 
 bool is_music_file(const std::filesystem::path& p) {
-    std::string ext = p.extension().string();
-    for (char& c : ext) {
-        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    }
-    for (const char* known : kExts) {
-        if (ext == known) {
-            return true;
-        }
-    }
-    return false;
+    return gdx::music::ExtensionRank(p) >= 0;
 }
 
-// Registers each music file of one directory. Returns the number of entries added.
-int scan_dir(const std::filesystem::path& dir) {
+int scan_dir(const std::filesystem::path& dir, bool canonical) {
     std::error_code ec;
     int added = 0;
+    std::vector<std::filesystem::path> files;
 
     if (!std::filesystem::is_directory(dir, ec)) {
         return 0;
@@ -64,8 +55,15 @@ int scan_dir(const std::filesystem::path& dir) {
         if (ec) {
             break;
         }
-        const std::filesystem::path p = it->path();
-        if (!is_music_file(p) || !std::filesystem::is_regular_file(p, ec)) {
+        const auto& p = it->path();
+        if (is_music_file(p) && it->is_regular_file(ec) &&
+            !(canonical && gdx::music::IsReplacementStem(p.stem().string()))) {
+            files.push_back(p);
+        }
+    }
+    std::sort(files.begin(), files.end(), gdx::music::Preferred);
+    for (const auto& p : files) {
+        if (!std::filesystem::is_regular_file(p, ec)) {
             continue;
         }
         const std::string stem = p.stem().string();
@@ -94,8 +92,9 @@ int scan_dir(const std::filesystem::path& dir) {
 // Scans the mods folder first, matching the lookup order of gdx_music_stream_find_file.
 int scan_all(void) {
     int added = 0;
-    added += scan_dir(exe_relative("mods/music/custom"));
-    added += scan_dir(exe_relative("music/custom"));
+    for (const char* folder : gdx::music::kCourseFolders) {
+        added += scan_dir(exe_relative(folder), std::strcmp(folder, "music") == 0);
+    }
     return added;
 }
 
@@ -151,15 +150,13 @@ std::string key_suffix(const char* key) {
 
 // The file for the suffix in either custom folder, with any supported extension, or an empty path.
 std::filesystem::path custom_file_for(const std::string& suffix) {
-    const char* folders[] = { "mods/music/custom", "music/custom" };
-    std::error_code ec;
-
-    for (const char* folder : folders) {
-        for (const char* ext : kExts) {
-            const std::filesystem::path candidate = exe_relative(folder) / (suffix + ext);
-            if (std::filesystem::is_regular_file(candidate, ec)) {
-                return candidate;
-            }
+    for (const char* folder : gdx::music::kCourseFolders) {
+        if (std::strcmp(folder, "music") == 0 && gdx::music::IsReplacementStem(suffix)) {
+            continue;
+        }
+        const auto candidate = gdx::music::FindFile(exe_relative(folder), suffix);
+        if (!candidate.empty()) {
+            return candidate;
         }
     }
     return {};
@@ -203,7 +200,7 @@ std::filesystem::path occupant_for(const char* key) {
 }
 
 void copy_key(const char* key, char* outKey, int outCap) {
-    if (outKey != nullptr && outCap > 0) {
+    if (outKey != nullptr && outCap > 0 && outKey != key) {
         std::snprintf(outKey, static_cast<size_t>(outCap), "%s", key);
     }
 }
@@ -309,43 +306,40 @@ extern "C" void gdx_course_music_arm_for_course(const char* courseId, int bgmId)
     gdx_music_stream_set_course_override(bgmId, entry->sourcePath, entry->displayName);
 }
 
-extern "C" int gdx_course_music_export_course(const char* courseId, const char* directory) {
-    int count = 0;
-    const GdxCourseExtRecord* records;
-    int copied = 0;
-
-    if (courseId == nullptr || directory == nullptr) {
+extern "C" int gdx_course_music_export_key(const char* key, const char* directory) {
+    if (!key || !directory) {
         return 0;
     }
-    records = gdx_course_ext_records(courseId, &count);
-    for (int i = 0; records != nullptr && i < count; i++) {
-        const GdxCourseElement* entry;
-        std::error_code ec;
-        std::filesystem::path src;
-        std::filesystem::path dst;
+    const auto* entry = gdx_course_registry_find_key(GDX_COURSE_KIND_BGM, key);
+    if (!entry || !entry->sourcePath) {
+        gdx_port_logf("[music] export: no source file for key %s\n", key);
+        return 0;
+    }
+    std::error_code ec;
+    const std::filesystem::path source(entry->sourcePath);
+    const auto destination = std::filesystem::path(directory) / (key_suffix(key) + source.extension().string());
+    const auto size = std::filesystem::file_size(source, ec);
+    if (ec || size > kMaxCopyBytes) {
+        gdx_port_logf("[music] export: %s not copied (%s)\n", source.string().c_str(),
+                      ec ? "unreadable" : "too large");
+        return 0;
+    }
+    std::filesystem::copy_file(source, destination, std::filesystem::copy_options::overwrite_existing, ec);
+    if (ec) {
+        gdx_port_logf("[music] export: copy to %s failed\n", destination.string().c_str());
+        return 0;
+    }
+    return 1;
+}
 
-        if (records[i].kind != GDX_COURSE_KIND_BGM) {
-            continue;
+extern "C" int gdx_course_music_export_course(const char* courseId, const char* directory) {
+    int count = 0;
+    int copied = 0;
+    const auto* records = gdx_course_ext_records(courseId, &count);
+    for (int i = 0; records && i < count; ++i) {
+        if (records[i].kind == GDX_COURSE_KIND_BGM) {
+            copied += gdx_course_music_export_key(records[i].key, directory);
         }
-        entry = gdx_course_registry_find_key(GDX_COURSE_KIND_BGM, records[i].key);
-        if (entry == nullptr || entry->sourcePath == nullptr) {
-            gdx_port_logf("[music] export %s: no source file for key %s\n", courseId, records[i].key);
-            continue;
-        }
-        src = entry->sourcePath;
-        dst = std::filesystem::path(directory) / (key_suffix(records[i].key) + src.extension().string());
-        const uintmax_t size = std::filesystem::file_size(src, ec);
-        if (ec || size > kMaxCopyBytes) {
-            gdx_port_logf("[music] export %s: %s not copied (%s)\n", courseId, src.string().c_str(),
-                          ec ? "unreadable" : "too large");
-            continue;
-        }
-        std::filesystem::copy_file(src, dst, std::filesystem::copy_options::overwrite_existing, ec);
-        if (ec) {
-            gdx_port_logf("[music] export %s: copy to %s failed\n", courseId, dst.string().c_str());
-            continue;
-        }
-        copied++;
     }
     return copied;
 }
@@ -358,20 +352,15 @@ extern "C" int gdx_course_music_adopt(const char* gdxcPath, const char* key, cha
     char fingerprintKey[GDX_COURSE_KEY_MAX + 1];
     const char* targetKey = key;
 
-    if (gdxcPath == nullptr || key == nullptr || std::strncmp(key, kKeyPrefix, kKeyPrefixLen) != 0) {
+    if (gdxcPath == nullptr || key == nullptr || std::strncmp(key, kKeyPrefix, kKeyPrefixLen) != 0 ||
+        !gdx_course_key_is_valid(key) || key[kKeyPrefixLen] == '\0') {
         return 0;
     }
     copy_key(key, outKey, outCap);
     ensure_scanned();
     const bool registered = gdx_course_registry_find_key(GDX_COURSE_KIND_BGM, key) != nullptr;
     const std::filesystem::path dir = std::filesystem::path(gdxcPath).parent_path();
-    for (const char* ext : kExts) {
-        const std::filesystem::path candidate = dir / (key_suffix(key) + ext);
-        if (std::filesystem::is_regular_file(candidate, ec)) {
-            source = candidate;
-            break;
-        }
-    }
+    source = gdx::music::FindFile(dir, key_suffix(key));
     if (source.empty()) {
         if (!registered) {
             gdx_port_logf("[music] import %s: no audio file beside the .gdxc\n", key);
@@ -383,10 +372,13 @@ extern "C" int gdx_course_music_adopt(const char* gdxcPath, const char* key, cha
         return registered ? 1 : -1;
     }
 
-    // A song already stored under this key is kept when it is the same song. A different song with the
-    // same file name gets a key of its own, named by its checksum, so neither replaces the other.
     occupant = occupant_for(key);
-    if (!occupant.empty() && !same_content(occupant, bytes)) {
+    // A legacy course named like a global slot must never install a menu replacement.
+    const bool reserved = gdx::music::IsReplacementStem(key_suffix(key));
+    if (reserved && registered && !occupant.empty() && same_content(occupant, bytes)) {
+        return 1;
+    }
+    if (reserved || (!occupant.empty() && !same_content(occupant, bytes))) {
         const uint32_t crc = gdx_course_registry_crc32(bytes.data(), bytes.size());
         if (gdx_course_registry_music_fingerprint_key(key, crc, fingerprintKey, sizeof fingerprintKey) == 0) {
             return -1;
@@ -397,19 +389,24 @@ extern "C" int gdx_course_music_adopt(const char* gdxcPath, const char* key, cha
             gdx_port_logf("[music] import %s: %s holds a different song, not copied\n", key, targetKey);
             return -1;
         }
-        gdx_port_logf("[music] import %s: a different song uses this name, stored as %s\n", key, targetKey);
+        gdx_port_logf("[music] import %s: %s, stored as %s\n", key,
+                      reserved ? "name reserved for a global replacement" : "a different song uses this name",
+                      targetKey);
     }
     if (occupant.empty()) {
-        const std::filesystem::path folder = exe_relative("music/custom");
+        const std::filesystem::path folder = exe_relative("music");
         std::filesystem::create_directories(folder, ec);
-        ec.clear();
-        std::filesystem::copy_file(source, folder / (key_suffix(targetKey) + source.extension().string()),
-                                   std::filesystem::copy_options::skip_existing, ec);
         if (ec) {
-            gdx_port_logf("[music] import %s: copy into music/custom failed\n", targetKey);
+            gdx_port_logf("[music] import %s: cannot create music directory\n", targetKey);
             return -1;
         }
-        gdx_port_logf("[music] import %s: copied into music/custom\n", targetKey);
+        const auto destination = folder / (key_suffix(targetKey) + gdx::music::Fold(source.extension().string()));
+        std::filesystem::copy_file(source, destination, std::filesystem::copy_options::skip_existing, ec);
+        if (ec || !same_content(destination, bytes)) {
+            gdx_port_logf("[music] import %s: copy into music failed or destination changed\n", targetKey);
+            return -1;
+        }
+        gdx_port_logf("[music] import %s: available in music\n", targetKey);
     }
     scan_all();
     if (gdx_course_registry_find_key(GDX_COURSE_KIND_BGM, targetKey) == nullptr) {

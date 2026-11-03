@@ -22,6 +22,7 @@ static u8 roundtrip[16 + 0xC830];
 static MfsRamArea before;
 static s32 allocation;
 static s32 failSave;
+static int snapshotPresent;
 static s32 failDelete;
 static s32 failBackup;
 static s32 savedAttr;
@@ -144,6 +145,34 @@ int GdxRecoveryTest_Native(void) {
     track[11] = 91;
     track[16] = CREATOR_NINTENDO;
     track[16 + 0x7E0] = 77;
+    {
+        CourseDataDisk disk;
+        memset(&disk, 0, sizeof(disk));
+        disk.creatorId = CREATOR_NINTENDO;
+        disk.controlPointCount = 1;
+        disk.bankAngle[0] = 5;
+        disk.dash[0] = 2;
+        disk.checksum = 1u + 5u * 0x93DEu + 2u * 0x10u;
+        memcpy(track + 16, &disk, sizeof(disk));
+        freeBytes = 1000000;
+        if (!gdx_recovery_native_restore_ready("TRACK", "CRSE", track, sizeof(track), 0)) {
+            return 18;
+        }
+        memset(track + 16, 0, sizeof(disk));
+        track[16] = CREATOR_NINTENDO;
+    }
+    track[16 + 8] |= 0x80;
+    if (gdx_recovery_native_restore_ready("TRACK", "CRSE", track, sizeof(track), 0)) {
+        return 19;
+    }
+    snapshotPresent = 1;
+    if (!gdx_recovery_native_restore_ready("TRACK", "CRSE", track, sizeof(track), 0) ||
+        gdx_recovery_native_restore_ready("OTHER", "CRSE", track, sizeof(track), 0) ||
+        gdx_recovery_native_restore_ready("TRACK", "CRSD", track, sizeof(track), 0)) {
+        return 20;
+    }
+    snapshotPresent = 0;
+    track[16 + 8] &= ~0x80;
     freeBytes = 0;
     before = gMfsRamArea;
     if (gdx_recovery_native_restore_ready("TRACK", "CRSE", track, sizeof(track), 3) ||
@@ -242,4 +271,8 @@ int GdxRecoveryTest_Native(void) {
         return 12;
     }
     return 0;
+}
+
+int gdx_snapshot_validate(unsigned short directory, const char* name, const char* extension, const void* base) {
+    return snapshotPresent && directory == 7 && strcmp(name, "TRACK") == 0 && strcmp(extension, "CRSE") == 0;
 }

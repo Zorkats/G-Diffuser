@@ -5,7 +5,7 @@
 
 extern unk_807B3C20 D_802CB6D0;
 extern unk_800D6CA0 D_800D6CA0;
-extern unk_80128690 D_80128690[64];
+extern unk_80128690 D_80128690[GDX_COURSE_POINT_CAPACITY];
 extern s32 D_xk2_80119918;
 
 // Undo backup and the native line-up, both in decomp/src/overlays/course_edit/1A1240.c.
@@ -36,8 +36,8 @@ s32 gdx_course_edit_native_point_count(void) {
     if (count < 0) {
         return 0;
     }
-    if (count > 64) {
-        return 64;
+    if (count > GDX_COURSE_POINT_CAPACITY) {
+        return GDX_COURSE_POINT_CAPACITY;
     }
     return count;
 }
@@ -59,7 +59,7 @@ s32 gdx_course_edit_native_add_selection_mask(GdxCourseEditMask mask) {
     s32 count = gdx_course_edit_native_point_count();
 
     for (i = 0; i < count; i++) {
-        if ((((mask >> i) & 1) == 0) || (D_80128690[i].unk_08 != 0)) {
+        if (!gdx_course_mask_test(mask, i) || (D_80128690[i].unk_08 != 0)) {
             continue;
         }
         D_80128690[i].unk_08 = 1;
@@ -76,12 +76,12 @@ s32 gdx_course_edit_native_add_selection_mask(GdxCourseEditMask mask) {
 
 GdxCourseEditMask gdx_course_edit_native_selection_mask(void) {
     s32 count = gdx_course_edit_native_point_count();
-    GdxCourseEditMask mask = 0;
+    GdxCourseEditMask mask = {{ 0, 0 }};
     s32 i;
 
     for (i = 0; i < count; i++) {
         if (gdx_course_edit_native_point_selected(i)) {
-            mask |= (GdxCourseEditMask)1 << i;
+            mask = gdx_course_mask_union(mask, gdx_course_mask_bit(i));
         }
     }
     return mask;
@@ -95,8 +95,8 @@ void gdx_course_edit_native_set_selection_mask(GdxCourseEditMask mask) {
     s32 firstSelected = -1;
     s32 i;
 
-    for (i = 0; i < 64; i++) {
-        s32 selected = (i < count) && (((mask >> i) & 1) != 0);
+    for (i = 0; i < GDX_COURSE_POINT_CAPACITY; i++) {
+        s32 selected = (i < count) && gdx_course_mask_test(mask, i);
 
         D_80128690[i].unk_08 = selected;
         if (selected && (firstSelected < 0)) {

@@ -29,8 +29,14 @@ To add a track to the Edit Cup, click **Edit Cup** on its row, then **Register**
 Replacing a track that is already in a slot asks you to confirm. A cup slot takes the full track
 name, up to 20 characters.
 
-A cup with a track name over 8 characters makes a bundle that older builds of the game refuse to
-import. A cup of shorter names imports everywhere.
+Track and cup packages use complete snapshots. Recipients need a build that understands `.gcs`;
+older executables are unsupported even when all slot names are short.
+
+### Export a rendered machine model
+
+Create Machine `.gdxc` files are editable machine designs, not Blender models. For the prepared
+native assembly in OBJ or glTF, use **F1 > Workshop > Tools > Native machine models (OBJ + glTF)**.
+See [Machine model export](MACHINE_MODELS.md) for capture requirements and material limits.
 
 ## Install a file someone sent you
 
@@ -40,7 +46,9 @@ import. A cup of shorter names imports everywhere.
    something on your disk, the button asks you to confirm first.
 4. Open the game's own file browser in Course Edit or Create Machine again to see the new entry.
 
-Import is not available while a race is running.
+Import is not available while a race is running. Before replacing existing content or updating the
+build, close the game and [back up the complete save set](COURSE_ELEMENTS.md#save-and-share).
+A cup import can leave earlier members installed if a later disk operation fails; keep that backup.
 
 Before installing, the game checks the file: its checksums, its name, the disk's 100-file limit,
 and whether it would overwrite something. A file that fails a check is listed as **Rejected** with
@@ -48,23 +56,28 @@ the reason.
 
 ## Custom music in a track
 
-A track that uses a custom song from `music/custom/` carries that song inside its `.gdxp`. Importing
-the track copies the song into your `music/custom/` folder, so the track plays it right away.
+A track that uses a custom song carries that song inside its `.gdxp`. Importing the track makes
+the song available in `music/` beside the executable, so the track plays it right away. Existing
+songs in legacy custom folders can be reused without moving them.
 
 - **Same name, different song.** If you already have a song with the same file name but different
   contents, yours is kept. The imported song is saved under its own name with a code added, such as
   `ocean_theme_1a2b3c4d.ogg`, and the track uses that one.
-- **Same song.** If you already have the exact same song, nothing is copied.
+- **Same song and key.** If that key already resolves to the same song, nothing is copied.
+- **Reserved game-slot name.** A legacy course song named like `bgm_select` gets a code added
+  when copied into `music/`, so importing a course cannot turn it into a menu replacement.
 - **Size limit.** A song travels only when it is 32 MB or smaller. A larger song is left out, and the
   track plays its stock fallback.
 
-A `.gdxp` is a plain zip file. Older builds of the game do not read it: unzip it into `exports/` and
-import the `.gdxc` inside, which works as before.
+A `.gdxp` is a plain zip file, but unpacking it does not make it compatible with an older build.
+Keep its `.gcs` beside the `.gdxc` if importing unpacked files. Missing or mismatched complete
+snapshot data refuses the track import rather than dropping its extra points or settings.
 
 ## Import from an emulator or a 64DD (experimental)
 
 Tracks made in an emulator or on a real 64DD can be read straight from the disk image, with no
-conversion.
+external conversion tool. Canonical console big-endian track fields are decoded before the same
+validation used by the import queue. Port-written host-order images keep their encoding.
 
 1. Under **Import from a disk image**, click **Browse...** and pick the image, then **Open
    image**.
@@ -76,6 +89,24 @@ game recognizes an image by its contents, so a renamed file still opens. The ima
 never changed.
 
 Copy-protected entries are listed as **Refused** and cannot be imported.
+
+### When an image track is rejected
+
+- **Creator mismatch:** the row reports the decoded creator value and expected value `4`
+  (Nintendo). Open **Import diagnostics** to inspect image kind, entry ID, first payload-block
+  offset, encoding, creator/count, stored/computed checksum, and error bits. Diagnostics contain
+  metadata, not a dump of the track. Creator validation is not bypassed.
+- **Checksum mismatch:** import checks the original decoded checksum before compatibility pit
+  repair. A corrupt checksum is not rewritten to make the track pass.
+- **Source image changed:** close and reopen the image. Import reopens and compares the source
+  against the displayed snapshot before queuing anything; even an unrelated image edit requires
+  a refresh. The source image is never written.
+- **Unsupported representation:** a Project64 savestate (`.pj` or `.pj.zip`) is not a saved disk
+  image. Save the edited disk in the emulator and import that image. Raw word-swapped RAM is not
+  guessed or relabeled as a valid creator. A base ROM/disk without the saved edit does not contain
+  the missing track.
+- **Extended port track:** use its `.gdxp` or `.gdxc` plus matching `.gcs`, not a bare disk entry.
+  A marked track without its complete snapshot is rejected rather than truncated.
 
 ## Import courses from a ROM hack (experimental)
 

@@ -6,8 +6,8 @@
 // player 1 is the background music. Seq players 0 and 2 are sound effects, and the Expansion Kit
 // title guitar runs on player 0, so it follows the Sound effects slider.
 //
-// THREADING. Every function here runs on the dedicated audio thread, because
-// Audio_SequencePlayerProcessSound runs inside AudioSynth_Update on that thread. The menu only
+// THREADING. Volume caches belong to the dedicated audio thread, where
+// Audio_SequencePlayerProcessSound runs inside AudioSynth_Update. The menu only
 // writes the two CVars and never touches a sequence player. The change check reads both CVars
 // (the same one-int-per-read idiom as gdx_audio_lle.c), caches them, and reports whether one
 // player's scale moved since it was last applied. Only then does effects.c set recalculateVolume,
@@ -17,6 +17,10 @@
 // multiply, so the default output is bit-identical to stock.
 
 #include "gdx_audio_mix.h"
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 // Defined in libultraship (C ABI). Declared locally so this C TU does not pull the C++ header.
 extern int CVarGetInteger(const char* name, int defaultValue);
@@ -33,10 +37,21 @@ static float sSfxScale = 1.0f;
 static float sAppliedScale[GDX_AUDIO_MIX_PLAYERS] = { 1.0f, 1.0f, 1.0f };
 
 // Set while a streamed music replacement is live (port/gdx_music_stream.cpp, written on its worker
-// thread). It forces seq player 1 to scale 0, so the stock track is silent under the stream, and the
-// stream applies the Music slider itself through gdx_audio_music_slider_scale(). volatile because the
-// audio thread reads it without a lock; an aligned int cannot tear.
-static volatile int sStreamMutesMusic = 0;
+// and game threads). It forces seq player 1 to scale 0, so the stock track is silent under the stream, and the
+// stream applies the Music slider itself through gdx_audio_music_slider_scale().
+#ifdef _WIN32
+static volatile LONG sStreamMutesMusic = 0;
+#else
+static int sStreamMutesMusic = 0;
+#endif
+
+static int gdx_audio_stream_muted(void) {
+#ifdef _WIN32
+    return InterlockedCompareExchange(&sStreamMutesMusic, 0, 0) != 0;
+#else
+    return __atomic_load_n(&sStreamMutesMusic, __ATOMIC_ACQUIRE);
+#endif
+}
 
 static float gdx_audio_mix_percent_to_scale(int percent) {
     if (percent < 0) {
@@ -50,7 +65,7 @@ static float gdx_audio_mix_percent_to_scale(int percent) {
 
 static float gdx_audio_mix_scale_for_player(int playerIndex) {
     if (playerIndex == GDX_AUDIO_MIX_MUSIC_PLAYER) {
-        return sStreamMutesMusic ? 0.0f : sMusicScale;
+        return gdx_audio_stream_muted() ? 0.0f : sMusicScale;
     }
     return sSfxScale;
 }
@@ -84,10 +99,14 @@ int gdx_audio_seq_player_scale_changed(int playerIndex) {
     return 1;
 }
 
-// Called from the worker thread when a streamed track starts (1) or ends (0). The next tick's change
+// Called from the game or worker thread when a stream starts (1) or ends (0). The next tick's change
 // check on the audio thread sees the new scale for seq player 1 and recalculates its channels.
 void gdx_audio_seq_player_stream_mute(int active) {
-    sStreamMutesMusic = active ? 1 : 0;
+#ifdef _WIN32
+    InterlockedExchange(&sStreamMutesMusic, active ? 1 : 0);
+#else
+    __atomic_store_n(&sStreamMutesMusic, active ? 1 : 0, __ATOMIC_RELEASE);
+#endif
 }
 
 // The Music slider as a 0..1 scale, before any stream mute. The streamed track multiplies by this.

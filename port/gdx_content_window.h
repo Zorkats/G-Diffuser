@@ -3,6 +3,7 @@
 #include "gdx_content_import.h"
 #include "gdx_content_io.h"
 #include "gdx_course_minimap.h"
+#include "gdx_course_limits.h"
 #include "gdx_mfs_image.h"
 #include "gdx_rom_courses.h"
 #include "ship/window/gui/GuiWindow.h"
@@ -49,9 +50,8 @@ class GdxContentWindow : public Ship::GuiWindow {
 
     GdxContentEntry mEntries[GDX_CONTENT_MAX_ENTRIES] = {};
     int mEntryCount = 0;
-    // Raw control nodes read from the CourseData payload (max 64 points).
-    float mTrackPreviewX[64] = {};
-    float mTrackPreviewZ[64] = {};
+    float mTrackPreviewX[GDX_COURSE_POINT_CAPACITY] = {};
+    float mTrackPreviewZ[GDX_COURSE_POINT_CAPACITY] = {};
     int mTrackPreviewCount = 0;
     int mTrackPreviewRow = -1;
     static constexpr int kSplineMax = GDX_PREVIEW_CAPACITY;
