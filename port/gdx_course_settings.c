@@ -511,7 +511,7 @@ void gdx_settings_set_active(const GdxCourseSettings* settings) {
  * ------------------------------------------------------------------------------- */
 
 static int entry_has_forks(const GdxSidecarEntry* entry) {
-    return (entry->forks != NULL) && (entry->forks->forkCount > 0);
+    return (entry->forks != NULL) && (entry->forks->forkCount > 0 || entry->forks->extendedCount > 0);
 }
 
 static int entry_has_settings(const GdxSidecarEntry* entry) {

@@ -66,6 +66,7 @@ int gdx_junction_cutter(const GdxJunctionTriangle* owner, GdxJunctionCutter* out
     if (length < 1e-6) {
         return 0;
     }
+    c.railVolume = 0;
     for (i = 0; i < 3; i++) {
         normal[i] /= length;
         c.min[i] = c.max[i] = owner->v[0].pos[i];
@@ -92,6 +93,24 @@ int gdx_junction_cutter(const GdxJunctionTriangle* owner, GdxJunctionCutter* out
         }
         c.plane[i][3] = -dot(c.plane[i], owner->v[i].pos);
     }
+    *out = c;
+    return 1;
+}
+
+int gdx_junction_rail_cutter(const GdxJunctionTriangle* road, double depth, GdxJunctionCutter* out) {
+    GdxJunctionCutter c;
+    int i;
+    if (!isfinite(depth) || depth <= 0 || depth > 100 || !gdx_junction_cutter(road, &c)) {
+        return 0;
+    }
+    c.railVolume = 1;
+    for (i = 0; i < 3; i++) {
+        double extension = fabs(c.plane[3][i]) * depth;
+        c.min[i] -= extension;
+        c.max[i] += extension;
+    }
+    c.plane[3][3] += depth;
+    c.plane[4][3] += depth;
     *out = c;
     return 1;
 }
@@ -161,8 +180,9 @@ static int subtract_one(const GdxJunctionTriangle* input, const GdxJunctionCutte
     }
     cross(a, b, normal);
     alignment = dot(normal, c->plane[3]);
-    // A true crossing face or a rail is not a duplicate road surface.
-    if (alignment * alignment < GDX_JUNCTION_PARALLEL_COS * GDX_JUNCTION_PARALLEL_COS * dot(normal, normal)) {
+    // Rail volumes are used only after the owning road surfaces overlap.
+    if (!c->railVolume && alignment * alignment <
+        GDX_JUNCTION_PARALLEL_COS * GDX_JUNCTION_PARALLEL_COS * dot(normal, normal)) {
         if (*outCount == GDX_JUNCTION_MAX_PIECES) {
             return 0;
         }

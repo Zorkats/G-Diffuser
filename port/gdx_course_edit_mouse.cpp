@@ -30,8 +30,10 @@
 #include "fast/Fast3dGui.h"
 #include "gdx_course_branch_editor.h"
 #include "gdx_course_edit_input.h"
+#include "gdx_track_recovery_runtime.h"
 #include "gdx_course_edit_undo.h"
 #include <imgui.h>
+#include "gdx_course_gadget_budget.h"
 
 #include "libultraship/bridge/consolevariablebridge.h" // CVarGetInteger
 #include "port_log.h"                                    // gdx_port_logf
@@ -145,7 +147,7 @@ void CourseEditCancelDrag(void) {
 // Applies the queued box-select add to the native selection. The native refresh flag is raised only when at
 // least one point became selected.
 void CourseEditFlushSelectionAdd(void) {
-    GdxCourseEditMask mask = 0;
+    GdxCourseEditMask mask = {{ 0, 0 }};
     if (!gdx_course_edit_input_take_selection_add_mask(&mask)) {
         return;
     }
@@ -161,7 +163,7 @@ GdxCourseEditMask CourseEditPointsInBox(float ax, float ay, float bx, float by) 
     const float maxX = (std::max)(ax, bx);
     const float minY = (std::min)(ay, by);
     const float maxY = (std::max)(ay, by);
-    GdxCourseEditMask mask = 0;
+    GdxCourseEditMask mask = {{ 0, 0 }};
     const int32_t count = gdx_course_edit_native_point_count();
     for (int32_t i = 0; i < count; i++) {
         Vec3f pos = {};
@@ -173,7 +175,7 @@ GdxCourseEditMask CourseEditPointsInBox(float ax, float ay, float bx, float by) 
         const float px = static_cast<float>(sx);
         const float py = static_cast<float>(sy);
         if (px >= minX && px <= maxX && py >= minY && py <= maxY) {
-            mask |= UINT64_C(1) << i;
+            mask = gdx_course_mask_union(mask, gdx_course_mask_bit(i));
         }
     }
     return mask;
@@ -229,6 +231,9 @@ bool CourseEditMouseModeActive(void) {
 // when not test-driving. Create Machine (0x10) and gameplay modes are strictly excluded so tool
 // keys, dragging, and deletion never leak outside Course Edit.
 bool CourseEditEditorActive(void) {
+    if (gdx_recovery_blocks_writes()) {
+        return false;
+    }
     if ((gGameMode & 0x1F) != 0xD /* GAMEMODE_COURSE_EDIT */) {
         return false;
     }
@@ -300,12 +305,12 @@ static bool sAKeyHeld = false;
 static bool sAKeyOwned = false;
 static bool sEditorEscOwned = false;
 
-uint64_t CourseEditSelectionMask(void) {
-    uint64_t mask = 0;
+GdxCourseEditMask CourseEditSelectionMask(void) {
+    GdxCourseEditMask mask = {{ 0, 0 }};
     int total = gdx_course_edit_native_point_count();
     for (int i = 0; i < total; i++) {
         if (gdx_course_edit_native_point_selected(i) != 0) {
-            mask |= (UINT64_C(1) << i);
+            mask = gdx_course_mask_union(mask, gdx_course_mask_bit(i));
         }
     }
     return mask;
@@ -349,7 +354,7 @@ void CourseEditReplaceSelection(GdxCourseEditMask mask) {
 // first, and the game tick applies it through the native delete consumer.
 void CourseEditRequestDelete(void) {
     const GdxCourseEditMask mask = CourseEditSelectionMask();
-    if (mask == 0) {
+    if (gdx_course_mask_empty(mask)) {
         gdx_course_edit_native_play_refusal();
         return;
     }
@@ -361,7 +366,7 @@ void CourseEditRequestDelete(void) {
 // Delete tool click on a point. The backup comes before the click changes the selection, so an undo returns to the
 // selection from before the click. The click then selects only that point, and the delete removes it.
 void CourseEditDeleteClickedPoint(int32_t point) {
-    const GdxCourseEditMask mask = UINT64_C(1) << point;
+    const GdxCourseEditMask mask = gdx_course_mask_bit(point);
     gdx_course_edit_undo_set_pending_label(GDX_COURSE_EDIT_UNDO_LABEL_DELETE);
     func_xk2_800EF78C();
     CourseEditReplaceSelection(mask);
@@ -1144,7 +1149,7 @@ static bool CourseEditPointDragRunning(void) {
 static int sTypedMoveOption = -1;
 
 static bool CourseEditValueEntryAllowed(void) {
-    return CourseEditPointInputContextActive() && gMoveOption >= 2 && gMoveOption <= 4 && CourseEditSelectionMask() != 0 &&
+    return CourseEditPointInputContextActive() && gMoveOption >= 2 && gMoveOption <= 4 && !gdx_course_mask_empty(CourseEditSelectionMask()) &&
         sCourseEditDrag.state == DragState::Idle && gdx_course_edit_native_mouse_owned() == 0;
 }
 
@@ -1386,8 +1391,8 @@ extern "C" int gdx_course_edit_mouse_on_key(int lusScancode, int isDown) {
             sEditorEscOwned = true;
             return 1;
         }
-        if (CourseEditPointInputContextActive() && CourseEditSelectionMask() != 0) {
-            CourseEditReplaceSelection(0);
+        if (CourseEditPointInputContextActive() && !gdx_course_mask_empty(CourseEditSelectionMask())) {
+            CourseEditReplaceSelection(gdx_course_mask_low(0));
             sEditorEscOwned = true;
             return 1;
         }
@@ -1829,6 +1834,20 @@ public:
         : Ship::GuiWindow("gOpenWindows.CourseEditDeleteOverlay", true, "Course Edit Delete Overlay") {}
 
     void Draw() override {
+        if (gdx_course_gadget_error != 0) {
+            ImGui::SetNextWindowPos(ImGui::GetMainViewport()->WorkPos, ImGuiCond_Always);
+            ImGui::SetNextWindowBgAlpha(0.95f);
+            if (ImGui::Begin("Course capacity warning", nullptr,
+                             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings |
+                             ImGuiWindowFlags_NoFocusOnAppearing)) {
+                ImGui::TextUnformatted("Course gadgets could not be generated safely.");
+                ImGui::TextUnformatted(gdx_course_gadget_error == 2
+                    ? "Terrain vertex capacity exceeded. Shorten or remove terrain parts."
+                    : "Gadget capacity exceeded or invalid parts. Remove some course parts.");
+                ImGui::TextUnformatted("Gadgets are disabled. Return to Course Edit before racing this course.");
+            }
+            ImGui::End();
+        }
         CourseEditDrawForkMarks();
         GdxCourseEditDrawHintStrip();
         CourseEditDrawSelectionBox();
@@ -2113,7 +2132,7 @@ extern "C" void gdx_course_edit_mouse_drag_tick(void) {
                     d.boxEndWindow = d.startWindow;
                 } else if (d.released) {
                     if (!d.boxAdditive) {
-                        CourseEditReplaceSelection(0);
+                        CourseEditReplaceSelection(gdx_course_mask_low(0));
                     }
                     d = {};
                 }

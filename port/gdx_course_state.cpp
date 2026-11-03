@@ -10,6 +10,7 @@
 #include "gdx_course_settings.h"
 #include "port_log.h"
 #include "gdx_track_recovery_runtime.h"
+#include "gdx_course_snapshot_io.h"
 
 #include <cstdio>
 #include <cstring>
@@ -190,7 +191,7 @@ extern "C" int gdx_course_state_load(void) {
 }
 
 extern "C" int gdx_course_state_flush(void) {
-    if (gdx_recovery_persistence_busy()) {
+    if (gdx_recovery_persistence_busy() || gdx_snapshot_busy()) {
         return -1;
     }
     const int settings = store_flush(&sSettingsFile);

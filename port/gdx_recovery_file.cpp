@@ -34,7 +34,7 @@ bool readFile(const std::filesystem::path& path, Bytes& out, size_t limit) {
     return true;
 }
 
-bool writeFile(const std::filesystem::path& path, const Bytes& bytes) {
+static bool writeFileImpl(const std::filesystem::path& path, const Bytes& bytes, bool replace) {
     auto temp = path;
     temp += ".writing-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
         "-" + std::to_string(++sequence);
@@ -61,7 +61,8 @@ bool writeFile(const std::filesystem::path& path, const Bytes& bytes) {
     if (!CloseHandle(file)) {
         ok = false;
     }
-    if (ok && !MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+    const DWORD flags = MOVEFILE_WRITE_THROUGH | (replace ? MOVEFILE_REPLACE_EXISTING : 0);
+    if (ok && !MoveFileExW(temp.c_str(), path.c_str(), flags)) {
         ok = false;
     }
 #else
@@ -84,8 +85,19 @@ bool writeFile(const std::filesystem::path& path, const Bytes& bytes) {
     if (close(fd)) {
         ok = false;
     }
-    if (ok && rename(temp.c_str(), path.c_str())) {
-        ok = false;
+    if (ok) {
+        if (replace) {
+            if (rename(temp.c_str(), path.c_str())) {
+                ok = false;
+            }
+        } else {
+            // Linking publishes atomically without replacing a racing generation.
+            if (link(temp.c_str(), path.c_str())) {
+                ok = false;
+            } else if (unlink(temp.c_str())) {
+                ok = false;
+            }
+        }
     }
     if (ok) {
         const int parent = open(path.parent_path().c_str(), O_RDONLY | O_DIRECTORY);
@@ -166,5 +178,19 @@ FileLock::~FileLock() {
 
 bool FileLock::held() const {
     return handle != -1;
+}
+}
+
+
+namespace gdx::recovery {
+bool publishFile(const std::filesystem::path& path, const Bytes& bytes) {
+    return writeFileImpl(path, bytes, false);
+}
+}
+
+
+namespace gdx::recovery {
+bool writeFile(const std::filesystem::path& path, const Bytes& bytes) {
+    return writeFileImpl(path, bytes, true);
 }
 }

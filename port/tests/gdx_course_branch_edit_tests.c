@@ -463,7 +463,7 @@ static void test_swap_to_node(void) {
     for (i = 0; i < 6; i++) {
         ring_insert(20, 20500.0f);
     }
-    count = gdx_branch_edit_swap_to_node(sRing, sCount, GDX_BRANCH_EDIT_MAX_POINTS, 0, 0, &point);
+    count = gdx_branch_edit_swap_to_node(sRing, sCount, 64, 0, 0, &point);
     CHECK((count == -1) && !gdx_branch_edit_view_b() && (gdx_branch_edit_fork_count() == 1),
           "swap to node refuses a ring that would not fit");
 }
@@ -479,35 +479,35 @@ static void test_first_style(void) {
     make_ring(8);
     gdx_branch_edit_clear();
     gdx_branch_edit_sync(sCount);
-    sRing[2].trackSegmentInfo = 20;
+    sRing[2].trackSegmentInfo = 1;
     memset(nodes, 0, sizeof(nodes));
     nodes[0].pos[0] = 3000.0f;
-    nodes[0].trackSegmentInfo = 30;
+    nodes[0].trackSegmentInfo = 65;
     nodes[1].pos[0] = 4000.0f;
-    nodes[1].trackSegmentInfo = 40;
+    nodes[1].trackSegmentInfo = 129;
     gdx_branch_edit_span_commit(2, 5, nodes, 2);
     gdx_branch_edit_first_fill(sRing, sCount);
     fork = fork_of(0);
-    CHECK((fork != NULL) && (fork->flags & GDX_BRANCH_FLAG_FIRST_INFO) && (fork->firstInfo == 20),
+    CHECK((fork != NULL) && (fork->flags & GDX_BRANCH_FLAG_FIRST_INFO) && (fork->firstInfo == 1),
           "a new fork's path B starts with the style of the fork point");
 
     /* A design on the fork's first segment in the A view reaches path A only. */
-    sRing[2].trackSegmentInfo = 21;
+    sRing[2].trackSegmentInfo = 2;
     sCount = gdx_branch_edit_swap(sRing, sCount, GDX_BRANCH_EDIT_MAX_POINTS, &dropped);
-    CHECK(gdx_branch_edit_view_b() && (sRing[2].trackSegmentInfo == 20), "showing path B shows its own first style");
+    CHECK(gdx_branch_edit_view_b() && (sRing[2].trackSegmentInfo == 1), "showing path B shows its own first style");
     fork = fork_of(0);
-    CHECK((fork != NULL) && (fork->firstInfo == 21), "path A's first style is kept while path B shows");
-    sRing[2].trackSegmentInfo = 22;
+    CHECK((fork != NULL) && (fork->firstInfo == 2), "path A's first style is kept while path B shows");
+    sRing[2].trackSegmentInfo = 3;
     sCount = gdx_branch_edit_swap(sRing, sCount, GDX_BRANCH_EDIT_MAX_POINTS, &dropped);
-    CHECK(!gdx_branch_edit_view_b() && (sRing[2].trackSegmentInfo == 21), "path A comes back with its first style");
+    CHECK(!gdx_branch_edit_view_b() && (sRing[2].trackSegmentInfo == 2), "path A comes back with its first style");
     fork = fork_of(0);
-    CHECK((fork != NULL) && (fork->firstInfo == 22), "path B keeps the style designed while it showed");
+    CHECK((fork != NULL) && (fork->firstInfo == 3), "path B keeps the style designed while it showed");
 
     CHECK(gdx_branch_edit_commit("FIRST.CRSD", sRing, sCount, 1u, reason, sizeof(reason)) == 0 &&
               gdx_branch_store_get("FIRST.CRSD", &stored) && (stored.forks[0].flags & GDX_BRANCH_FLAG_FIRST_INFO) &&
-              (stored.forks[0].firstInfo == 22),
+              (stored.forks[0].firstInfo == 3),
           "paths that differ store the value");
-    sRing[2].trackSegmentInfo = 22;
+    sRing[2].trackSegmentInfo = 3;
     CHECK(gdx_branch_edit_commit("FIRST.CRSD", sRing, sCount, 1u, reason, sizeof(reason)) == 0 &&
               gdx_branch_store_get("FIRST.CRSD", &stored) && !(stored.forks[0].flags & GDX_BRANCH_FLAG_FIRST_INFO) &&
               (stored.forks[0].firstInfo == 0),
@@ -520,15 +520,15 @@ static void test_first_style(void) {
     gdx_branch_edit_clear();
     gdx_branch_edit_sync(sCount);
     gdx_branch_edit_span_commit(2, 5, nodes, 2);
-    sRing[2].trackSegmentInfo = 20;
+    sRing[2].trackSegmentInfo = 1;
     gdx_branch_edit_first_fill(sRing, sCount);
     gdx_branch_edit_on_reverse(sCount);
     fork = fork_of(0);
-    /* Old segments: F-n0 20, n0-n1 30, n1-M 40. New order: F-n1 40, n1-n0 30, n0-M 20. */
-    CHECK((fork != NULL) && (fork->firstInfo == 40), "reverse gives the first segment the old last style");
-    CHECK((fork != NULL) && (fork->nodes[0].pos[0] == 4000.0f) && (fork->nodes[0].trackSegmentInfo == 30),
+    /* Old segments: F-n0 1, n0-n1 65, n1-M 129. New order: F-n1 129, n1-n0 65, n0-M 1. */
+    CHECK((fork != NULL) && (fork->firstInfo == 129), "reverse gives the first segment the old last style");
+    CHECK((fork != NULL) && (fork->nodes[0].pos[0] == 4000.0f) && (fork->nodes[0].trackSegmentInfo == 65),
           "reverse gives the first node the style of the segment that now follows it");
-    CHECK((fork != NULL) && (fork->nodes[1].pos[0] == 3000.0f) && (fork->nodes[1].trackSegmentInfo == 20),
+    CHECK((fork != NULL) && (fork->nodes[1].pos[0] == 3000.0f) && (fork->nodes[1].trackSegmentInfo == 1),
           "reverse gives the last node the old first style");
     gdx_branch_edit_clear();
     gdx_branch_edit_commit("FIRST.CRSD", NULL, sCount, 1u, reason, sizeof(reason));
@@ -689,7 +689,104 @@ static void test_reload_then_select_without_split(void) {
     gdx_settings_store_clear();
 }
 
+static void test_first_values(void) {
+    GdxBranchEditPoint nodes[2];
+    GdxBranchSet stored;
+    const GdxBranchFork* fork;
+    char reason[96];
+    int dropped;
+    int i;
+
+    make_ring(8);
+    gdx_branch_edit_clear();
+    gdx_branch_edit_sync(sCount);
+    memset(nodes, 0, sizeof(nodes));
+    for (i = 0; i < 2; i++) {
+        nodes[i].pos[0] = 3000.0f + i * 1000.0f;
+        memset(nodes[i].parts, -1, sizeof(nodes[i].parts));
+    }
+    nodes[0].parts[0] = 3;
+    nodes[0].parts[6] = 1;
+    nodes[1].parts[0] = 4;
+    nodes[1].parts[6] = 2;
+    sRing[2].parts[0] = 1;
+    sRing[2].parts[6] = 2;
+    gdx_branch_edit_set_point_extra(2, GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH, 20);
+    gdx_branch_edit_span_commit(2, 5, nodes, 2);
+    gdx_branch_edit_first_fill(sRing, sCount);
+    sRing[2].parts[0] = 2;
+    gdx_branch_edit_set_point_extra(2, GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH, 25);
+    sCount = gdx_branch_edit_swap(sRing, sCount, GDX_BRANCH_EDIT_MAX_POINTS, &dropped);
+    CHECK(sRing[2].parts[0] == 1 && gdx_branch_edit_point_extra(2, GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH) == 20,
+          "stored first segment has independent parts and settings");
+    sRing[2].parts[0] = 5;
+    gdx_branch_edit_set_point_extra(3, GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH, 30);
+    gdx_branch_edit_set_point_extra(4, GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH, 40);
+    gdx_branch_edit_set_point_extra(2, GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH, 50);
+    sRing[2].parts[6] = 3;
+    sCount = gdx_branch_edit_swap(sRing, sCount, GDX_BRANCH_EDIT_MAX_POINTS, &dropped);
+    CHECK(sRing[2].parts[0] == 2 && gdx_branch_edit_point_extra(2, GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH) == 25,
+          "swapping back restores first-segment A values");
+    CHECK(sRing[2].parts[6] == 3, "a gate on the shared fork point is not duplicated by path");
+    CHECK(gdx_branch_edit_commit("VALUES.CRSD", sRing, sCount, 1u, reason, sizeof(reason)) == 0,
+          "first-segment values commit");
+    gdx_branch_edit_clear();
+    gdx_branch_edit_select("VALUES.CRSD", sCount);
+    CHECK(gdx_branch_store_get("VALUES.CRSD", &stored) && stored.forks[0].firstParts[0] == 5 &&
+          stored.forks[0].firstExtras.pitWidth == 50, "first-segment values persist across reload");
+    gdx_branch_edit_on_reverse(sCount);
+    fork = fork_of(0);
+    CHECK(fork != NULL && fork->firstParts[0] == 4 && fork->firstExtras.pitWidth == 40,
+          "reverse shifts the last segment values to the fork start");
+    CHECK(fork != NULL && fork->nodes[0].pit == 3 && fork->nodes[0].extras.pitWidth == 30 &&
+          fork->nodes[0].gate == 2, "reverse shifts segment values but keeps point-owned features");
+    CHECK(fork != NULL && fork->nodes[1].pit == 5 && fork->nodes[1].extras.pitWidth == 50 &&
+          fork->nodes[1].gate == 1, "reverse shifts first-segment values onto the last node");
+    gdx_branch_edit_on_reverse(sCount);
+    fork = fork_of(0);
+    CHECK(fork != NULL && fork->firstParts[0] == 5 && fork->nodes[0].pit == 3 && fork->nodes[1].pit == 4,
+          "double reverse preserves branch segment values");
+    gdx_branch_edit_clear();
+    gdx_branch_edit_commit("VALUES.CRSD", NULL, sCount, 1u, reason, sizeof(reason));
+    gdx_settings_store_clear();
+}
+
+static void test_extended_commit(void) {
+    int count;
+    char reason[128];
+    for (count = 65; count <= 127; ++count) {
+        GdxBranchSet loaded;
+        unsigned char bytes[GDX_BRANCH_EDIT_STATE_BYTES];
+        make_ring(count);
+        gdx_branch_edit_clear();
+        gdx_branch_edit_select(NULL, count);
+        CHECK(gdx_branch_edit_commit("LONG.CRSD", sRing, count, 987, reason, sizeof(reason)) == 0,
+              "extended ring commits");
+        CHECK(gdx_branch_store_get("LONG.CRSD", &loaded), "extended-only ring retains a store entry");
+        CHECK(loaded.extendedCount == count - 64 && loaded.courseChecksum == 987, "extended count/checksum retained");
+        CHECK(loaded.extended[count - 65].pos[0] == sRing[count - 1].pos[0] &&
+              loaded.extended[count - 65].bankAngle == sRing[count - 1].bankAngle, "last extra point retained");
+        gdx_branch_edit_state_save(bytes);
+        gdx_branch_edit_clear();
+        gdx_branch_edit_state_load(bytes);
+        CHECK(gdx_branch_edit_sync(count) == 0, "extended undo state synchronizes");
+        CHECK(gdx_branch_edit_commit("LONG.CRSD", sRing, count, 988, reason, sizeof(reason)) == 0,
+              "extended undo state recommits");
+    }
+}
+
 int main(void) {
+    char ceilingReason[128];
+    gdx_branch_edit_clear();
+    CHECK(gdx_branch_edit_split_check(1, 125, ceilingReason, sizeof(ceilingReason)) == 0, "127 combined points admitted");
+    CHECK(gdx_branch_edit_split_check(1, 126, ceilingReason, sizeof(ceilingReason)) < 0, "128 combined points refused");
+    CHECK(gdx_branch_edit_can_add(126, 1), "last ring point admitted");
+    CHECK(!gdx_branch_edit_can_add(127, 1), "point beyond ceiling refused");
+    CHECK(gdx_branch_edit_can_add(122, 5), "five-point loop at ceiling admitted");
+    CHECK(!gdx_branch_edit_can_add(123, 5), "five-point loop beyond ceiling refused");
+    CHECK(!gdx_branch_edit_can_add(-1, 1) && !gdx_branch_edit_can_add(128, 0) &&
+          !gdx_branch_edit_can_add(1, -1), "invalid insertion counts refused");
+    test_extended_commit();
     test_split_and_swap();
     test_link_and_asymmetric_swap();
     test_delete_rotate_reverse();
@@ -700,6 +797,7 @@ int main(void) {
     test_translate();
     test_swap_to_node();
     test_first_style();
+    test_first_values();
     test_extras();
     test_reload_then_select_without_split();
     if (sFailures != 0) {

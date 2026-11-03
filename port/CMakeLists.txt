@@ -7,7 +7,7 @@ endif()
 
 set(DECOMP "${CMAKE_CURRENT_SOURCE_DIR}/../decomp")
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
-set(GDX_DISPLAY_VERSION "1.2.0" CACHE STRING "Version shown in the About menu")
+set(GDX_DISPLAY_VERSION "1.2.1" CACHE STRING "Version shown in the About menu")
 # The release workflows pass the channel and commit; a local build stays "dev", which never
 # offers updates (gdx_update.cpp).
 set(GDX_BUILD_CHANNEL "dev" CACHE STRING "Update channel: stable, nightly or dev")
@@ -152,6 +152,11 @@ list(FILTER GAME_SOURCES EXCLUDE REGEX "/sys/cartridge_offsets\\.c$")
 add_library(gdiffuser_game OBJECT ${GAME_SOURCES}
     "${CMAKE_CURRENT_SOURCE_DIR}/decomp_port.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_branch.c"       # Course Edit forks: race runtime (ring 2)
+    "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_contact.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_cpu_native.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_disk.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_snapshot_native.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_snapshot_mfs.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_branch_editor.c" # Course Edit forks: editor hooks and tools
     "${CMAKE_CURRENT_SOURCE_DIR}/n64_sched.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/n64_vi.c"
@@ -365,6 +370,9 @@ gdx_add_main_target(G-Diffuser
     gdx_ek_text.c              # Course Edit names and number badges composed from the stock EK textures
     gdx_edit_cup.c             # Edit Cup slot names split into CRS_ENTRY.CENT and .CENL (decomp MFS calls it)
     gdx_course_state.cpp
+    gdx_course_snapshot.cpp
+    gdx_course_snapshot_state.cpp
+    gdx_course_snapshot_io.cpp
     gdx_track_recovery.cpp
     gdx_track_recovery_runtime.cpp
     gdx_recovery_file.cpp
@@ -377,6 +385,7 @@ gdx_add_main_target(G-Diffuser
     AssetLoader.cpp
     resource/ResourceFactories.cpp
     gdx_firstboot.cpp
+    gdx_user_folders.cpp
     gdx_extract_launch.cpp
     gdx_dump_launch.cpp
     gdx_firstboot_gui.cpp
@@ -395,6 +404,8 @@ gdx_add_main_target(G-Diffuser
     gdx_course_branch_view.c       # Course forks: the active set in plain types for global.h code
     gdx_course_minimap.c
     gdx_course_junction.c
+    gdx_course_gadget_budget.c
+    gdx_course_cpu.c
     gdx_course_branch_edit.c       # Course forks: editor fork set, path B view swap, undo state (pure C)
     gdx_course_settings.c          # Per-track and per-point values: GXK1 block, GKS1 file, .gdxb sidecar (pure C)
     gdx_course_settings_view.c     # The active values in plain types for global.h code
@@ -940,6 +951,7 @@ add_executable(gdx_course_branch_edit_tests
     gdx_course_settings_view.c
     gdx_course_branch_format.c
     gdx_course_registry.c)
+target_compile_definitions(gdx_course_branch_edit_tests PRIVATE PORT=1)
 if(MSVC)
     target_compile_options(gdx_course_branch_edit_tests PRIVATE /W3)
 elseif(GDX_PORT_WARN_FLAGS)
@@ -1087,6 +1099,18 @@ else()
     target_compile_options(gdx_music_stream_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
 endif()
 
+add_executable(gdx_music_lifecycle_tests
+    tests/gdx_music_lifecycle_tests.cpp
+    gdx_dev_gates.c)
+target_include_directories(gdx_music_lifecycle_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_music_lifecycle_tests PRIVATE /W3 /UNDEBUG)
+    target_compile_definitions(gdx_music_lifecycle_tests PRIVATE _CRT_SECURE_NO_WARNINGS=1)
+else()
+    target_compile_options(gdx_music_lifecycle_tests PRIVATE ${GDX_PORT_WARN_FLAGS} -UNDEBUG)
+    target_link_libraries(gdx_music_lifecycle_tests PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+endif()
+
 add_executable(gdx_course_junction_tests
     tests/gdx_course_junction_tests.c
     gdx_course_junction.c)
@@ -1177,7 +1201,8 @@ endif()
 
 add_executable(gdx_course_edit_native_tests
     tests/gdx_course_edit_native_tests.c
-    gdx_course_edit_native.c)
+    gdx_course_edit_native.c
+    gdx_course_edit_input.c)
 target_include_directories(gdx_course_edit_native_tests PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${DECOMP}"
@@ -1360,6 +1385,11 @@ if(GDX_BUILD_JP AND NOT ANDROID)
     add_library(gdiffuser_game_jp OBJECT ${GAME_SOURCES}
         "${CMAKE_CURRENT_SOURCE_DIR}/decomp_port.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_branch.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_contact.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_cpu_native.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_disk.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_snapshot_native.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_snapshot_mfs.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_branch_editor.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/n64_sched.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/n64_vi.c"
@@ -1455,6 +1485,9 @@ if(GDX_BUILD_JP AND NOT ANDROID)
         gdx_ek_text.c
         gdx_edit_cup.c
         gdx_course_state.cpp
+    gdx_course_snapshot.cpp
+    gdx_course_snapshot_state.cpp
+    gdx_course_snapshot_io.cpp
     gdx_track_recovery.cpp
     gdx_track_recovery_runtime.cpp
     gdx_recovery_file.cpp
@@ -1467,6 +1500,7 @@ if(GDX_BUILD_JP AND NOT ANDROID)
         AssetLoader.cpp
         resource/ResourceFactories.cpp
         gdx_firstboot.cpp
+        gdx_user_folders.cpp
         gdx_extract_launch.cpp
         gdx_dump_launch.cpp
         gdx_firstboot_gui.cpp
@@ -1489,6 +1523,8 @@ if(GDX_BUILD_JP AND NOT ANDROID)
         gdx_course_branch_view.c
         gdx_course_minimap.c
         gdx_course_junction.c
+        gdx_course_gadget_budget.c
+        gdx_course_cpu.c
         gdx_course_branch_edit.c
         gdx_course_settings.c
         gdx_course_settings_view.c
@@ -1627,4 +1663,224 @@ if(GDX_BUILD_JP AND NOT ANDROID)
         COMMAND "${CMAKE_COMMAND}" -E copy_directory
                 "${GDX_RECIPES_SRC}/assets/yaml/jp/rev0" "$<TARGET_FILE_DIR:G-Diffuser-JP>/decomp-recipes/assets/yaml/jp/rev0"
         VERBATIM)
+endif()
+
+add_executable(gdx_user_folders_tests
+    tests/gdx_user_folders_tests.cpp
+    gdx_user_folders.cpp)
+target_include_directories(gdx_user_folders_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_features(gdx_user_folders_tests PRIVATE cxx_std_17)
+if(MSVC)
+    target_compile_options(gdx_user_folders_tests PRIVATE /W3 /UNDEBUG)
+else()
+    target_compile_options(gdx_user_folders_tests PRIVATE ${GDX_PORT_WARN_FLAGS} -UNDEBUG)
+endif()
+add_executable(gdx_course_gadget_budget_tests tests/gdx_course_gadget_budget_tests.c gdx_course_gadget_budget.c)
+target_include_directories(gdx_course_gadget_budget_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_course_gadget_budget_tests PRIVATE /W3 /UNDEBUG)
+else()
+    target_compile_options(gdx_course_gadget_budget_tests PRIVATE ${GDX_PORT_WARN_FLAGS} -UNDEBUG)
+endif()
+
+add_executable(gdx_course_gadgets_native_tests
+    tests/gdx_course_gadgets_native_tests.c
+    "${DECOMP}/src/game/course_gadgets.c"
+    gdx_course_gadget_budget.c)
+target_include_directories(gdx_course_gadgets_native_tests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}" "${DECOMP}" "${DECOMP}/include"
+    "${DECOMP}/src" "${CMAKE_CURRENT_SOURCE_DIR}/../include")
+target_compile_definitions(gdx_course_gadgets_native_tests PRIVATE
+    GDX_GADGET_GENERATION_TEST=1 PORT=1 GDIFFUSER_PORT=1 EXPANSION_KIT=1 AVOID_UB=1 F3DEX_GBI_2=1 _LANGUAGE_C=1 VERSION_US=1
+    ASSET_VERSION=us ASSET_REVISION=rev0)
+if(MSVC)
+    target_compile_options(gdx_course_gadgets_native_tests PRIVATE /W0 /we4715 /we4716 /we4013 /UNDEBUG)
+else()
+    target_compile_options(gdx_course_gadgets_native_tests PRIVATE -UNDEBUG)
+    target_link_libraries(gdx_course_gadgets_native_tests PRIVATE m)
+endif()
+
+add_executable(gdx_course_cpu_tests tests/gdx_course_cpu_tests.c gdx_course_cpu.c)
+if(MSVC)
+    target_compile_options(gdx_course_cpu_tests PRIVATE /W3 /UNDEBUG)
+else()
+    target_compile_options(gdx_course_cpu_tests PRIVATE ${GDX_PORT_WARN_FLAGS} -UNDEBUG)
+    target_link_libraries(gdx_course_cpu_tests PRIVATE m)
+endif()
+
+add_executable(gdx_course_contact_tests tests/gdx_course_contact_tests.c
+    gdx_course_contact.c "${DECOMP}/src/game/course.c")
+target_include_directories(gdx_course_contact_tests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}" "${DECOMP}" "${DECOMP}/include"
+    "${DECOMP}/src" "${CMAKE_CURRENT_SOURCE_DIR}/../include")
+target_compile_definitions(gdx_course_contact_tests PRIVATE
+    GDX_COURSE_CONTACT_TEST=1 PORT=1 EXPANSION_KIT=1 AVOID_UB=1 F3DEX_GBI_2=1 _LANGUAGE_C=1 VERSION_US=1)
+if(MSVC)
+    target_compile_options(gdx_course_contact_tests PRIVATE /W0 /we4715 /we4716 /we4013 /UNDEBUG)
+else()
+    target_compile_options(gdx_course_contact_tests PRIVATE -UNDEBUG)
+    target_link_libraries(gdx_course_contact_tests PRIVATE m)
+endif()
+
+add_executable(gdx_course_cpu_native_tests tests/gdx_course_cpu_native_tests.c
+    gdx_course_cpu_native.c
+    gdx_course_cpu.c)
+target_include_directories(gdx_course_cpu_native_tests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}" "${DECOMP}" "${DECOMP}/include"
+    "${DECOMP}/src" "${CMAKE_CURRENT_SOURCE_DIR}/../include")
+target_compile_definitions(gdx_course_cpu_native_tests PRIVATE
+    PORT=1 EXPANSION_KIT=1 AVOID_UB=1 F3DEX_GBI_2=1 _LANGUAGE_C=1 VERSION_US=1)
+if(MSVC)
+    target_compile_options(gdx_course_cpu_native_tests PRIVATE /W0 /we4715 /we4716 /we4013 /UNDEBUG)
+else()
+    target_compile_options(gdx_course_cpu_native_tests PRIVATE -UNDEBUG)
+    target_link_libraries(gdx_course_cpu_native_tests PRIVATE m)
+endif()
+
+add_executable(gdx_course_disk_tests tests/gdx_course_disk_tests.c gdx_course_disk.c
+    gdx_course_snapshot_native.c
+    "${DECOMP}/src/game/course.c")
+target_include_directories(gdx_course_disk_tests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}" "${DECOMP}" "${DECOMP}/include"
+    "${DECOMP}/src" "${CMAKE_CURRENT_SOURCE_DIR}/../include")
+target_compile_definitions(gdx_course_disk_tests PRIVATE
+    GDX_COURSE_CHECKSUM_TEST=1 PORT=1 EXPANSION_KIT=1 AVOID_UB=1 F3DEX_GBI_2=1 _LANGUAGE_C=1 VERSION_US=1)
+if(MSVC)
+    target_compile_options(gdx_course_disk_tests PRIVATE /W0 /we4715 /we4716 /we4013 /UNDEBUG)
+else()
+    target_compile_options(gdx_course_disk_tests PRIVATE -UNDEBUG)
+endif()
+
+add_executable(gdx_content_validation_tests tests/gdx_content_validation_tests.c)
+target_include_directories(gdx_content_validation_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_content_validation_tests PRIVATE /UNDEBUG)
+else()
+    target_compile_options(gdx_content_validation_tests PRIVATE -UNDEBUG)
+endif()
+
+add_executable(gdx_foreign_import_tests tests/gdx_foreign_import_tests.c)
+target_include_directories(gdx_foreign_import_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_foreign_import_tests PRIVATE /W3 /UNDEBUG)
+else()
+    target_compile_options(gdx_foreign_import_tests PRIVATE -UNDEBUG)
+endif()
+
+
+add_executable(gdx_course_snapshot_tests tests/gdx_course_snapshot_tests.cpp gdx_recovery_file.cpp
+    gdx_course_snapshot.cpp gdx_course_branch_format.c gdx_course_settings.c gdx_course_registry.c)
+target_include_directories(gdx_course_snapshot_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_course_snapshot_tests PRIVATE /W3 /UNDEBUG)
+else()
+    target_compile_options(gdx_course_snapshot_tests PRIVATE ${GDX_PORT_WARN_FLAGS} -UNDEBUG)
+endif()
+
+add_executable(gdx_course_snapshot_state_tests
+    tests/gdx_course_snapshot_state_tests.cpp tests/gdx_course_snapshot_fixture.c
+    gdx_course_snapshot_state.cpp gdx_course_snapshot.cpp gdx_course_snapshot_native.c gdx_course_disk.c
+    gdx_recovery_metadata.cpp gdx_course_branch_format.c gdx_course_registry.c gdx_course_settings.c
+    gdx_recovery_file.cpp "${DECOMP}/src/game/course.c")
+target_include_directories(gdx_course_snapshot_state_tests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}" "${DECOMP}" "${DECOMP}/include" "${DECOMP}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../include")
+target_compile_definitions(gdx_course_snapshot_state_tests PRIVATE
+    GDX_COURSE_CHECKSUM_TEST=1 PORT=1 EXPANSION_KIT=1 AVOID_UB=1 F3DEX_GBI_2=1 _LANGUAGE_C=1 VERSION_US=1)
+if(MSVC)
+    target_compile_options(gdx_course_snapshot_state_tests PRIVATE /W3 /UNDEBUG /we4013)
+else()
+    target_compile_options(gdx_course_snapshot_state_tests PRIVATE -UNDEBUG)
+endif()
+
+add_executable(gdx_course_snapshot_io_tests
+    tests/gdx_course_snapshot_io_tests.cpp tests/gdx_course_snapshot_fixture.c
+    gdx_course_snapshot_io.cpp gdx_course_snapshot_state.cpp gdx_course_snapshot.cpp gdx_course_snapshot_native.c gdx_course_disk.c
+    gdx_recovery_metadata.cpp gdx_course_branch_format.c gdx_course_registry.c gdx_course_settings.c
+    gdx_recovery_file.cpp "${DECOMP}/src/game/course.c")
+target_include_directories(gdx_course_snapshot_io_tests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}" "${DECOMP}" "${DECOMP}/include" "${DECOMP}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../include")
+target_compile_definitions(gdx_course_snapshot_io_tests PRIVATE
+    GDX_COURSE_CHECKSUM_TEST=1 PORT=1 EXPANSION_KIT=1 AVOID_UB=1 F3DEX_GBI_2=1 _LANGUAGE_C=1 VERSION_US=1)
+if(MSVC)
+    target_compile_options(gdx_course_snapshot_io_tests PRIVATE /W3 /UNDEBUG /we4013)
+else()
+    target_compile_options(gdx_course_snapshot_io_tests PRIVATE -UNDEBUG)
+endif()
+
+add_executable(gdx_course_snapshot_mfs_tests
+    tests/gdx_course_snapshot_io_tests.cpp
+    tests/gdx_course_snapshot_mfs_fixture.c gdx_course_snapshot_mfs.c tests/gdx_course_snapshot_fixture.c
+    gdx_course_snapshot_io.cpp gdx_course_snapshot_state.cpp gdx_course_snapshot.cpp gdx_course_snapshot_native.c gdx_course_disk.c
+    gdx_recovery_metadata.cpp gdx_course_branch_format.c gdx_course_registry.c gdx_course_settings.c
+    gdx_recovery_file.cpp "${DECOMP}/src/game/course.c")
+target_include_directories(gdx_course_snapshot_mfs_tests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}" "${DECOMP}" "${DECOMP}/include" "${DECOMP}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../include")
+target_compile_definitions(gdx_course_snapshot_mfs_tests PRIVATE
+    GDX_SNAPSHOT_MFS_TEST=1 GDX_COURSE_CHECKSUM_TEST=1 PORT=1 EXPANSION_KIT=1 AVOID_UB=1 F3DEX_GBI_2=1 _LANGUAGE_C=1 VERSION_US=1)
+if(MSVC)
+    target_compile_options(gdx_course_snapshot_mfs_tests PRIVATE /W3 /UNDEBUG /we4013)
+else()
+    target_compile_options(gdx_course_snapshot_mfs_tests PRIVATE -UNDEBUG)
+endif()
+
+add_executable(gdx_course_chunk_tests tests/gdx_course_chunk_tests.c "${DECOMP}/src/game/course.c")
+target_include_directories(gdx_course_chunk_tests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}" "${DECOMP}" "${DECOMP}/include" "${DECOMP}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../include")
+target_compile_definitions(gdx_course_chunk_tests PRIVATE
+    GDX_COURSE_CONTACT_TEST=1 PORT=1 EXPANSION_KIT=1 AVOID_UB=1 F3DEX_GBI_2=1 _LANGUAGE_C=1 VERSION_US=1)
+if(MSVC)
+    target_compile_options(gdx_course_chunk_tests PRIVATE /W0 /we4715 /we4716 /we4013 /UNDEBUG)
+else()
+    target_compile_options(gdx_course_chunk_tests PRIVATE -UNDEBUG)
+    target_link_libraries(gdx_course_chunk_tests PRIVATE m)
+endif()
+
+add_executable(gdx_course_edit_undo_tests tests/gdx_course_edit_undo_tests.c
+    gdx_course_edit_undo.c gdx_course_branch_edit.c gdx_course_branch_format.c
+    gdx_course_registry.c gdx_course_settings.c gdx_course_settings_view.c)
+target_include_directories(gdx_course_edit_undo_tests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}" "${DECOMP}" "${DECOMP}/include" "${DECOMP}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../include")
+target_compile_definitions(gdx_course_edit_undo_tests PRIVATE
+    PORT=1 EXPANSION_KIT=1 AVOID_UB=1 F3DEX_GBI_2=1 _LANGUAGE_C=1 VERSION_US=1)
+if(MSVC)
+    target_compile_options(gdx_course_edit_undo_tests PRIVATE /W3 /UNDEBUG /we4013)
+else()
+    target_compile_options(gdx_course_edit_undo_tests PRIVATE -UNDEBUG)
+    target_link_libraries(gdx_course_edit_undo_tests PRIVATE m)
+endif()
+
+add_executable(gdx_content_import_disk_tests tests/gdx_content_import_disk_tests.c)
+target_include_directories(gdx_content_import_disk_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_content_import_disk_tests PRIVATE /W3 /UNDEBUG)
+else()
+    target_compile_options(gdx_content_import_disk_tests PRIVATE -UNDEBUG)
+endif()
+
+add_executable(gdx_course_branch_save_tests tests/gdx_course_branch_save_tests.c)
+target_include_directories(gdx_course_branch_save_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_course_branch_save_tests PRIVATE /W3 /UNDEBUG)
+else()
+    target_compile_options(gdx_course_branch_save_tests PRIVATE -UNDEBUG)
+endif()
+
+add_executable(gdx_music_folders_tests
+    tests/gdx_music_folders_tests.cpp
+    gdx_course_registry.c
+    gdx_audio_mix.c
+    gdx_dev_gates.c)
+target_include_directories(gdx_music_folders_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(gdx_music_folders_tests PRIVATE gdx_music_decoders)
+if(MSVC)
+    target_compile_options(gdx_music_folders_tests PRIVATE /W3 /UNDEBUG)
+    target_compile_definitions(gdx_music_folders_tests PRIVATE _CRT_SECURE_NO_WARNINGS=1)
+else()
+    target_compile_options(gdx_music_folders_tests PRIVATE ${GDX_PORT_WARN_FLAGS} -UNDEBUG)
+    target_link_libraries(gdx_music_folders_tests PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
 endif()

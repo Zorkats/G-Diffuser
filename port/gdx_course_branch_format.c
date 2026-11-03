@@ -5,6 +5,7 @@
  */
 
 #include "gdx_course_branch_format.h"
+#include "gdx_course_point_validation.h"
 
 #include "gdx_course_registry.h"
 
@@ -114,6 +115,13 @@ static int bytes_fit(size_t pos, size_t end, size_t count) {
  * S71.
  * ------------------------------------------------------------------------------- */
 
+static int node_values_valid(const GdxBranchNode* node) {
+    const signed char parts[9] = {node->pit, node->dash, node->dirt, node->ice, node->jump,
+                                 node->landmine, node->gate, node->building, node->sign};
+    return node->radiusLeft >= 0 && node->radiusRight >= 0 && gdx_course_style_valid(node->trackSegmentInfo) &&
+           gdx_course_parts_valid(parts, 9);
+}
+
 int gdx_branch_validate(const GdxBranchSet* set, int ringCount, char* reason, size_t cap) {
     int total;
     int i;
@@ -133,7 +141,7 @@ int gdx_branch_validate(const GdxBranchSet* set, int ringCount, char* reason, si
         return fail(reason, cap, GDX_BRANCH_ERR_COUNT, "fork count is above 4");
     }
     if (ringCount > GDX_BRANCH_MAX_TOTAL_POINTS) {
-        return fail(reason, cap, GDX_BRANCH_ERR_TOTAL, "ring points plus branch nodes exceed 64");
+        return fail(reason, cap, GDX_BRANCH_ERR_TOTAL, "ring points plus branch nodes exceed 127");
     }
 
     total = ringCount;
@@ -145,7 +153,7 @@ int gdx_branch_validate(const GdxBranchSet* set, int ringCount, char* reason, si
             return fail(reason, cap, GDX_BRANCH_ERR_COUNT, "node count must be 1 to 32");
         }
         /* Ignoring an unknown bit would drop it on the next encode. */
-        if ((fork->flags & (uint8_t) ~(GDX_BRANCH_FLAG_SYMMETRIC | GDX_BRANCH_FLAG_FIRST_INFO)) != 0) {
+        if ((fork->flags & (uint8_t) ~(GDX_BRANCH_FLAG_SYMMETRIC | GDX_BRANCH_FLAG_FIRST_INFO | GDX_BRANCH_FLAG_FIRST_VALUES)) != 0) {
             return fail(reason, cap, GDX_BRANCH_ERR_FLAGS, "fork flags have an unknown bit");
         }
         if (fork->forkPoint == 0) {
@@ -169,16 +177,46 @@ int gdx_branch_validate(const GdxBranchSet* set, int ringCount, char* reason, si
                             "symmetric fork node count does not match path A");
             }
         }
+        if ((fork->flags & GDX_BRANCH_FLAG_FIRST_INFO) && !gdx_course_style_valid(fork->firstInfo)) {
+            return fail(reason, cap, GDX_BRANCH_ERR_FLAGS, "first-point style is out of range");
+        }
+        if ((fork->flags & GDX_BRANCH_FLAG_FIRST_VALUES) && !gdx_course_parts_valid(fork->firstParts, 6)) {
+            return fail(reason, cap, GDX_BRANCH_ERR_FLAGS, "first-point parts are out of range");
+        }
         for (j = 0; j < (int) fork->nodeCount; j++) {
             const GdxBranchNode* node = &fork->nodes[j];
+            if (!node_values_valid(node)) {
+                return fail(reason, cap, GDX_BRANCH_ERR_FLAGS, "branch node values are out of range");
+            }
             if (!float_is_finite(node->pos[0]) || !float_is_finite(node->pos[1]) ||
                 !float_is_finite(node->pos[2])) {
                 return fail(reason, cap, GDX_BRANCH_ERR_FLOAT, "a branch node position is not finite");
             }
         }
+        if (fork->flags & GDX_BRANCH_FLAG_FIRST_VALUES) {
+            const GdxPointExtras* e = &fork->firstExtras;
+            if (e->pitWidth > 100 || e->dirtWidth > 100 || e->iceWidth > 100 ||
+                (e->magnetStrength && e->magnetStrength < 20) || e->magnetStrength > 240 ||
+                (e->magnetRange && e->magnetRange < 10) || e->magnetRange > 200) {
+                return fail(reason, cap, GDX_BRANCH_ERR_FLAGS, "first-point settings are out of range");
+            }
+        }
         total += (int) fork->nodeCount;
         if (total > GDX_BRANCH_MAX_TOTAL_POINTS) {
-            return fail(reason, cap, GDX_BRANCH_ERR_TOTAL, "ring points plus branch nodes exceed 64");
+            return fail(reason, cap, GDX_BRANCH_ERR_TOTAL, "ring points plus branch nodes exceed 127");
+        }
+    }
+    if (set->extendedCount > GDX_BRANCH_EXTRA_POINTS ||
+        set->extendedCount != (ringCount > 64 ? ringCount - 64 : 0)) {
+        return fail(reason, cap, GDX_BRANCH_ERR_COUNT, "extended ring count does not match the ring");
+    }
+    for (i = 0; i < set->extendedCount; i++) {
+        const GdxBranchNode* node = &set->extended[i];
+        if (!node_values_valid(node)) {
+            return fail(reason, cap, GDX_BRANCH_ERR_FLAGS, "ring node values are out of range");
+        }
+        if (!float_is_finite(node->pos[0]) || !float_is_finite(node->pos[1]) || !float_is_finite(node->pos[2])) {
+            return fail(reason, cap, GDX_BRANCH_ERR_FLOAT, "an extended ring position is not finite");
         }
     }
     return pass(reason, cap);
@@ -425,10 +463,16 @@ static int get_node(const unsigned char* p, GdxBranchNode* node) {
 
 static size_t block_size(const GdxBranchSet* set) {
     size_t need = GDX_BRANCH_BLOCK_HEADER_SIZE + 4;
+    if (set->extendedCount) {
+        need += 5 + (size_t) set->extendedCount * GDX_BRANCH_NODE_BYTES;
+    }
     int i;
 
     for (i = 0; i < (int) set->forkCount; i++) {
         need += 4 + (size_t) set->forks[i].nodeCount * GDX_BRANCH_NODE_BYTES;
+        if (set->forks[i].flags & GDX_BRANCH_FLAG_FIRST_VALUES) {
+            need += GDX_BRANCH_FIRST_VALUES_BYTES;
+        }
         if ((set->forks[i].flags & GDX_BRANCH_FLAG_FIRST_INFO) != 0) {
             need += 4;
         }
@@ -438,14 +482,20 @@ static size_t block_size(const GdxBranchSet* set) {
 
 /* Older builds refuse a version above 1, so version 2 is written only when a fork needs it. */
 static uint32_t block_version(const GdxBranchSet* set) {
+    uint32_t version = GDX_BRANCH_BLOCK_VERSION_V1;
     int i;
-
+    if (set->extendedCount) {
+        return GDX_BRANCH_BLOCK_VERSION;
+    }
     for (i = 0; i < (int) set->forkCount; i++) {
-        if ((set->forks[i].flags & GDX_BRANCH_FLAG_FIRST_INFO) != 0) {
-            return GDX_BRANCH_BLOCK_VERSION;
+        if (set->forks[i].flags & GDX_BRANCH_FLAG_FIRST_VALUES) {
+            return GDX_BRANCH_BLOCK_VERSION_V3;
+        }
+        if (set->forks[i].flags & GDX_BRANCH_FLAG_FIRST_INFO) {
+            version = GDX_BRANCH_BLOCK_VERSION_V2;
         }
     }
-    return GDX_BRANCH_BLOCK_VERSION_V1;
+    return version;
 }
 
 int gdx_branch_encode(const GdxBranchSet* set, uint32_t bindCrc, unsigned char* out, size_t cap) {
@@ -489,8 +539,26 @@ int gdx_branch_encode(const GdxBranchSet* set, uint32_t bindCrc, unsigned char* 
             put_s32le(out + pos, fork->firstInfo);
             pos += 4;
         }
+        if (fork->flags & GDX_BRANCH_FLAG_FIRST_VALUES) {
+            memcpy(out + pos, fork->firstParts, sizeof(fork->firstParts));
+            out[pos + 6] = fork->firstExtras.pitWidth;
+            out[pos + 7] = fork->firstExtras.dirtWidth;
+            out[pos + 8] = fork->firstExtras.iceWidth;
+            out[pos + 9] = fork->firstExtras.magnetStrength;
+            out[pos + 10] = fork->firstExtras.magnetRange;
+            pos += GDX_BRANCH_FIRST_VALUES_BYTES;
+        }
         for (j = 0; j < (int) fork->nodeCount; j++) {
             put_node(out + pos, &fork->nodes[j]);
+            pos += GDX_BRANCH_NODE_BYTES;
+        }
+    }
+    if (set->extendedCount) {
+        put_u32le(out + pos, set->baseCrc);
+        out[pos + 4] = set->extendedCount;
+        pos += 5;
+        for (i = 0; i < set->extendedCount; i++) {
+            put_node(out + pos, &set->extended[i]);
             pos += GDX_BRANCH_NODE_BYTES;
         }
     }
@@ -524,7 +592,8 @@ int gdx_branch_decode(const unsigned char* data, size_t length, uint32_t bindCrc
         return GDX_BRANCH_ERR_MAGIC;
     }
     version = get_u16le(data + 4);
-    if (version != GDX_BRANCH_BLOCK_VERSION && version != GDX_BRANCH_BLOCK_VERSION_V1) {
+    if (version != GDX_BRANCH_BLOCK_VERSION && version != GDX_BRANCH_BLOCK_VERSION_V3 && version != GDX_BRANCH_BLOCK_VERSION_V2 &&
+        version != GDX_BRANCH_BLOCK_VERSION_V1) {
         return GDX_BRANCH_ERR_VERSION;
     }
     end = length - 4;
@@ -563,7 +632,7 @@ int gdx_branch_decode(const unsigned char* data, size_t length, uint32_t bindCrc
             return GDX_BRANCH_ERR_LAYOUT;
         }
         if ((fork->flags & GDX_BRANCH_FLAG_FIRST_INFO) != 0) {
-            if (version < GDX_BRANCH_BLOCK_VERSION) {
+            if (version < GDX_BRANCH_BLOCK_VERSION_V2) {
                 return GDX_BRANCH_ERR_FLAGS;
             }
             if (!bytes_fit(pos, end, 4)) {
@@ -572,11 +641,44 @@ int gdx_branch_decode(const unsigned char* data, size_t length, uint32_t bindCrc
             fork->firstInfo = get_s32le(data + pos);
             pos += 4;
         }
+        if (fork->flags & GDX_BRANCH_FLAG_FIRST_VALUES) {
+            if (version < 3) {
+                return GDX_BRANCH_ERR_FLAGS;
+            }
+            if (!bytes_fit(pos, end, GDX_BRANCH_FIRST_VALUES_BYTES)) {
+                return GDX_BRANCH_ERR_LAYOUT;
+            }
+            memcpy(fork->firstParts, data + pos, sizeof(fork->firstParts));
+            fork->firstExtras.pitWidth = data[pos + 6];
+            fork->firstExtras.dirtWidth = data[pos + 7];
+            fork->firstExtras.iceWidth = data[pos + 8];
+            fork->firstExtras.magnetStrength = data[pos + 9];
+            fork->firstExtras.magnetRange = data[pos + 10];
+            pos += GDX_BRANCH_FIRST_VALUES_BYTES;
+        }
         if (!bytes_fit(pos, end, (size_t) nodeCount * GDX_BRANCH_NODE_BYTES)) {
             return GDX_BRANCH_ERR_LAYOUT;
         }
         for (j = 0; j < (int) nodeCount; j++) {
             if (!get_node(data + pos, &fork->nodes[j])) {
+                return GDX_BRANCH_ERR_LAYOUT;
+            }
+            pos += GDX_BRANCH_NODE_BYTES;
+        }
+    }
+    if (version == GDX_BRANCH_BLOCK_VERSION) {
+        if (!bytes_fit(pos, end, 5)) {
+            return GDX_BRANCH_ERR_LAYOUT;
+        }
+        parsed.baseCrc = get_u32le(data + pos);
+        parsed.extendedCount = data[pos + 4];
+        pos += 5;
+        if (!parsed.extendedCount || parsed.extendedCount > GDX_BRANCH_EXTRA_POINTS ||
+            !bytes_fit(pos, end, (size_t) parsed.extendedCount * GDX_BRANCH_NODE_BYTES)) {
+            return GDX_BRANCH_ERR_COUNT;
+        }
+        for (i = 0; i < parsed.extendedCount; i++) {
+            if (!get_node(data + pos, &parsed.extended[i])) {
                 return GDX_BRANCH_ERR_LAYOUT;
             }
             pos += GDX_BRANCH_NODE_BYTES;
@@ -678,6 +780,9 @@ static void copy_set_clean(GdxBranchSet* dst, const GdxBranchSet* src) {
     dst->courseChecksum = src->courseChecksum;
     dst->ringCount = src->ringCount;
     dst->forkCount = src->forkCount;
+    dst->extendedCount = src->extendedCount;
+    dst->baseCrc = src->baseCrc;
+    memcpy(dst->extended, src->extended, (size_t) src->extendedCount * sizeof(GdxBranchNode));
     for (i = 0; i < (int) src->forkCount && i < GDX_BRANCH_MAX_FORKS; i++) {
         int nodes = (int) src->forks[i].nodeCount;
         dst->forks[i].forkPoint = src->forks[i].forkPoint;
@@ -685,6 +790,8 @@ static void copy_set_clean(GdxBranchSet* dst, const GdxBranchSet* src) {
         dst->forks[i].flags = src->forks[i].flags;
         dst->forks[i].nodeCount = src->forks[i].nodeCount;
         dst->forks[i].firstInfo = src->forks[i].firstInfo;
+        memcpy(dst->forks[i].firstParts, src->forks[i].firstParts, sizeof(src->forks[i].firstParts));
+        dst->forks[i].firstExtras = src->forks[i].firstExtras;
         if (nodes > GDX_BRANCH_MAX_NODES) {
             nodes = GDX_BRANCH_MAX_NODES;
         }
@@ -702,7 +809,7 @@ int gdx_branch_store_set(const char* courseId, const GdxBranchSet* set) {
         return GDX_BRANCH_ERR_ARGS;
     }
     index = store_find(sStore, courseId);
-    if (set->forkCount == 0) {
+    if (set->forkCount == 0 && set->extendedCount == 0) {
         if (index < 0) {
             return GDX_BRANCH_OK;
         }
@@ -922,7 +1029,7 @@ static int file_read_entries(const unsigned char* data, size_t length, BranchSlo
             return rc;
         }
         /* store_set treats forkCount 0 as "delete". A file entry with no forks would break that. */
-        if (slots[i].set.forkCount == 0) {
+        if (slots[i].set.forkCount == 0 && slots[i].set.extendedCount == 0) {
             return GDX_BRANCH_FILE_ERR_ENTRY;
         }
         slots[i].used = 1;

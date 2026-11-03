@@ -633,6 +633,10 @@ static void RunValidImage(const HxSpec* spec) {
         uint8_t* buf = (uint8_t*)malloc((size_t)fx.trackSize);
         checkTrue("track buf alloc", buf != NULL);
         if (buf != NULL) {
+            checkEqLong("image byte-order provenance", track->sourceBigEndian, spec->bigEndian);
+            checkTrue("payload physical offset known", track->payloadOffset >= 0);
+            checkEqLong("unchanged source re-read",
+                        gdx_mfsimg_read_file_current(img, track->entryId, buf, fx.trackSize), GDX_MFSIMG_OK);
             rc = gdx_mfsimg_read_file(img, track->entryId, buf, fx.trackSize);
             checkEqLong("track read", rc, GDX_MFSIMG_OK);
             if (rc == GDX_MFSIMG_OK) {
@@ -672,6 +676,20 @@ static void RunValidImage(const HxSpec* spec) {
         uint8_t buf[16];
         checkEqLong("encoded read refused", gdx_mfsimg_read_file(img, encoded->entryId, buf, sizeof(buf)),
                     GDX_MFSIMG_ERR_ENCODED);
+    }
+
+    if (track != NULL) {
+        uint8_t* buf = (uint8_t*) malloc((size_t) fx.trackSize);
+        checkTrue("stale guard buffer", buf != NULL);
+        if (buf != NULL) {
+            memset(buf, 0xA5, (size_t) fx.trackSize);
+            fx.data[track->payloadOffset] ^= 1;
+            checkTrue("changed fixture written", hx_write_temp(fx.data, fx.size) == 0);
+            checkEqLong("changed source refused before copy",
+                        gdx_mfsimg_read_file_current(img, track->entryId, buf, fx.trackSize), GDX_MFSIMG_ERR_STALE);
+            checkEqLong("stale output untouched", buf[0], 0xA5);
+            free(buf);
+        }
     }
 
     gdx_mfsimg_close(img);

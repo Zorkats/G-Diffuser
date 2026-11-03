@@ -62,19 +62,19 @@ static void fill_node(GdxBranchNode* node, float x) {
     node->pos[0] = x;
     node->pos[1] = 2.5f;
     set_bits(&node->pos[2], 0x80000000u); /* -0, must survive a round trip as bits */
-    node->radiusLeft = -300;
+    node->radiusLeft = 300;
     node->radiusRight = 400;
     node->trackSegmentInfo = -123456;
     node->bankAngle = -200;
     node->pit = -1;
     node->dash = 2;
     node->dirt = 3;
-    node->ice = 4;
-    node->jump = 5;
-    node->landmine = 6;
-    node->gate = 7;
+    node->ice = 2;
+    node->jump = 1;
+    node->landmine = 2;
+    node->gate = 1;
     node->building = 8;
-    node->sign = 9;
+    node->sign = 4;
 }
 
 static void add_fork(GdxBranchSet* set, int forkPoint, int mergePoint, int flags, int nodes) {
@@ -120,7 +120,9 @@ static int set_eq(const GdxBranchSet* a, const GdxBranchSet* b) {
     for (i = 0; i < (int) a->forkCount; i++) {
         if (a->forks[i].forkPoint != b->forks[i].forkPoint || a->forks[i].mergePoint != b->forks[i].mergePoint ||
             a->forks[i].flags != b->forks[i].flags || a->forks[i].nodeCount != b->forks[i].nodeCount ||
-            a->forks[i].firstInfo != b->forks[i].firstInfo) {
+            a->forks[i].firstInfo != b->forks[i].firstInfo ||
+            memcmp(a->forks[i].firstParts, b->forks[i].firstParts, sizeof(a->forks[i].firstParts)) != 0 ||
+            memcmp(&a->forks[i].firstExtras, &b->forks[i].firstExtras, sizeof(GdxPointExtras)) != 0) {
             return 0;
         }
         for (j = 0; j < (int) a->forks[i].nodeCount; j++) {
@@ -149,12 +151,12 @@ static void expect_code(const char* label, const GdxBranchSet* set, int ring, in
 static void test_limits(void) {
     check(GDX_BRANCH_MAX_FORKS == 4, "fork cap is 4");
     check(GDX_BRANCH_MAX_NODES == 32, "node cap is 32");
-    check(GDX_BRANCH_MAX_TOTAL_POINTS == 64, "total point cap is 64");
+    check(GDX_BRANCH_MAX_TOTAL_POINTS == 127, "internal total point cap is 127");
     check(GDX_BRANCH_FLAG_SYMMETRIC == 0x01u, "symmetric is flag bit0");
     check(GDX_BRANCH_NODE_BYTES == 32, "wire node is 32 bytes");
     check(GDX_BRANCH_COURSE_ID_MAX == GDX_COURSE_FILE_ID_MAX, "course id max matches the registry");
     check(GDX_BRANCH_STORE_SLOTS == GDX_COURSE_STORE_SLOTS, "store slots match the registry");
-    check(GDX_BRANCH_BLOCK_MAX_BYTES == 16 + 4 * (4 + 4 + 32 * 32) + 4, "block max matches the wire formula");
+    check(GDX_BRANCH_BLOCK_MAX_BYTES == 16 + 4 * (4 + 4 + GDX_BRANCH_FIRST_VALUES_BYTES + 32 * 32) + 5 + 63 * 32 + 4, "block max matches the wire formula");
     check(GDX_BRANCH_FLAG_FIRST_INFO == 0x02u, "first segment style is flag bit1");
     check(GDX_BRANCH_BLOCK_MAX_BYTES <= 65535, "a GXB1 block fits in the GBS1 u16 length");
     check(GDX_BRANCH_FILE_MAX_BYTES ==
@@ -261,13 +263,13 @@ static void test_validate_reject(void) {
     expect_code("forks that are not sorted by fork point are rejected", &set, 12, GDX_BRANCH_ERR_OVERLAP, "sorted");
 
     memset(&set, 0, sizeof(set));
-    set.ringCount = 62;
+    set.ringCount = 125;
     add_fork(&set, 1, 4, 0, 3);
-    expect_code("ring points plus nodes above 64 are rejected", &set, 62, GDX_BRANCH_ERR_TOTAL, "exceed");
+    expect_code("ring points plus nodes above 127 are rejected", &set, 125, GDX_BRANCH_ERR_TOTAL, "exceed");
 
     memset(&set, 0, sizeof(set));
-    set.ringCount = 65;
-    expect_code("a ring longer than 64 is rejected", &set, 65, GDX_BRANCH_ERR_TOTAL, "exceed");
+    set.ringCount = 128;
+    expect_code("a ring longer than 127 is rejected", &set, 128, GDX_BRANCH_ERR_TOTAL, "exceed");
 
     memset(&set, 0, sizeof(set));
     set.ringCount = 10;
@@ -295,12 +297,12 @@ static void test_validate_reject(void) {
 
     memset(&set, 0, sizeof(set));
     set.ringCount = 10;
-    add_fork(&set, 1, 4, 0x04, 1);
+    add_fork(&set, 1, 4, 0x08, 1);
     expect_code("an unknown flag bit is rejected", &set, 10, GDX_BRANCH_ERR_FLAGS, "unknown");
 
     memset(&set, 0, sizeof(set));
     set.ringCount = 10;
-    add_fork(&set, 1, 4, 0x05, 1);
+    add_fork(&set, 1, 4, 0x09, 1);
     expect_code("symmetric plus an unknown flag bit is rejected", &set, 10, GDX_BRANCH_ERR_FLAGS, "unknown");
 
     make_basic(&set);
@@ -595,19 +597,19 @@ static void test_block_round_trip(void) {
     set_bits(&hand.pos[0], 0x3F800000u);
     set_bits(&hand.pos[1], 0xC0000000u);
     set_bits(&hand.pos[2], 0x3F000000u);
-    hand.radiusLeft = -300;
+    hand.radiusLeft = 300;
     hand.radiusRight = 400;
     hand.trackSegmentInfo = -123456;
     hand.bankAngle = -200;
     hand.pit = -1;
     hand.dash = 2;
     hand.dirt = 3;
-    hand.ice = 4;
-    hand.jump = 5;
-    hand.landmine = 6;
-    hand.gate = 7;
+    hand.ice = 2;
+    hand.jump = 1;
+    hand.landmine = 2;
+    hand.gate = 1;
     hand.building = 8;
-    hand.sign = 9;
+    hand.sign = 4;
     body[0] = 1;
     body[1] = 4;
     body[2] = 0;
@@ -615,19 +617,19 @@ static void test_block_round_trip(void) {
     put_u32(body + 4, 0x3F800000u);
     put_u32(body + 8, 0xC0000000u);
     put_u32(body + 12, 0x3F000000u);
-    put_u16(body + 16, 0xFED4u);
+    put_u16(body + 16, 300);
     put_u16(body + 18, 400);
     put_u32(body + 20, 0xFFFE1DC0u);
     put_u16(body + 24, 0xFF38u);
     body[26] = 0xFF;
     body[27] = 2;
     body[28] = 3;
-    body[29] = 4;
-    body[30] = 5;
-    body[31] = 6;
-    body[32] = 7;
+    body[29] = 2;
+    body[30] = 1;
+    body[31] = 2;
+    body[32] = 1;
     body[33] = 8;
-    body[34] = 9;
+    body[34] = 4;
     body[35] = 0;
     crafted = craft_block(sBlock, sizeof(sBlock), 1, 10, bind, 0x11u, body, sizeof(body));
     check(crafted != 0 && gdx_branch_decode(sBlock, crafted, bind, &out) == GDX_BRANCH_OK, "a hand-packed node decodes");
@@ -650,7 +652,7 @@ static void test_block_first_info(void) {
     check(plain > 0 && sBlock[4] == 1 && sBlock[5] == 0, "a set without first styles is written as version 1");
 
     set.forks[1].flags |= GDX_BRANCH_FLAG_FIRST_INFO;
-    set.forks[1].firstInfo = -7654321;
+    set.forks[1].firstInfo = (int32_t)0x80000041u;
     len = gdx_branch_encode(&set, bind, sBlock, sizeof(sBlock));
     check(len == plain + 4, "a first style adds 4 bytes to its fork");
     check(sBlock[4] == 2 && sBlock[5] == 0, "a set with a first style is written as version 2");
@@ -658,6 +660,31 @@ static void test_block_first_info(void) {
           "version 2 round trips the first style");
     check(out.forks[0].firstInfo == 0 && !(out.forks[0].flags & GDX_BRANCH_FLAG_FIRST_INFO),
           "a fork without the flag decodes with no first style");
+
+    set.forks[1].flags |= GDX_BRANCH_FLAG_FIRST_VALUES;
+    memset(set.forks[1].firstParts, -1, sizeof(set.forks[1].firstParts));
+    set.forks[1].firstParts[0] = 5;
+    set.forks[1].firstExtras.pitWidth = 73;
+    len = gdx_branch_encode(&set, bind, sBlock, sizeof(sBlock));
+    check(len == plain + 4 + GDX_BRANCH_FIRST_VALUES_BYTES, "first parts/settings have a bounded wire extension");
+    check(len > 0 && sBlock[4] == 3, "first parts require version 3");
+    check(len > 0 && gdx_branch_decode(sBlock, (size_t)len, bind, &out) == GDX_BRANCH_OK &&
+          memcmp(set.forks[1].firstParts, out.forks[1].firstParts, sizeof(set.forks[1].firstParts)) == 0 &&
+          out.forks[1].firstExtras.pitWidth == 73, "first parts and settings survive a block round trip");
+
+    sBlock[4] = 2;
+    reseal(sBlock, (size_t) len);
+    expect_decode("version 2 does not define independent first values", sBlock, (size_t) len, bind,
+                  GDX_BRANCH_ERR_FLAGS);
+    set.forks[1].firstExtras.pitWidth = 101;
+    check(gdx_branch_encode(&set, bind, sBlock, sizeof(sBlock)) < 0,
+          "first width above 100 is refused before encoding");
+    set.forks[1].firstExtras.pitWidth = 73;
+    set.forks[1].firstExtras.magnetRange = 9;
+    check(gdx_branch_encode(&set, bind, sBlock, sizeof(sBlock)) < 0,
+          "first magnet range below 10 is refused before encoding");
+    set.forks[1].firstExtras.magnetRange = 0;
+    len = gdx_branch_encode(&set, bind, sBlock, sizeof(sBlock));
 
     sBlock[4] = 1;
     reseal(sBlock, (size_t) len);
@@ -676,9 +703,13 @@ static void test_block_first_info(void) {
     gdx_branch_store_clear();
     make_basic(&set);
     set.forks[0].flags |= GDX_BRANCH_FLAG_FIRST_INFO;
-    set.forks[0].firstInfo = 99;
+    set.forks[0].firstInfo = 65;
+    set.forks[0].flags |= GDX_BRANCH_FLAG_FIRST_VALUES;
+    memset(set.forks[0].firstParts, -1, sizeof(set.forks[0].firstParts));
+    set.forks[0].firstParts[5] = 2;
+    set.forks[0].firstExtras.magnetStrength = 220;
     check(gdx_branch_store_set("FIRST.CRSD", &set) == GDX_BRANCH_OK && gdx_branch_store_get("FIRST.CRSD", &out) == 1 &&
-              out.forks[0].firstInfo == 99,
+              out.forks[0].firstInfo == 65,
           "the store keeps the first style");
     len = gdx_branch_store_encode_file(sFile, sizeof(sFile));
     gdx_branch_store_clear();
@@ -712,7 +743,7 @@ static void test_block_reject(void) {
     expect_decode("magic", sBlock, (size_t) len, bind, GDX_BRANCH_ERR_MAGIC);
     sBlock[0] = 'G';
 
-    sBlock[4] = 3;
+    sBlock[4] = 5;
     reseal(sBlock, (size_t) len);
     expect_decode("version", sBlock, (size_t) len, bind, GDX_BRANCH_ERR_VERSION);
     sBlock[4] = 1;
@@ -941,7 +972,7 @@ static void test_file_round_trip(void) {
     two.courseChecksum = 0x222u;
     two.ringCount = 16;
     add_fork(&two, 2, 6, GDX_BRANCH_FLAG_SYMMETRIC, 3);
-    two.forks[0].nodes[0].pit = -5;
+    two.forks[0].nodes[0].pit = -1;
     check(gdx_branch_store_set("ONE.CRSD", &one) == GDX_BRANCH_OK, "file test stores the first course");
     check(gdx_branch_store_set("TWO.CRSD", &two) == GDX_BRANCH_OK, "file test stores the second course");
 
@@ -1122,7 +1153,56 @@ static void test_lane_crossing(void) {
     check(!gdx_branch_view_chunk_covers_point(wideRoadLeft, center, center, center, below), "a chunk with no width covers nothing");
 }
 
+static void test_extended_ring_codec(void) {
+    GdxBranchSet set;
+    GdxBranchSet decoded;
+    int count;
+    int i;
+    int size;
+
+    for (count = 65; count <= 127; count++) {
+        memset(&set, 0, sizeof(set));
+        set.ringCount = (uint8_t) count;
+        set.extendedCount = (uint8_t) (count - 64);
+        set.baseCrc = 0xABCDEF01;
+        set.courseChecksum = (uint32_t) count * 123;
+        for (i = 0; i < set.extendedCount; i++) {
+            fill_node(&set.extended[i], i);
+        }
+        size = gdx_branch_encode(&set, 1234, sBlock, sizeof(sBlock));
+        check(size > 0 && sBlock[4] == 4, "long ring uses version 4");
+        if (size <= 0) {
+            continue;
+        }
+        check(gdx_branch_decode(sBlock, (size_t) size, 1234, &decoded) == 0, "extended ring decodes");
+        check(decoded.baseCrc == set.baseCrc && decoded.extendedCount == set.extendedCount,
+              "extended ring retains binding and count");
+        for (i = 0; i < set.extendedCount; i++) {
+            check(node_eq(&set.extended[i], &decoded.extended[i]), "extra ring point round-trips");
+        }
+    }
+    set.extendedCount = 64;
+    check(gdx_branch_validate(&set, 127, NULL, 0) < 0, "extra count above capacity rejected");
+    set.extendedCount = 62;
+    check(gdx_branch_validate(&set, 127, NULL, 0) < 0, "missing required extra point rejected");
+}
+
+static void test_hostile_values(void) {
+    GdxBranchSet set;
+    make_basic(&set);
+    set.forks[0].nodes[0].sign = 127;
+    check(gdx_branch_validate(&set, 20, NULL, 0) < 0, "out-of-range node part rejected");
+    make_basic(&set);
+    set.forks[0].nodes[0].trackSegmentInfo = 62;
+    check(gdx_branch_validate(&set, 20, NULL, 0) < 0, "out-of-range node style rejected");
+    make_basic(&set);
+    set.forks[0].nodes[0].radiusLeft = -1;
+    check(gdx_branch_validate(&set, 20, NULL, 0) < 0, "negative node radius rejected");
+}
+
 int main(void) {
+    test_hostile_values();
+    test_extended_ring_codec();
     test_lane_crossing();
     test_limits();
     test_validate_accept();

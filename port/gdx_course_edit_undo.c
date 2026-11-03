@@ -24,8 +24,8 @@
 #include "gdx_course_edit_undo.h"
 
 extern unk_800D6CA0 D_800D6CA0;
-extern unk_80128690 D_80128690[64];
-extern unk_80128690 D_xk2_80128990[64];
+extern unk_80128690 D_80128690[GDX_COURSE_POINT_CAPACITY];
+extern unk_80128690 D_xk2_80128990[GDX_COURSE_POINT_CAPACITY];
 extern unk_807B3C20 D_802CB6D0;
 extern unk_807B3C20 D_807B6528;
 extern u8 D_80030060[GDX_EK_FILE_NAME_MAX + 1];
@@ -59,10 +59,10 @@ extern int memcmp(const void* s1, const void* s2, size_t n);
 #define GDX_CE_UNDO_REFUSE_STATE_CLEAR 0x11
 
 // Offset of controlPointCount (s32) in the backup segment table, unk_807B3C20.
-#define GDX_CE_UNDO_POINT_COUNT_OFFSET 0x2900
+#define GDX_CE_UNDO_POINT_COUNT_OFFSET (sizeof(((unk_807B3C20*) 0)->unk_0000))
 
 typedef struct GdxCourseEditUndoSnapshot {
-    unsigned char selection[sizeof(unk_80128690) * 64];
+    unsigned char selection[sizeof(unk_80128690) * GDX_COURSE_POINT_CAPACITY];
     unsigned char fileName[GDX_EK_FILE_NAME_MAX + 1];
     unsigned char segments[sizeof(unk_807B3C20)];
     unsigned char courseData[sizeof(CourseData)];
@@ -80,8 +80,7 @@ typedef struct GdxCourseEditUndoSlot {
     char text[GDX_COURSE_EDIT_UNDO_TEXT_CAP];
 } GdxCourseEditUndoSlot;
 
-// Every field is sized from the host struct it copies, so the pool follows the host layout. On x64 a
-// snapshot is a little over 13 KB and the pool about 0.5 MB.
+// Host pointer widths and the point ceiling both change the retained snapshot size.
 static GdxCourseEditUndoSlot gSlots[GDX_COURSE_EDIT_UNDO_CAPACITY];
 
 static int gSlotUsed[GDX_COURSE_EDIT_UNDO_CAPACITY];

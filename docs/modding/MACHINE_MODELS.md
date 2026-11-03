@@ -162,7 +162,7 @@ See [Logs](../MODDING_GUIDE.md#logs).
 
 1. Enter machine selection or machine settings so the game prepares native machine lists.
    For a Machine Create assembly, prepare that assembly through the game's existing workflow.
-2. Press **F1** and open **Workshop > Content Library**.
+2. Press **F1** and open **Workshop > Tools**.
 3. Expand **Native machine models (OBJ + glTF)** and choose the **Roster entry**.
 4. Check that **Captured** lists triangles and materials. Click **Export cached native model**.
 5. Wait for the output path, then import `machine.gltf` in Blender. Keep `machine.bin` and all

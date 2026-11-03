@@ -27,7 +27,7 @@
  *   0x0C  records       count x { kind u8, scope u8, fallback u8, keyLen u8, key[keyLen] }
  *   end-4 crc32         u32, CRC-32 over every byte before it (IEEE, zlib polynomial)
  *
- * scope 0xFF means course-wide; any other value is a control point index 0..63. Keys use the
+ * scope 0xFF means course-wide; any other value is a control point index 0..126. Keys use the
  * characters [a-z0-9._-]. A (kind, scope) pair must be unique within one block.
  *
  * Track titles (Edit Cup 8A): a long-named track that sits in an 8-character Edit Cup slot has a
@@ -70,7 +70,7 @@ typedef enum GdxCourseKind {
 #define GDX_COURSE_FILE_ID_MAX 25       /* course id "NAME.EXT": 20 + '.' + 4 */
 #define GDX_COURSE_EXT_PER_KIND 32      /* runtime-registered entries per kind */
 #define GDX_COURSE_EXT_MAX_RECORDS 128  /* records per course and per GXE1 block */
-#define GDX_COURSE_SCOPE_POINTS 64      /* CourseData control points (controlPoint[64]) */
+#define GDX_COURSE_SCOPE_POINTS 127
 #define GDX_COURSE_SCOPE_COURSE 0xFF    /* scope value for course-wide records */
 /* Courses that may hold extension keys at once. 128 is one slot per course the Content Library can
  * list (it shows at most 100 CRSD files per class, A8140.c:316) plus room for the Edit Cup. Each
@@ -106,7 +106,7 @@ typedef enum GdxCourseKind {
 #define GDX_COURSE_ERR_FULL (-7)          /* a bounded capacity is reached */
 #define GDX_COURSE_ERR_UNKNOWN (-8)       /* key or record not found */
 #define GDX_COURSE_ERR_NOT_EXTENSION (-9) /* a stock key was given where an extension key is needed */
-#define GDX_COURSE_ERR_SCOPE (-10)        /* scope is neither course-wide nor a point index 0..63 */
+#define GDX_COURSE_ERR_SCOPE (-10)        /* scope is neither course-wide nor a point index 0..126 */
 #define GDX_COURSE_ERR_PATH (-11)         /* source path empty or not shorter than GDX_COURSE_PATH_MAX */
 
 /* GXE1 decode return codes. Every rejection is one of these; nothing partial is returned. */

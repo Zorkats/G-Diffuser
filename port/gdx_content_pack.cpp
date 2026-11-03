@@ -27,7 +27,7 @@ struct Member {
 };
 
 constexpr const char* kContainerExt = ".gdxc";
-constexpr const char* kSidecarExts[] = { ".gdxe", ".gdxt", ".gdxs", ".gdxb" };
+constexpr const char* kSidecarExts[] = { ".gdxe", ".gdxt", ".gdxs", ".gdxb", ".gcs" };
 constexpr const char* kAudioExts[] = { ".ogg", ".flac", ".wav" };
 // Windows opens these as devices whatever extension follows, so a member may never be named after one.
 constexpr const char* kReservedStems[] = { "CON",  "PRN",  "AUX",  "NUL",  "COM1", "COM2", "COM3", "COM4",

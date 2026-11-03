@@ -13,7 +13,8 @@
  *   0x0C  extTag        u32: fourcc of the MFS extension ("CRSD"/"CRSE"/"CARD")
  *   0x10  name          char[21], MFS directory-entry name, NUL-padded
  *   0x25  flags         u32: bit0 = ghosts stripped, bit1 = records stripped, bit2 = GXE1 sidecar (track only),
- *                       bit3 = GXT1 title sidecar (track only, 8A)
+ *                       bit3 = legacy GXT1 title, bit4 = legacy GXD1 forks/settings,
+ *                       bit5 = required GCP1 complete snapshot (.gcs)
  *   0x29  payloadSize   u32: 0xC830 (track) / 0x20 (machine) / variable (bundle)
  *   0x2D  payloadCrc32  u32, CRC-32 of payload
  *   0x31  reserved      16 bytes, zero
@@ -65,6 +66,7 @@ extern "C" {
 #define GDX_CONTENT_FLAG_RECORDS_STRIPPED (1u << 1)
 #define GDX_CONTENT_FLAG_EXTENSIONS (1u << 2) /* a GXE1 sidecar, <stem>.gdxe, sits next to the .gdxc */
 #define GDX_CONTENT_FLAG_TITLE (1u << 3)      /* a GXT1 title sidecar, <stem>.gdxt, sits next to the .gdxc */
+#define GDX_CONTENT_FLAG_SNAPSHOT (1u << 5)
 #define GDX_CONTENT_FLAG_BRANCH (1u << 4)     /* a GXD1 fork and settings sidecar, <stem>.gdxb, sits next to it */
 
 #define GDX_CONTENT_TRACK_PAYLOAD_SIZE 0xC830 /* sizeof(CourseContext), fzx_course.h:41-47 */
@@ -91,34 +93,22 @@ typedef struct GdxContentEntry {
 /* Nonzero while the game's disk thread owns MFS state. Enumeration and export must be refused
  * in that window. */
 int gdx_content_mfs_busy(void);
+struct GdxBranchSet;
+int gdx_content_track_preview(const char* name, const void* base, float* x, float* z,
+                               int capacity, struct GdxBranchSet* forks);
 
 /* Fills outEntries with the working directory's CRSD/CRSE/CARD files (same 3-char prefix
  * predicate as the game's own browser). Returns the entry count, or a negative GDX_CONTENT_ERR_*
  * code. Never touches the prepared-dir iterator globals (blocker B2). */
 int gdx_content_list(GdxContentEntry* outEntries, int capacity);
 
-/* Exports one listed entry. A machine is written to exports/<sanitized name>.gdxc next to the exe,
- * atomically (tmp + rename). A track is written the same way into the staging folder
- * exports/.gdxp-export, together with its sidecars and songs, and that folder is then zipped into the
- * share package exports/<sanitized name>.gdxp (gdx_content_pack.h) and removed. Sidecar names below
- * are the names inside the package. When the entry is a track and gEnhancements.Content.ExportIncludeGhosts is 0,
- * the ghostSave+records region is zeroed before packing and both strip flag bits are set.
- * A track with Course Edit extension keys (gdx_course_registry.h) also gets
- * exports/<sanitized name>.gdxe, a GXE1 block bound to the payload CRC-32. It is written before
- * the container, and flag bit 2 (GDX_CONTENT_FLAG_EXTENSIONS) is set. A track without keys gets
- * no sidecar and no flag. A track whose session title (8A short-name alias) differs from its file
- * name also gets exports/<sanitized name>.gdxt, a GXT1 block bound to the payload CRC-32, and flag
- * bit 3 (GDX_CONTENT_FLAG_TITLE). On success outPath receives the written .gdxc (machine) or .gdxp
- * (track) path. GDX_CONTENT_ERR_PACKAGE when the package could not be written. */
+// Track packages bind the saved immutable generation, not the current mutable editor stores.
+// Ghost/record stripping reseals that generation. The required same-stem .gcs must travel with
+// its .gdxc. The output is a .gdxp for tracks or a .gdxc for Create Machine designs.
 int gdx_content_export(const GdxContentEntry* entry, char* outPath, size_t outCap);
 
-/* E4: exports the whole Edit Cup as one bundle container, packaged like a track export: edit-cup.gdxc,
- * its edit-cup.gdxs companion and the member songs are zipped into exports/edit-cup.gdxp. Gathers the
- * in-memory CENT image plus the CRSD payload of every slot that names an existing CRSD file
- * (empty and dangling slots are skipped; a track named by two slots is packed once). Track
- * payloads honor the same ExportIncludeGhosts strip toggle as single exports. Returns
- * GDX_CONTENT_ERR_NOT_FOUND when no slot resolves to a track. Menu thread, busy-guarded like
- * gdx_content_export. */
+// Repeated slots share one complete member in edit-cup.gcs. CENT/CENL and track payloads retain
+// their fixed native layouts; snapshot validation is mandatory before importing marked members.
 int gdx_content_export_bundle(char* outPath, size_t outCap);
 
 /* 8A: copies the CRSD payload of the working-directory track name (<= 20 chars) into out, which

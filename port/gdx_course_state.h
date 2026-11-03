@@ -2,7 +2,7 @@
  * (plan slice 9, scope A).
  *
  * Boot (gdx_course_boot, idempotent, game thread):
- *   1. music scan (mods/music/custom and music/custom, plan 7A),
+ *   1. music scan (music/, with legacy custom-folder fallbacks),
  *   2. pack manifests (mods/<pack>/elements.txt, gdx_course_packs.h),
  *   3. the state file (course-elements.gdxs beside the exe).
  * Every menu, race, export and import entry point calls it, so the order holds even when no menu ran first.

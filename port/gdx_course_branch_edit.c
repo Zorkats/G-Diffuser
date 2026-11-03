@@ -1,6 +1,7 @@
 /* port/gdx_course_branch_edit.c -- see gdx_course_branch_edit.h. */
 
 #include "gdx_course_branch_edit.h"
+#include "gdx_course_limits.h"
 #include "gdx_course_branch_format.h"
 #include "gdx_course_settings.h"
 
@@ -46,6 +47,7 @@ static void edit_build_settings(GdxCourseSettings* out, int ringCount, int skipN
 static void edit_publish(void) {
     static GdxCourseSettings sPublished;
 
+    sLive.set.extendedCount = sLive.set.ringCount > 64 ? sLive.set.ringCount - 64 : 0;
     gdx_branch_set_active((sLive.set.forkCount > 0) ? &sLive.set : NULL);
     edit_build_settings(&sPublished, sLive.set.ringCount, 0);
     gdx_settings_set_active(gdx_settings_is_empty(&sPublished) ? NULL : &sPublished);
@@ -69,6 +71,11 @@ static int edit_total_nodes(void) {
         total += sLive.set.forks[f].nodeCount;
     }
     return total;
+}
+
+int gdx_branch_edit_can_add(int ringCount, int points) {
+    return ringCount >= 0 && ringCount <= GDX_COURSE_EDIT_POINT_LIMIT && points >= 0 &&
+           points <= GDX_COURSE_EDIT_POINT_LIMIT - ringCount - edit_total_nodes();
 }
 
 static void edit_remove_fork(int f) {
@@ -206,6 +213,11 @@ void gdx_branch_edit_first_fill(const GdxBranchEditPoint* ring, int ringCount) {
             fork->firstInfo = ring[fork->forkPoint].trackSegmentInfo;
             fork->flags |= GDX_BRANCH_FLAG_FIRST_INFO;
         }
+        if (!(fork->flags & GDX_BRANCH_FLAG_FIRST_VALUES) && fork->forkPoint < ringCount) {
+            memcpy(fork->firstParts, ring[fork->forkPoint].parts, sizeof(fork->firstParts));
+            fork->firstExtras = sLive.ringExtras[fork->forkPoint];
+            fork->flags |= GDX_BRANCH_FLAG_FIRST_VALUES;
+        }
     }
     edit_publish();
 }
@@ -219,8 +231,13 @@ int gdx_branch_edit_commit(const char* courseId, const GdxBranchEditPoint* ring,
     int i;
 
     edit_reason(reason, cap, "");
-    if (courseId == NULL) {
+    if (courseId == NULL || ringCount < 0 || ringCount > GDX_BRANCH_EDIT_MAX_POINTS ||
+        (ringCount > 64 && ring == NULL)) {
         return GDX_BRANCH_ERR_ARGS;
+    }
+    set.extendedCount = ringCount > 64 ? ringCount - 64 : 0;
+    for (i = 0; i < set.extendedCount; ++i) {
+        point_to_node(&ring[i + 64], &set.extended[i]);
     }
     set.ringCount = (uint8_t) ringCount;
     set.courseChecksum = courseChecksum;
@@ -425,6 +442,10 @@ int gdx_branch_edit_swap(GdxBranchEditPoint* ring, int ringCount, int cap, int* 
         fork = (f < next.set.forkCount) ? &next.set.forks[f] : NULL;
         if ((fork != NULL) && (i == fork->forkPoint)) {
             newFork[f] = outCount - 1;
+            if (fork->flags & GDX_BRANCH_FLAG_FIRST_VALUES) {
+                memcpy(sOut[outCount - 1].parts, fork->firstParts, sizeof(fork->firstParts));
+                sOutExtras[outCount - 1] = fork->firstExtras;
+            }
             if (fork->flags & GDX_BRANCH_FLAG_FIRST_INFO) {
                 sOut[outCount - 1].trackSegmentInfo = fork->firstInfo;
             }
@@ -437,7 +458,7 @@ int gdx_branch_edit_swap(GdxBranchEditPoint* ring, int ringCount, int cap, int* 
             }
         }
     }
-    if ((f != next.set.forkCount) || (outCount > cap)) {
+    if ((f != next.set.forkCount) || (outCount > cap) || (outCount > GDX_COURSE_EDIT_POINT_LIMIT)) {
         return ringCount;
     }
 
@@ -454,7 +475,9 @@ int gdx_branch_edit_swap(GdxBranchEditPoint* ring, int ringCount, int cap, int* 
         }
         fork->nodeCount = (uint8_t) interior;
         fork->firstInfo = ring[oldFork].trackSegmentInfo;
-        fork->flags |= GDX_BRANCH_FLAG_FIRST_INFO;
+        fork->flags |= GDX_BRANCH_FLAG_FIRST_INFO | GDX_BRANCH_FLAG_FIRST_VALUES;
+        memcpy(fork->firstParts, ring[oldFork].parts, sizeof(fork->firstParts));
+        fork->firstExtras = sLive.ringExtras[oldFork];
         fork->forkPoint = (uint8_t) newFork[f];
         fork->mergePoint = (uint8_t) newMerge[f];
     }
@@ -666,6 +689,20 @@ void gdx_branch_edit_on_reverse(int ringCount) {
         for (i = 0; i < fork->nodeCount; i++) {
             fork->nodes[i].bankAngle = (int16_t) (360 - fork->nodes[i].bankAngle);
         }
+        if (fork->flags & GDX_BRANCH_FLAG_FIRST_VALUES) {
+            int8_t lastParts[6];
+            GdxPointExtras lastExtras = fork->nodes[0].extras;
+
+            memcpy(lastParts, &fork->nodes[0].pit, sizeof(lastParts));
+            for (i = 0; i + 1 < fork->nodeCount; i++) {
+                memcpy(&fork->nodes[i].pit, &fork->nodes[i + 1].pit, sizeof(lastParts));
+                fork->nodes[i].extras = fork->nodes[i + 1].extras;
+            }
+            memcpy(&fork->nodes[fork->nodeCount - 1].pit, fork->firstParts, sizeof(lastParts));
+            fork->nodes[fork->nodeCount - 1].extras = fork->firstExtras;
+            memcpy(fork->firstParts, lastParts, sizeof(lastParts));
+            fork->firstExtras = lastExtras;
+        }
         /* A style belongs to the segment after its point, and the segments now run the other way: the first
          * segment takes the old last one's style, and each node the style of the segment that now follows it. */
         if (fork->flags & GDX_BRANCH_FLAG_FIRST_INFO) {
@@ -736,6 +773,7 @@ int gdx_branch_edit_sync(int ringCount) {
         edit_remove_fork(sLive.set.forkCount - 1);
         removed++;
     }
+    sLive.set.extendedCount = ringCount > 64 ? ringCount - 64 : 0;
     if ((sLive.set.forkCount > 0) && (gdx_branch_validate(&sLive.set, ringCount, NULL, 0) != GDX_BRANCH_OK)) {
         removed += sLive.set.forkCount;
         memset(&sLive.set, 0, sizeof(sLive.set));
@@ -769,8 +807,8 @@ int gdx_branch_edit_split_check(int segment, int ringCount, char* reason, int ca
         edit_reason(reason, cap, "Split: a course has at most 4 forks");
         return -1;
     }
-    if (ringCount + 1 + edit_total_nodes() + 1 > GDX_BRANCH_MAX_TOTAL_POINTS) {
-        edit_reason(reason, cap, "Split: the course and its forks would pass 64 points");
+    if (ringCount + 1 + edit_total_nodes() + 1 > GDX_COURSE_EDIT_POINT_LIMIT) {
+        edit_reason(reason, cap, "Split: the course and its forks exceed the point budget");
         return -1;
     }
     return 0;
@@ -816,8 +854,8 @@ int gdx_branch_edit_span_check(int forkPoint, int mergePoint, int ringCount, cha
         edit_reason(reason, cap, "Split: a course has at most 4 forks");
         return GDX_BRANCH_ERR_COUNT;
     }
-    if (ringCount + edit_total_nodes() + interior > GDX_BRANCH_MAX_TOTAL_POINTS) {
-        edit_reason(reason, cap, "Split: the course and its forks would pass 64 points");
+    if (ringCount + edit_total_nodes() + interior > GDX_COURSE_EDIT_POINT_LIMIT) {
+        edit_reason(reason, cap, "Split: the course and its forks exceed the point budget");
         return GDX_BRANCH_ERR_TOTAL;
     }
     return GDX_BRANCH_OK;

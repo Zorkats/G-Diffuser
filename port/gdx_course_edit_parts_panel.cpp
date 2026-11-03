@@ -20,6 +20,7 @@
 #include "gdx_course_branch_edit.h"
 #include "gdx_course_branch_editor.h"
 #include "gdx_course_edit_input.h"
+#include "gdx_track_recovery_runtime.h"
 #include "gdx_course_settings.h"
 #include <imgui.h>
 
@@ -45,6 +46,9 @@ bool sWantsMouse = false;
 bool sEditOpen = false;
 
 bool PanelAllowed() {
+    if (gdx_recovery_blocks_writes()) {
+        return false;
+    }
     if (CVarGetInteger("gEnhancements.CourseEdit.PartSettingsPanel", 1) == 0) {
         return false;
     }

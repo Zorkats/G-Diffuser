@@ -22,9 +22,9 @@ static void test_one_shot_actions(void) {
     assert(gdx_course_edit_input_take_drag_cancel() == 1);
     assert(gdx_course_edit_input_take_drag_cancel() == 0);
 
-    gdx_course_edit_input_request_delete(3, 4);
-    assert(gdx_course_edit_input_take_delete(3, 4) == 1);
-    assert(gdx_course_edit_input_take_delete(3, 4) == 0);
+    gdx_course_edit_input_request_delete(gdx_course_mask_low(3), 4);
+    assert(gdx_course_edit_input_take_delete(gdx_course_mask_low(3), 4) == 1);
+    assert(gdx_course_edit_input_take_delete(gdx_course_mask_low(3), 4) == 0);
 
     gdx_course_edit_input_request_line_up();
     assert(gdx_course_edit_input_take_line_up() == 1);
@@ -65,7 +65,7 @@ static void test_clear_drops_stale_commands(void) {
     gdx_course_edit_input_request_drag_start(1);
     gdx_course_edit_input_request_drag_commit();
     gdx_course_edit_input_request_drag_cancel();
-    gdx_course_edit_input_request_delete(3, 4);
+    gdx_course_edit_input_request_delete(gdx_course_mask_low(3), 4);
     gdx_course_edit_input_request_move_target(0, (GdxCourseEditVec3){ 1.0f, 2.0f, 3.0f });
     gdx_course_edit_input_request_scalar_target(2, 20);
     gdx_course_edit_input_request_line_up();
@@ -74,20 +74,20 @@ static void test_clear_drops_stale_commands(void) {
     assert(gdx_course_edit_input_take_drag_start(0) == 0);
     assert(gdx_course_edit_input_take_drag_commit() == 0);
     assert(gdx_course_edit_input_take_drag_cancel() == 0);
-    assert(gdx_course_edit_input_take_delete(3, 4) == 0);
+    assert(gdx_course_edit_input_take_delete(gdx_course_mask_low(3), 4) == 0);
     assert(gdx_course_edit_input_take_move_target(0, 0) == 0);
     assert(gdx_course_edit_input_take_scalar_target(0, 0) == 0);
     assert(gdx_course_edit_input_take_line_up() == 0);
 }
 
 static void test_delete_selection_validation(void) {
-    gdx_course_edit_input_request_delete(3, 4);
-    assert(!gdx_course_edit_input_take_delete(1, 4));
-    assert(!gdx_course_edit_input_take_delete(3, 4));
-    gdx_course_edit_input_request_delete(3, 4);
-    assert(!gdx_course_edit_input_take_delete(3, 5));
-    gdx_course_edit_input_request_delete(0, 4);
-    assert(!gdx_course_edit_input_take_delete(0, 4));
+    gdx_course_edit_input_request_delete(gdx_course_mask_low(3), 4);
+    assert(!gdx_course_edit_input_take_delete(gdx_course_mask_low(1), 4));
+    assert(!gdx_course_edit_input_take_delete(gdx_course_mask_low(3), 4));
+    gdx_course_edit_input_request_delete(gdx_course_mask_low(3), 4);
+    assert(!gdx_course_edit_input_take_delete(gdx_course_mask_low(3), 5));
+    gdx_course_edit_input_request_delete(gdx_course_mask_low(0), 4);
+    assert(!gdx_course_edit_input_take_delete(gdx_course_mask_low(0), 4));
 }
 
 static void test_test_run_escape_edges(void) {
@@ -138,7 +138,7 @@ static void test_drag_cancellation_keeps_other_intents(void) {
     GdxCourseEditInt32 point;
     GdxCourseEditInt32 toggle;
     gdx_course_edit_input_request_selection(63, 1);
-    gdx_course_edit_input_request_delete(3, 4);
+    gdx_course_edit_input_request_delete(gdx_course_mask_low(3), 4);
     gdx_course_edit_input_request_drag_start(1);
     assert(gdx_course_edit_input_drag_start_pending());
     gdx_course_edit_input_clear_drag();
@@ -146,7 +146,7 @@ static void test_drag_cancellation_keeps_other_intents(void) {
     assert(gdx_course_edit_input_take_selection(&point, &toggle));
     assert(point == 63 && toggle == 1);
     assert(!gdx_course_edit_input_take_selection(&point, &toggle));
-    assert(gdx_course_edit_input_take_delete(3, 4));
+    assert(gdx_course_edit_input_take_delete(gdx_course_mask_low(3), 4));
     gdx_course_edit_input_request_selection(1, 0);
     gdx_course_edit_input_clear();
     assert(!gdx_course_edit_input_take_selection(&point, &toggle));
@@ -392,7 +392,38 @@ static void test_tool_clear_preserves_panel_intents(void) {
     assert(!gdx_course_edit_input_take_extra(&taken));
 }
 
+static void test_wide_selection_masks(void) {
+    GdxCourseEditMask mask = gdx_course_mask_low(0);
+    GdxCourseEditMask taken;
+    const int points[] = { 0, 63, 64, 100, 126 };
+    int i;
+
+    for (i = 0; i < 5; i++) {
+        mask = gdx_course_mask_union(mask, gdx_course_mask_bit(points[i]));
+    }
+    for (i = 0; i < 127; i++) {
+        assert(gdx_course_mask_test(mask, i) == (i == 0 || i == 63 || i == 64 || i == 100 || i == 126));
+    }
+    assert(gdx_course_mask_empty(gdx_course_mask_bit(-1)));
+    assert(gdx_course_mask_empty(gdx_course_mask_bit(127)));
+    assert(!gdx_course_mask_test(gdx_course_mask_all(), 127));
+    gdx_course_edit_input_clear();
+    gdx_course_edit_input_request_delete(mask, 5);
+    assert(gdx_course_edit_input_take_delete(mask, 5));
+    assert(!gdx_course_edit_input_take_delete(mask, 5));
+    gdx_course_edit_input_request_delete(mask, 5);
+    assert(!gdx_course_edit_input_take_delete(gdx_course_mask_low(mask.words[0]), 5));
+    gdx_course_edit_input_request_selection_add_mask(mask);
+    gdx_course_edit_input_request_selection_add_mask(gdx_course_mask_bit(65));
+    assert(gdx_course_edit_input_take_selection_add_mask(&taken));
+    assert(gdx_course_mask_test(taken, 65) && gdx_course_mask_test(taken, 126));
+    gdx_course_edit_input_request_selection_add_mask(mask);
+    gdx_course_edit_input_clear();
+    assert(!gdx_course_edit_input_take_selection_add_mask(&taken));
+}
+
 int main(void) {
+    test_wide_selection_masks();
     test_tool_clear_preserves_panel_intents();
     test_absolute_scalar_values();
     test_path_requests();

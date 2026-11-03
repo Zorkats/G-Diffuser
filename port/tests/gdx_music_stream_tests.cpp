@@ -3,6 +3,7 @@
 // stub and a stub for the decomp fade getter, so only the decoders and the module are exercised.
 
 #include "gdx_music_stream.h"
+#include "gdx_audio_mix.h"
 #include "third_party/music_decoders/decoders.h"
 
 #include <cstdint>
@@ -18,6 +19,10 @@ extern "C" int CVarGetInteger(const char* name, int defaultValue) {
 
 // Defined in decomp/src/audio/disk/external.c; the test runs at full stock fade.
 extern "C" float Audio_PortBgmStreamFade(void) {
+    return 1.0f;
+}
+
+extern "C" float Audio_PortBgmPreviewGain(void) {
     return 1.0f;
 }
 
@@ -142,6 +147,20 @@ void expectKey(int bgmId, const char* expected) {
     }
 }
 
+void testStreamMuteScale() {
+    gdx_audio_seq_player_stream_mute(0);
+    CHECK_EQ(gdx_audio_seq_player_scale(1), 1.0f);
+    gdx_audio_seq_player_stream_mute(1);
+    CHECK_EQ(gdx_audio_seq_player_scale_changed(1), 1);
+    CHECK_EQ(gdx_audio_seq_player_scale(1), 0.0f);
+    CHECK_EQ(gdx_audio_seq_player_scale(0), 1.0f);
+    CHECK_EQ(gdx_audio_seq_player_scale(2), 1.0f);
+    CHECK_EQ(gdx_audio_music_slider_scale(), 1.0f);
+    gdx_audio_seq_player_stream_mute(0);
+    CHECK_EQ(gdx_audio_seq_player_scale_changed(1), 1);
+    CHECK_EQ(gdx_audio_seq_player_scale(1), 1.0f);
+}
+
 void testBgmKeys() {
     expectKey(0, "bgm_mute_city");
     expectKey(14, "bgm_title");
@@ -161,6 +180,7 @@ int main() {
     testNoLoopTagsLoopWholeFile();
     testLoopWrapPastLoopEnd();
     testBgmKeys();
+    testStreamMuteScale();
 
     if (sFailures == 0) {
         std::printf("gdx_music_stream_tests: all checks passed\n");

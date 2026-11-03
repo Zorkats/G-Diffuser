@@ -3,6 +3,7 @@
 #include "gdx_course_settings_view.h"
 
 #include "gdx_course_settings.h"
+#include "gdx_course_branch_view.h"
 
 #include <string.h>
 
@@ -12,7 +13,22 @@ typedef char GdxSettingsViewLavaNeverMatches[(GDX_SETTINGS_VIEW_LAVA_NEVER_KILLS
 static const GdxPointExtras* view_point(int point) {
     const GdxCourseSettings* settings = gdx_settings_active();
 
-    if ((settings == NULL) || (point < 0) || (point >= settings->ringCount)) {
+    if (point >= GDX_BRANCH_SETTINGS_BASE) {
+        const GdxBranchSet* branches = gdx_branch_active_set();
+        int slot = point - GDX_BRANCH_SETTINGS_BASE;
+        int fork = slot / GDX_BRANCH_SETTINGS_STRIDE;
+        int node = slot % GDX_BRANCH_SETTINGS_STRIDE - 1;
+
+        if (branches == NULL || fork >= branches->forkCount || node >= branches->forks[fork].nodeCount) {
+            return NULL;
+        }
+        if (node == -1) {
+            return (branches->forks[fork].flags & GDX_BRANCH_FLAG_FIRST_VALUES) ?
+                       &branches->forks[fork].firstExtras : NULL;
+        }
+        return settings != NULL ? &settings->nodes[fork][node] : NULL;
+    }
+    if (settings == NULL || point < 0 || point >= settings->ringCount) {
         return NULL;
     }
     return &settings->ring[point];
@@ -79,8 +95,10 @@ float gdx_settings_view_magnet_strength(int point) {
     const GdxPointExtras* extras = view_point(point);
     int stored = 0;
 
-    if (settings != NULL) {
-        stored = ((extras != NULL) && (extras->magnetStrength != 0)) ? extras->magnetStrength : settings->magnetStrength;
+    if (extras != NULL && extras->magnetStrength != 0) {
+        stored = extras->magnetStrength;
+    } else if (settings != NULL) {
+        stored = settings->magnetStrength;
     }
     return (float) stored / GDX_SETTINGS_STRENGTH_SCALE;
 }
@@ -89,8 +107,8 @@ float gdx_settings_view_magnet_range(int point) {
     const GdxCourseSettings* settings = gdx_settings_active();
     const GdxPointExtras* extras = view_point(point);
 
-    if (settings == NULL) {
-        return 0.0f;
+    if (extras != NULL && extras->magnetRange != 0) {
+        return (float) extras->magnetRange;
     }
-    return (float) (((extras != NULL) && (extras->magnetRange != 0)) ? extras->magnetRange : settings->magnetRange);
+    return settings != NULL ? (float) settings->magnetRange : 0.0f;
 }

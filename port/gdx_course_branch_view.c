@@ -140,3 +140,45 @@ int gdx_branch_view_node(int fork, int node, float pos[3], short* radiusLeft, sh
     *bankAngle = point->bankAngle;
     return 1;
 }
+
+int gdx_branch_view_part(int fork, int node, int part, int fallback) {
+    const GdxBranchFork* data = view_fork(fork);
+    const GdxBranchNode* value;
+
+    if (data == NULL || part < 0 || part >= 9) {
+        return fallback;
+    }
+    if (node == -1) {
+        if (part >= 6) {
+            return -1;
+        }
+        return (data->flags & GDX_BRANCH_FLAG_FIRST_VALUES) ? data->firstParts[part] : fallback;
+    }
+    if (node < 0 || node >= data->nodeCount) {
+        return fallback;
+    }
+    value = &data->nodes[node];
+    switch (part) {
+        case 0: return value->pit;
+        case 1: return value->dash;
+        case 2: return value->dirt;
+        case 3: return value->ice;
+        case 4: return value->jump;
+        case 5: return value->landmine;
+        case 6: return value->gate;
+        case 7: return value->building;
+        default: return value->sign;
+    }
+}
+
+int gdx_branch_view_settings_point(int fork, int node) {
+    const GdxBranchFork* data = view_fork(fork);
+
+    if (data == NULL || node < -1 || node >= data->nodeCount) {
+        return -1;
+    }
+    if (node == -1 && !(data->flags & GDX_BRANCH_FLAG_FIRST_VALUES)) {
+        return data->forkPoint;
+    }
+    return GDX_BRANCH_SETTINGS_BASE + fork * GDX_BRANCH_SETTINGS_STRIDE + node + 1;
+}

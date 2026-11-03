@@ -1,6 +1,5 @@
 #include "gdx_track_recovery_runtime.h"
 #include "gdx_content_window.h"
-#include "gdx_machine_capture_runtime.h"
 
 #include <imgui.h>
 #include <imgui_internal.h> // ImStristr — case-insensitive substring search for the filter
@@ -163,32 +162,15 @@ void GdxContentWindow::LoadTrackPreview(int row) {
         return;
     }
 
-    // CourseData stores count at byte 1 and its control-point array at 0x20. Each point begins
-    // with its 3D position (three floats) and has a 0x14-byte stride in the on-disk context.
-    const int count = static_cast<int8_t>(payload[1]);
-    if (count < 2 || count > 64) {
+    GdxBranchSet storedForks{};
+    const int count = gdx_content_track_preview(mEntries[row].name, payload, mTrackPreviewX,
+                                                 mTrackPreviewZ, GDX_COURSE_POINT_CAPACITY, &storedForks);
+    if (count < 2) {
         return;
     }
-    for (int i = 0; i < count; i++) {
-        const size_t pointOffset = 0x20u + static_cast<size_t>(i) * 0x14u;
-        memcpy(&mTrackPreviewX[i], payload + pointOffset, sizeof(float));
-        memcpy(&mTrackPreviewZ[i], payload + pointOffset + 8u, sizeof(float));
-        if (!std::isfinite(mTrackPreviewX[i]) || !std::isfinite(mTrackPreviewZ[i])) {
-            return;
-        }
-    }
     mTrackPreviewCount = count;
-
-    char courseId[GDX_COURSE_FILE_ID_MAX + 1];
-    snprintf(courseId, sizeof(courseId), "%s.%s", mEntries[row].name, mEntries[row].extension);
     mPreviewForks = CVarGetInteger("gEnhancements.CourseEdit.ForkMinimap", 0) != 0;
-    GdxBranchSet storedForks;
-    uint32_t courseChecksum;
-    memcpy(&courseChecksum, payload + 4, sizeof(courseChecksum));
-    const GdxBranchSet* forks = gdx_branch_store_get(courseId, &storedForks) ? &storedForks : nullptr;
-    if (forks && forks->courseChecksum != courseChecksum) {
-        forks = nullptr;
-    }
+    const GdxBranchSet* forks = storedForks.forkCount ? &storedForks : nullptr;
     mSplineCount = gdx_course_preview_build(mTrackPreviewX, mTrackPreviewZ, count, forks, mPreviewForks,
                                             mSplineX, mSplineZ, mSplineNext, kSplineMax);
     if (mSplineCount == 0) {
@@ -870,7 +852,6 @@ void GdxContentWindow::DrawElement() {
     }
 
     DrawImportSection(busy || gdx_recovery_persistence_busy(), inGameplay);
-    GdxMachineCapture_DrawExports();
 
     // ── Advanced Sources (collapsible accordions) ────────────────────────────────────────────────
     DrawImageImportSection(busy, inGameplay);
@@ -1172,8 +1153,9 @@ void GdxContentWindow::OpenDiskImage(const char* path) {
         if (rc != GDX_MFSIMG_OK) {
             row.errors = GDX_IMPORT_ERR_IO;
         } else {
-            gdx_content_import_validate_payload(entry.name, entry.extension, GdxImageContentType(entry), payload,
-                                                entry.fileSize, &row);
+            gdx_content_import_validate_foreign_payload(
+                entry.name, entry.extension, GdxImageContentType(entry), payload, entry.fileSize,
+                entry.sourceBigEndian ? GDX_FOREIGN_BIG_ENDIAN : GDX_FOREIGN_HOST_ORDER, &row);
         }
         free(payload);
     }
@@ -1547,6 +1529,21 @@ void GdxContentWindow::DrawImageImportSection(bool busy, bool inGameplay) {
             ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "Rejected");
             ImGui::TextWrapped("%s", errors);
         }
+        if (row.errors & GDX_IMPORT_ERR_TRACK_CREATOR) {
+            ImGui::TextWrapped("Creator %d; expected 4 (Nintendo).", row.foreign.creator);
+        }
+        if (row.foreign.present && ImGui::TreeNode("Import diagnostics")) {
+            const GdxForeignCourseDiagnostic& info = row.foreign;
+            ImGui::TextWrapped("Image kind %d; entry %u; payload %d bytes; first block offset %lld.",
+                               entry.sourceKind, entry.entryId, entry.fileSize, (long long) entry.payloadOffset);
+            ImGui::TextWrapped("Encoding: %s. Raw creator/count: %d/%d; decoded: %d/%d.",
+                               info.encoding == GDX_FOREIGN_BIG_ENDIAN ? "big-endian" : "host order",
+                               info.rawCreator, info.rawCount, info.creator, info.count);
+            ImGui::TextWrapped("Checksum stored %08X, computed %08X (%s); errors %08X; repaired pits %d.",
+                               info.storedChecksum, info.computedChecksum,
+                               info.checksumChecked ? "checked" : "unavailable", row.errors, info.sanitizedPits);
+            ImGui::TreePop();
+        }
         if (row.warnings != 0) {
             char warnings[256];
             gdx_content_import_format_warnings(row.warnings, warnings, sizeof(warnings));
@@ -1566,14 +1563,14 @@ void GdxContentWindow::DrawImageImportSection(bool busy, bool inGameplay) {
                 if (payload == nullptr) {
                     snprintf(mStatus, sizeof(mStatus), "Out of memory reading '%s' from the image.", entry.name);
                 } else {
-                    int readRc = gdx_mfsimg_read_file(mDiskImage, entry.entryId, payload, entry.fileSize);
+                    int readRc = gdx_mfsimg_read_file_current(mDiskImage, entry.entryId, payload, entry.fileSize);
                     if (readRc != GDX_MFSIMG_OK) {
                         snprintf(mStatus, sizeof(mStatus), "Could not read '%s' from the image: %s.", entry.name,
                                  gdx_mfsimg_strerror(readRc));
                     } else {
-                        int irc = gdx_content_import_begin_payload(entry.name, entry.extension,
-                                                                   GdxImageContentType(entry), payload,
-                                                                   entry.fileSize);
+                        int irc = gdx_content_import_begin_foreign_payload(
+                            entry.name, entry.extension, GdxImageContentType(entry), payload, entry.fileSize,
+                            entry.sourceBigEndian ? GDX_FOREIGN_BIG_ENDIAN : GDX_FOREIGN_HOST_ORDER);
                         if (irc == GDX_CONTENT_OK) {
                             // The shared completion poll in DrawImportSection reports and refreshes.
                             mImportWaiting = true;

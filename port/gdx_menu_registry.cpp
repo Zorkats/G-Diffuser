@@ -40,6 +40,7 @@
 
 #include "gdx_menu.h"
 #include "gdx_menu_internal.h"
+#include "gdx_machine_capture_runtime.h"
 
 #include <imgui.h>
 
@@ -1742,7 +1743,7 @@ void GdxMenu::RegisterMenu() {
                           .type = GdxUI::WIDGET_CVAR_CHECKBOX }
                   .Options(UIWidgets::CheckboxOptions().DefaultValue(true).Tooltip(
                       "Plays a replacement file for each BGM when one exists: music/<bgm key>.ogg, .flac or "
-                      ".wav beside the game, or in mods/music/. Example: music/bgm_title.ogg.\n"
+                      ".wav beside the game. Example: music/bgm_title.ogg. Legacy mods/music/ is a fallback.\n"
                       "Off = stock music only."))
                   .ModifiedMarker()
                   .SearchTerms("custom replacement stream streamed music bgm soundtrack file ogg flac wav"));
@@ -2386,6 +2387,16 @@ void GdxMenu::RegisterMenu() {
                       "Part widths are the course's shape and still apply."))
                   .ModifiedMarker()
                   .SearchTerms("course track settings lava magnet override ignore menu"));
+
+    AddWidget("Enhancements", "Gameplay", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "CPU track-hazard avoidance", .cVar = "gEnhancements.Gameplay.CpuTrackHazards",
+                          .type = GdxUI::WIDGET_CVAR_CHECKBOX }
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(false).Tooltip(
+                      "CPUs account for actual dirt, ice, lava widths and magnet pull ranges on roads.\n"
+                      "Uses the nearest safe target when one exists; full-width hazards remain unavoidable.\n"
+                      "Off preserves native avoidance. Does not add CPU lane switching."))
+                  .ModifiedMarker()
+                  .SearchTerms("cpu ai width range lava dirt ice magnet avoidance"));
 
     // Save GP in progress: resumes the GP cup saved at the last race boundary (port/gdx_gp_resume.h).
     AddWidget("Enhancements", "Gameplay", SECTION_COLUMN_1,
@@ -3074,6 +3085,11 @@ void GdxMenu::RegisterMenu() {
     // ═════════════════════════════════════════════════════════════════════════════════════════
     // WORKSHOP -> Tools
     // ═════════════════════════════════════════════════════════════════════════════════════════
+    AddWidget("Workshop", "Tools", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Native machine models", .type = GdxUI::WIDGET_CUSTOM }
+                  .CustomFunction([](WidgetInfo&) { GdxMachineCapture_DrawExports(); })
+                  .SearchTerms("machine native capture export obj gltf model textures"));
+
     AddWidget("Workshop", "Tools", SECTION_COLUMN_1,
               WidgetInfo{ .name = "Asset Dump", .type = GdxUI::WIDGET_SEPARATOR_TEXT });
     AddWidget("Workshop", "Tools", SECTION_COLUMN_1,

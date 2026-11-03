@@ -11,14 +11,16 @@
 // then bumps the epoch, and the mixer rewinds `consumed` to the base on the first call that sees the
 // new epoch. Frames from the old stream sit below the base and are never played.
 //
-// GAIN. Each output buffer is scaled by the Music slider times the raw seq player 1 fade, read as
+// GAIN. Native replacements follow the Music slider and raw seq player 1 fade, read as
 // fadeVolume x fadeVolumeScale through Audio_PortBgmStreamFade. The stock fade-out on
 // Audio_DDBgmStop and the pause ducking therefore reach the stream. Draining ends when that fade
-// reaches zero or after a 4 s timeout.
+// reaches zero or after a 4 s timeout. Explicit editor previews instead follow pause gain, because
+// the editor may have disabled the native player before requesting a preview.
 
 #include "gdx_music_stream.h"
 
 #include "gdx_audio_mix.h"
+#include "gdx_music_files.h"
 #include "port_log.h"
 #include "third_party/music_decoders/decoders.h"
 
@@ -42,6 +44,7 @@ extern "C" int CVarGetInteger(const char* name, int defaultValue);
 // Defined in decomp/src/audio/disk/external.c under PORT. The raw seq player 1 fade, or 0 when the
 // player is disabled. Called on the audio thread.
 extern "C" float Audio_PortBgmStreamFade(void);
+extern "C" float Audio_PortBgmPreviewGain(void);
 
 namespace {
 
@@ -50,19 +53,11 @@ constexpr uint64_t kRingMask = kRingFrames - 1;
 constexpr uint64_t kChunkFrames = 2048;
 constexpr double kPrefillSeconds = 0.25;
 constexpr double kDrainTimeoutSeconds = 4.0;
-constexpr int kBgmNone = 99;
-constexpr int kBgmNamedCount = 30;
+using gdx::music::kBgmNone;
+using gdx::music::kBgmNamedCount;
 constexpr const char* kStreamedMusicCVar = "gEnhancements.Audio.StreamedMusic";
 
-// Keys for the named BGM ids, from decomp/include/sfx.h. Other ids use "bgm_%02x".
-const char* const kBgmNames[kBgmNamedCount] = {
-    "bgm_mute_city",   "bgm_silence",     "bgm_sand_ocean",    "bgm_port_town",  "bgm_big_blue",
-    "bgm_devils_forest", "bgm_red_canyon", "bgm_sector",       "bgm_white_land", "bgm_rainbow_road",
-    "bgm_new_03",      "bgm_new_02",      "bgm_new_01",        "bgm_new_04",     "bgm_title",
-    "bgm_select",      "bgm_option",      "bgm_deathrace",     "bgm_course_editor", "bgm_machine_editor",
-    "bgm_ead_demo",    "bgm_21",          "bgm_22",            "bgm_23",         "bgm_24",
-    "bgm_gameover",    "bgm_end_cs",      "bgm_credits",       "bgm_demo",       "bgm_deathrace2",
-};
+using gdx::music::kBgmNames;
 
 enum StreamState : int {
     kIdle = 0,
@@ -83,10 +78,14 @@ struct Shared {
     std::atomic<uint64_t> consumed{ 0 };   // audio thread only
     std::atomic<uint64_t> sessionBase{ 0 }; // worker, stored before the epoch bump
     std::atomic<uint32_t> epoch{ 0 };
+    std::atomic<uint64_t> request{ 0 };
+    std::atomic<bool> preview{ false };
+    std::atomic<bool> mixing{ false };
 
     std::mutex mutex;
     std::condition_variable cv;
     bool hasPending = false;        // guarded by mutex
+    bool pendingPreview = false;
     std::string pendingPath;        // guarded by mutex
     std::string pendingLabel;       // guarded by mutex
     std::atomic<bool> pendingFlag{ false }; // mirror of hasPending for the worker's poll
@@ -103,6 +102,7 @@ struct Session {
     GdxMusicDecoder* dec = nullptr;
     GdxMusicInfo info{};
     uint64_t pos = 0;
+    uint64_t request = 0;
     std::string label;
     std::vector<float> raw;
 };
@@ -152,43 +152,50 @@ void closeSession() {
 
 // Ends the stream after a decode failure. A request that arrived meanwhile owns the state word, so it
 // is left alone.
-void failStream(const char* name, const char* why) {
+void failStream(const char* name, const char* why, uint64_t request) {
     Shared& s = shared();
+    gdx_port_logf("[music] stream %s stopped: %s\n", name, why);
     closeSession();
     {
         std::lock_guard<std::mutex> lk(s.mutex);
-        if (!s.hasPending) {
+        if (s.request.load(std::memory_order_acquire) == request) {
             s.state.store(kIdle, std::memory_order_release);
             gdx_audio_seq_player_stream_mute(0);
         }
     }
-    gdx_port_logf("[music] stream %s stopped: %s\n", name, why);
 }
 
-void openSession(const std::string& path, const std::string& label) {
+void openSession(const std::string& path, const std::string& label, uint64_t request, bool preview) {
     Shared& s = shared();
     Session& ss = session();
     GdxMusicInfo info;
     GdxMusicDecoder* dec = gdx_music_decoder_open(path.c_str(), &info);
 
     if (dec == nullptr) {
-        failStream(label.c_str(), "file could not be decoded");
+        failStream(label.c_str(), "file could not be decoded", request);
         return;
     }
     if (info.sampleRate == 0 || info.totalFrames == 0 || info.loopEnd <= info.loopStart ||
         info.loopEnd > info.totalFrames) {
         gdx_music_decoder_close(dec);
-        failStream(label.c_str(), "file has no usable length");
+        failStream(label.c_str(), "file has no usable length", request);
+        return;
+    }
+    std::lock_guard<std::mutex> lk(s.mutex);
+    if (s.request.load(std::memory_order_acquire) != request) {
+        gdx_music_decoder_close(dec);
         return;
     }
     ss.dec = dec;
     ss.info = info;
     ss.pos = 0;
+    ss.request = request;
     ss.label = label;
     ss.raw.assign(kChunkFrames * 2, 0.0f);
 
     s.sourceRate.store(info.sampleRate, std::memory_order_release);
     s.sessionBase.store(s.written.load(std::memory_order_relaxed), std::memory_order_release);
+    s.preview.store(preview, std::memory_order_release);
     s.epoch.fetch_add(1, std::memory_order_release);
 }
 
@@ -199,7 +206,8 @@ void produceFrames() {
     Session& ss = session();
     const uint32_t ch = ss.info.channels;
 
-    while (ss.dec != nullptr && !s.pendingFlag.load(std::memory_order_acquire)) {
+    while (ss.dec != nullptr && s.request.load(std::memory_order_acquire) == ss.request &&
+           !s.pendingFlag.load(std::memory_order_acquire)) {
         const uint64_t w = s.written.load(std::memory_order_relaxed);
         const uint64_t c = s.consumed.load(std::memory_order_acquire);
         const uint64_t base = std::max(c, s.sessionBase.load(std::memory_order_relaxed));
@@ -211,11 +219,14 @@ void produceFrames() {
         n = std::min<uint64_t>(n, ss.info.loopEnd - ss.pos);
 
         const uint64_t got = gdx_music_decoder_read(ss.dec, ss.raw.data(), n);
+        if (s.request.load(std::memory_order_acquire) != ss.request) {
+            return;
+        }
         if (got == 0) {
             // Either the file ended early or the decoder stalled. Restart at the loop start once; if
             // the read is still empty there, the file is unusable.
             if (ss.pos == ss.info.loopStart || !gdx_music_decoder_seek(ss.dec, ss.info.loopStart)) {
-                failStream(ss.label.c_str(), "decoder stalled");
+                failStream(ss.label.c_str(), "decoder stalled", ss.request);
                 return;
             }
             ss.pos = ss.info.loopStart;
@@ -233,7 +244,7 @@ void produceFrames() {
         ss.pos += got;
         if (ss.pos >= ss.info.loopEnd) {
             if (!gdx_music_decoder_seek(ss.dec, ss.info.loopStart)) {
-                failStream(ss.label.c_str(), "loop seek failed");
+                failStream(ss.label.c_str(), "loop seek failed", ss.request);
                 return;
             }
             ss.pos = ss.info.loopStart;
@@ -241,51 +252,95 @@ void produceFrames() {
     }
 }
 
-void workerMain() {
+void workerTick(bool wait) {
     Shared& s = shared();
-    for (;;) {
-        std::string path;
-        std::string label;
-        bool haveRequest = false;
-        {
-            std::unique_lock<std::mutex> lk(s.mutex);
-            s.cv.wait_for(lk, std::chrono::milliseconds(5), [&s] { return s.hasPending; });
-            if (s.hasPending) {
-                path.swap(s.pendingPath);
-                label.swap(s.pendingLabel);
-                s.hasPending = false;
-                s.pendingFlag.store(false, std::memory_order_release);
-                haveRequest = true;
+    std::string path;
+    std::string label;
+    bool haveRequest = false;
+    bool preview = false;
+    uint64_t request = 0;
+    {
+        std::unique_lock<std::mutex> lk(s.mutex);
+        if (wait) {
+            s.cv.wait_for(lk, std::chrono::milliseconds(5), [&s] {
+                return s.hasPending && !s.mixing.load(std::memory_order_seq_cst);
+            });
+        }
+        if (s.hasPending) {
+            if (s.mixing.load(std::memory_order_seq_cst)) {
+                return;
             }
+            path.swap(s.pendingPath);
+            label.swap(s.pendingLabel);
+            preview = s.pendingPreview;
+            request = s.request.load(std::memory_order_acquire);
+            s.hasPending = false;
+            s.pendingFlag.store(false, std::memory_order_release);
+            haveRequest = true;
         }
-        if (haveRequest) {
-            closeSession();
-            openSession(path, label);
-            continue;
-        }
+    }
+    if (haveRequest) {
+        closeSession();
+        openSession(path, label, request, preview);
+        return;
+    }
 
-        Session& ss = session();
-        if (ss.dec == nullptr) {
-            continue;
-        }
+    Session& ss = session();
+    if (ss.dec == nullptr) {
+        return;
+    }
+    if (s.state.load(std::memory_order_acquire) == kIdle ||
+        s.request.load(std::memory_order_acquire) != ss.request) {
+        closeSession();
+        std::lock_guard<std::mutex> lk(s.mutex);
         if (s.state.load(std::memory_order_acquire) == kIdle) {
-            closeSession();
-            continue;
+            gdx_audio_seq_player_stream_mute(0);
         }
+        return;
+    }
 
-        produceFrames();
+    produceFrames();
 
-        if (ss.dec != nullptr && s.state.load(std::memory_order_acquire) == kLoading) {
-            const uint64_t prefill = static_cast<uint64_t>(kPrefillSeconds * s.sourceRate.load(std::memory_order_acquire));
-            const uint64_t ready = s.written.load(std::memory_order_acquire) - s.sessionBase.load(std::memory_order_acquire);
-            if (ready >= prefill) {
-                std::lock_guard<std::mutex> lk(s.mutex);
-                if (s.state.load(std::memory_order_acquire) == kLoading && !s.hasPending) {
-                    s.state.store(kPlaying, std::memory_order_release);
-                }
+    if (ss.dec != nullptr && s.state.load(std::memory_order_acquire) == kLoading) {
+        const uint64_t prefill = static_cast<uint64_t>(kPrefillSeconds * s.sourceRate.load(std::memory_order_acquire));
+        const uint64_t ready = s.written.load(std::memory_order_acquire) - s.sessionBase.load(std::memory_order_acquire);
+        if (ready >= prefill) {
+            std::lock_guard<std::mutex> lk(s.mutex);
+            if (s.state.load(std::memory_order_acquire) == kLoading && !s.hasPending &&
+                s.request.load(std::memory_order_acquire) == ss.request) {
+                s.state.store(kPlaying, std::memory_order_release);
             }
         }
     }
+}
+
+void workerMain() {
+    for (;;) {
+        workerTick(true);
+    }
+}
+
+int queueStream(const char* path, const char* label, bool preview) {
+    if (path == nullptr || path[0] == '\0') {
+        return 0;
+    }
+    Shared& s = shared();
+#ifndef GDX_MUSIC_STREAM_TEST
+    std::call_once(s.workerOnce, [] { std::thread(workerMain).detach(); });
+#endif
+    {
+        std::lock_guard<std::mutex> lk(s.mutex);
+        s.request.fetch_add(1, std::memory_order_acq_rel);
+        s.pendingPath = path;
+        s.pendingLabel = label != nullptr ? label : path;
+        s.pendingPreview = preview;
+        s.hasPending = true;
+        s.pendingFlag.store(true, std::memory_order_release);
+        s.state.store(kLoading, std::memory_order_seq_cst);
+        gdx_audio_seq_player_stream_mute(1);
+    }
+    s.cv.notify_one();
+    return 1;
 }
 
 }  // namespace
@@ -310,25 +365,23 @@ extern "C" int gdx_music_stream_key_for_bgm(int bgmId, char* out, size_t outCap)
 }
 
 extern "C" int gdx_music_stream_find_file(int bgmId, char* outPath, size_t outCap) {
-    static const char* const kDirs[] = { "mods/music/", "music/" };
-    static const char* const kExts[] = { ".ogg", ".flac", ".wav" };
     char key[32];
     char candidate[1024];
 
     if (outPath == nullptr || outCap == 0 || gdx_music_stream_key_for_bgm(bgmId, key, sizeof key) == 0) {
         return 0;
     }
-    for (const char* dir : kDirs) {
-        for (const char* ext : kExts) {
-            const std::string rel = std::string(dir) + key + ext;
-            if (gdx_exe_relative_path(candidate, sizeof candidate, rel.c_str()) == nullptr) {
-                continue;
+    for (const char* dir : gdx::music::kReplacementFolders) {
+        if (gdx_exe_relative_path(candidate, sizeof candidate, dir) == nullptr) {
+            continue;
+        }
+        const std::string found = gdx::music::FindFile(candidate, key).string();
+        if (!found.empty()) {
+            if (found.size() >= outCap) {
+                return 0;
             }
-            std::error_code ec;
-            if (std::filesystem::is_regular_file(candidate, ec)) {
-                std::snprintf(outPath, outCap, "%s", candidate);
-                return 1;
-            }
+            std::snprintf(outPath, outCap, "%s", found.c_str());
+            return 1;
         }
     }
     return 0;
@@ -373,7 +426,7 @@ extern "C" void gdx_music_stream_bgm_start(int bgmId) {
 
     if (o.active && o.bgmId == bgmId && enabled) {
         gdx_port_logf("[music] BGM %s (id %d): course override %s\n", o.label, bgmId, o.path);
-        gdx_music_stream_play_file(o.path, o.label);
+        queueStream(o.path, o.label, false);
         return;
     }
 
@@ -383,7 +436,7 @@ extern "C" void gdx_music_stream_bgm_start(int bgmId) {
                   found ? path : (enabled ? "no file, stock track" : "streaming off, stock track"));
 
     if (found) {
-        gdx_music_stream_play_file(path, key);
+        queueStream(path, key, false);
         return;
     }
 
@@ -391,6 +444,7 @@ extern "C" void gdx_music_stream_bgm_start(int bgmId) {
     Shared& s = shared();
     std::lock_guard<std::mutex> lk(s.mutex);
     if (s.state.load(std::memory_order_acquire) != kIdle || s.hasPending) {
+        s.request.fetch_add(1, std::memory_order_acq_rel);
         s.hasPending = false;
         s.pendingFlag.store(false, std::memory_order_release);
         s.state.store(kIdle, std::memory_order_release);
@@ -403,10 +457,11 @@ extern "C" void gdx_music_stream_bgm_stop(void) {
     Shared& s = shared();
     std::lock_guard<std::mutex> lk(s.mutex);
     const int st = s.state.load(std::memory_order_acquire);
-    if (st == kPlaying) {
+    if (st == kPlaying && !s.preview.load(std::memory_order_acquire)) {
         // The audio thread keeps mixing, following the stock fade-out, until it reaches zero.
         s.state.store(kDraining, std::memory_order_release);
-    } else if (st == kLoading) {
+    } else if (st != kIdle) {
+        s.request.fetch_add(1, std::memory_order_acq_rel);
         s.hasPending = false;
         s.pendingFlag.store(false, std::memory_order_release);
         s.state.store(kIdle, std::memory_order_release);
@@ -415,22 +470,7 @@ extern "C" void gdx_music_stream_bgm_stop(void) {
 }
 
 extern "C" int gdx_music_stream_play_file(const char* path, const char* label) {
-    if (path == nullptr || path[0] == '\0') {
-        return 0;
-    }
-    Shared& s = shared();
-    std::call_once(s.workerOnce, [] { std::thread(workerMain).detach(); });
-    {
-        std::lock_guard<std::mutex> lk(s.mutex);
-        s.pendingPath = path;
-        s.pendingLabel = label != nullptr ? label : path;
-        s.hasPending = true;
-        s.pendingFlag.store(true, std::memory_order_release);
-        s.state.store(kLoading, std::memory_order_release);
-        gdx_audio_seq_player_stream_mute(1);
-    }
-    s.cv.notify_one();
-    return 1;
+    return queueStream(path, label, true);
 }
 
 extern "C" int gdx_music_stream_is_mixing(void) {
@@ -440,8 +480,18 @@ extern "C" int gdx_music_stream_is_mixing(void) {
 
 extern "C" int gdx_music_stream_mix_s16(int16_t* stereo, size_t frames, uint32_t deviceRate) {
     Shared& s = shared();
+    // A replacement cannot reuse the ring until an already-running callback has left it.
+    struct MixingGuard {
+        explicit MixingGuard(Shared& value) : shared(value) {
+            shared.mixing.store(true, std::memory_order_seq_cst);
+        }
+        ~MixingGuard() {
+            shared.mixing.store(false, std::memory_order_seq_cst);
+        }
+        Shared& shared;
+    } guard(s);
     MixState& m = mixState();
-    const int state = s.state.load(std::memory_order_acquire);
+    const int state = s.state.load(std::memory_order_seq_cst);
     const int prev = m.lastState;
     m.lastState = state;
 
@@ -466,7 +516,7 @@ extern "C" int gdx_music_stream_mix_s16(int16_t* stereo, size_t frames, uint32_t
         s.consumed.store(s.sessionBase.load(std::memory_order_acquire), std::memory_order_release);
     }
 
-    float fade = Audio_PortBgmStreamFade();
+    float fade = s.preview.load(std::memory_order_acquire) ? Audio_PortBgmPreviewGain() : Audio_PortBgmStreamFade();
     fade = std::min(1.0f, std::max(0.0f, fade));
 
     if (state == kDraining) {
@@ -474,9 +524,7 @@ extern "C" int gdx_music_stream_mix_s16(int16_t* stereo, size_t frames, uint32_t
         const bool timedOut = m.drainFrames >= static_cast<uint64_t>(kDrainTimeoutSeconds * deviceRate);
         if (fade <= 0.0f || timedOut) {
             int expected = kDraining;
-            if (s.state.compare_exchange_strong(expected, kIdle, std::memory_order_acq_rel)) {
-                gdx_audio_seq_player_stream_mute(0);
-            }
+            s.state.compare_exchange_strong(expected, kIdle, std::memory_order_acq_rel);
             return 0;
         }
     }

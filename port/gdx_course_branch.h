@@ -24,6 +24,18 @@
  * set for the editor and its test run) and builds ring 2. */
 void gdx_course_branch_on_course_init(void);
 
+s32 gdx_course_branch_gadget_count(s32 courseIndex);
+CourseSegment* gdx_course_branch_gadget_segment(s32 courseIndex, s32 index);
+s32 gdx_course_branch_gadget_source(s32 index);
+s32 gdx_course_branch_gadget_part(s32 index, s32 part, s32 fallback);
+s32 gdx_course_branch_settings_point(const CourseSegment* segment);
+f32 gdx_course_branch_gadget_next_t(const CourseSegment* segment, f32 t);
+s32 gdx_course_branch_gadget_chunk(const CourseSegment* segment, f32 t);
+s32 gdx_course_branch_gadget_chunk_visible(s32 encoded);
+s32 gdx_course_branch_gadget_adjacent(const CourseSegment* previous, const CourseSegment* current);
+SegmentChunk* gdx_course_branch_gadget_load_chunk(const CourseSegment* segment, const Vec3f* pos);
+void gdx_course_branch_sync_gadgets(void);
+
 /* End of Course_SegmentsInit, before the parts are built: picks the course's settings
  * (gdx_course_settings_view.h) and finds which control point race segment 0 came from. */
 void gdx_course_branch_on_segments_init(const CourseSegment* ring, s32 count);

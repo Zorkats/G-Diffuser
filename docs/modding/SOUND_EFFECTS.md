@@ -4,7 +4,8 @@
 
 Every sound in F-Zero X is a short recording, called a **sample**. A sample pack replaces samples
 by name: you give your WAV the same name as the stock recording, and the game plays yours instead.
-This is the same channel as [Custom music](CUSTOM_MUSIC.md). Songs are just very long samples.
+Native music recordings use this channel too. For complete songs, prefer
+[streamed custom music](CUSTOM_MUSIC.md), which does not need Python or the sample-pack budget.
 
 The loop is: **dump** the game's audio, **find** the sound, **export** your recording with the same
 name, **pack** it, and **install** it.
@@ -27,15 +28,26 @@ name, **pack** it, and **install** it.
 1. Press **F1** and open **Workshop > Tools > Asset Dump**.
 2. Tick **Audio Samples (WAV)**.
 3. Click **Dump selected**, then **Open dump folder**.
-4. Copy the whole `dump/` folder into the source folder, so that `dump/audio/` sits next to
-   `tools/`.
+4. Keep the complete audio dump, including font metadata. You can leave it beside the game;
+   copying it into the source folder is not required.
 
-The packer reads `dump/audio/` from the source folder. That is how it knows which names are valid
-and which rate each recording plays at. Without it, your audio plays at the wrong speed.
+Run the commands below in **PowerShell, from the source folder**, in the same session. Replace
+this example path with your game's actual `dump/audio/` directory:
+
+```powershell
+$DumpAudio = "C:/Games/G-Diffuser/dump/audio"
+```
+
+Every native names/check/build command uses that same path. Missing playback-rate metadata
+blocks packing. Keep the exact dumped key, including double underscores and the original bank
+offset/size; the size is not your replacement WAV's size. See
+[Music banks and sample keys](CUSTOM_MUSIC.md#read-a-sample-key) for the format and cartridge/EK
+distinction. A key appearing in a mixed dump does not prove the active game context uses it.
 
 ## Step 2: Find the sound
 
-Open `dump/audio/samples/`. Every file is one recording, and its name is its **key**:
+Open the selected dump's `samples/` directory. Each file is one recording, and its name is its
+**key**. These are cartridge-bank examples, not universal EK mappings:
 
 ```text
 SAMPLE_SOUND_EFFECTS__0x1CD20__4518.wav
@@ -48,8 +60,8 @@ until you find the one you want, and write down its key exactly.
 
 To list every valid key with its playback rate, run this from the source folder:
 
-```sh
-python tools/gen_sample_pack.py --names
+```powershell
+python tools/gen_sample_pack.py --names --dump-dir "$DumpAudio"
 ```
 
 ## Step 3: Export your recording
@@ -74,12 +86,14 @@ Your recording does not need to match the stock length.
 
 From the source folder, run:
 
-```sh
-python tools/gen_sample_pack.py my-sounds my-sounds.o2r --name "My Sounds" --author <your-name>
-python tools/gen_sample_pack.py my-sounds.o2r --check
+```powershell
+python tools/gen_sample_pack.py my-sounds my-sounds.o2r --name "My Sounds" --author "Your Name" --dump-dir "$DumpAudio"
+python tools/gen_sample_pack.py my-sounds.o2r --check --dump-dir "$DumpAudio"
 ```
 
-The second command validates the finished pack. It ends with `OK` when the pack is good.
+Replace the quoted author value with your name. The second command validates the finished pack
+and ends with `OK` on success. Read the accepted/skipped/failed counts: if all WAVs are skipped,
+the build fails and creates no archive. Do not install stale output from an earlier build.
 
 ## Step 5: Install it
 
@@ -111,25 +125,30 @@ shows how to measure and write it.
 ## If something goes wrong
 
 **`--check` says my pack has raw `.wav` files.**
-The pack was made by zipping WAVs instead of with the packer, so the game ignores it. The check
-prints the exact commands to convert it. They are:
+The pack was made by zipping WAVs instead of with the packer, so the game ignores it. Extract
+only an archive you trust into a new empty folder, then convert and check it using the same dump:
 
-```sh
+```powershell
 python -m zipfile -e old-pack.o2r old-pack-wavs
-python tools/gen_sample_pack.py old-pack-wavs old-pack-samples.o2r --name "My Sounds"
-python tools/gen_sample_pack.py old-pack-samples.o2r --check
+python tools/gen_sample_pack.py old-pack-wavs old-pack-samples.o2r --name "My Sounds" --dump-dir "$DumpAudio"
+python tools/gen_sample_pack.py old-pack-samples.o2r --check --dump-dir "$DumpAudio"
 ```
 
 If the WAVs were inside a subfolder of the old pack, move them up to the top of `old-pack-wavs`
 before the second command. Then put `old-pack-samples.o2r` in `mods/` in place of the old pack.
+
+**A filename is skipped.**
+Copy the entire key from `--names`; do not replace its stock size with your WAV size. A unique
+known match may produce a suggestion, but the packer never renames the WAV or its `.loop.json`.
+Known samples left as stock are informational; missing rate metadata is a blocking error.
 
 **Nothing changed.**
 Check that **Enable sample packs** is ticked, that your pack is ticked, and that each WAV name is
 an exact key from step 2. Then start a new race.
 
 **The sound plays too fast or too slow.**
-The `dump/` folder was missing from the source folder when you built the pack. Copy it in
-(step 1) and rebuild.
+Rebuild with the matching dump selected by `--dump-dir` (step 1). Older packers guessed
+the playback rate when metadata was missing; current packers refuse that case.
 
 **Some replacements work and others do not.**
 The 1 MiB budget is full. Shorten your recordings or remove other sample packs.
@@ -141,15 +160,15 @@ and it says when sample packs are installed but **Enable sample packs** is off. 
 
 ## Quick reference
 
-```sh
+```powershell
 # Dump:    F1 > Workshop > Tools > Asset Dump > Audio Samples (WAV) > Dump selected
-# Setup:   copy the game's dump/ folder into the source folder
-# Find:    dump/audio/samples/, short SAMPLE_SOUND_EFFECTS__* and SAMPLE_BGM__* files
-python tools/gen_sample_pack.py --names
+$DumpAudio = "C:/Games/G-Diffuser/dump/audio"
+# Find:    the selected dump's samples/; use the complete key for the intended game context
+python tools/gen_sample_pack.py --names --dump-dir "$DumpAudio"
 
 # Name each WAV after its key, all in one folder, then build and validate
-python tools/gen_sample_pack.py my-sounds my-sounds.o2r --name "My Sounds" --author <your-name>
-python tools/gen_sample_pack.py my-sounds.o2r --check
+python tools/gen_sample_pack.py my-sounds my-sounds.o2r --name "My Sounds" --author "Your Name" --dump-dir "$DumpAudio"
+python tools/gen_sample_pack.py my-sounds.o2r --check --dump-dir "$DumpAudio"
 
 # Install: copy my-sounds.o2r into mods/
 # Enable:  F1 > Workshop > Mods > Enable sample packs > tick the pack > Reload packs

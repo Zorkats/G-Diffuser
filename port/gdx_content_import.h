@@ -21,7 +21,8 @@
  * op 30 -> GdxContentImport_RunOnDiskThread), which performs the twin-extension delete +
  * Mfs_SaveFile (__TMP__ swap lives inside Mfs_SaveFile, mfs_save.c:182-186) and, for CRSE
  * tracks, the edit-cup slot clear + CRS_ENTRY.CENT rewrite mirroring the editor's save op.
- * Payloads are installed verbatim -- never byteswapped (risk R7).
+ * .gdxc payloads retain their host-order contract. Foreign image tracks are decoded from the
+ * image's declared byte order before validation; the read-only image reader still returns raw bytes.
  *
  * E3 adds Edit-Cup register/unregister (op 31 -> GdxContentCup_RunOnDiskThread): the disk
  * thread mutates gEditCupTrackNames[slot] and persists CRS_ENTRY.CENT, mirroring
@@ -77,6 +78,7 @@ extern "C" {
 #define GDX_IMPORT_ERR_BUNDLE_STRUCTURE (1u << 18)/* bundle entry table malformed/truncated/dupe */
 #define GDX_IMPORT_ERR_BUNDLE_CENT (1u << 19)     /* CENT entry missing/wrong size/dangling slot */
 #define GDX_IMPORT_ERR_BAD_PACKAGE (1u << 20)     /* .gdxp not a valid share package (gdx_content_pack.h) */
+#define GDX_IMPORT_ERR_ENCODING (1u << 21)
 
 /* Advisory bits (GdxContentImportEntry.warnings). Install stays allowed. */
 #define GDX_IMPORT_WARN_QUOTA (1u << 0)       /* class count >= QuotaWarnThreshold (default 90) */
@@ -93,6 +95,27 @@ extern "C" {
 /* A real disk holds at most 100 files per extension class; 64 import rows is generous. */
 #define GDX_CONTENT_IMPORT_MAX 64
 
+#define GDX_FOREIGN_HOST_ORDER 0
+#define GDX_FOREIGN_BIG_ENDIAN 1
+
+typedef struct GdxForeignCourseDiagnostic {
+    int present;
+    int encoding;
+    int rawCreator;
+    int rawCount;
+    int creator;
+    int count;
+    uint32_t storedChecksum;
+    uint32_t computedChecksum;
+    int checksumChecked;
+    int sanitizedPits;
+} GdxForeignCourseDiagnostic;
+
+// The caller owns a full fixed-size output buffer, which may alias raw and need not be aligned.
+// Nonzero validation bits mean the output must not be installed; the input remains unchanged unless aliased.
+uint32_t gdx_content_import_normalize_track(const uint8_t* raw, int32_t size, int encoding,
+                                           uint8_t* host, GdxForeignCourseDiagnostic* diagnostic);
+
 typedef struct GdxContentImportEntry {
     char fileName[256];  /* host basename inside exports/ */
     char name[21];       /* MFS directory-entry name from the container (bundle: informational) */
@@ -105,6 +128,7 @@ typedef struct GdxContentImportEntry {
     int32_t bundleTrackCount; /* E4: tracks inside a cup bundle; -1 for single items */
     char bundleContents[160]; /* E4: ", "-joined bundled track names for the confirm prompt */
     char title[GDX_COURSE_TITLE_MAX + 1]; /* 8A: full title from a <stem>.gdxt sidecar; "" when none or unreadable */
+    GdxForeignCourseDiagnostic foreign;
 } GdxContentImportEntry;
 
 /* Lists every .gdxc and .gdxp file in exports/ with full validation per file (payload bytes are not
@@ -136,6 +160,12 @@ int gdx_content_import_result(int32_t* outMfsError);
  * entries were already written -- MFS has no multi-file transaction, so a mid-install failure
  * leaves a partial install; the admission gate is the pre-write validation. */
 int32_t gdx_content_import_bundle_failed_index(void);
+
+void gdx_content_import_validate_foreign_payload(const char* name, const char* extension, int32_t type,
+                                                const uint8_t* payload, int32_t size, int encoding,
+                                                GdxContentImportEntry* out);
+int gdx_content_import_begin_foreign_payload(const char* name, const char* extension, int32_t type,
+                                             const uint8_t* payload, int32_t size, int encoding);
 
 /* Extension sidecar (<stem>.gdxe, GXE1) of the last gdx_content_import_begin; every begin call
  * resets it. The sidecar is advisory: an unknown key never blocks an install, the course keeps its

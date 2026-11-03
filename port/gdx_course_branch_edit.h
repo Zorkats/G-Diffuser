@@ -23,10 +23,10 @@ extern "C" {
 #define GDX_BRANCH_EDIT_PARTS 9 /* pit, dash, dirt, ice, jump, landmine, gate, building, sign */
 /* "No part" for all nine (PIT_NONE, DASH_NONE and so on in fzx_course.h). 0 is a real part of each. */
 #define GDX_BRANCH_EDIT_PART_NONE (-1)
-#define GDX_BRANCH_EDIT_MAX_POINTS 64
+#define GDX_BRANCH_EDIT_MAX_POINTS 127
 
 /* Bytes of one saved edit state (undo snapshots). gdx_course_branch_edit.c checks it at compile time. */
-#define GDX_BRANCH_EDIT_STATE_BYTES 6144
+#define GDX_BRANCH_EDIT_STATE_BYTES 12288
 
 /* The values of one point (GdxPointExtras in gdx_course_settings.h), by index. */
 #define GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH 0
@@ -73,6 +73,7 @@ int gdx_branch_edit_commit(const char* courseId, const GdxBranchEditPoint* ring,
                            unsigned int courseChecksum, char* reason, int cap);
 
 int gdx_branch_edit_fork_count(void);
+int gdx_branch_edit_can_add(int ringCount, int points);
 int gdx_branch_edit_view_b(void);
 
 /* Values of the ring point the view shows at point, or of the whole track. which is one of the defines above.

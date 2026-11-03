@@ -139,4 +139,60 @@ bool canRestoreMetadata(const Record& r) {
     }
     return true;
 }
+
+bool canRestoreMetadata(const std::vector<Record>& records) {
+    int counts[4] = {};
+    const int limits[4] = {
+        GDX_COURSE_STORE_SLOTS, GDX_COURSE_TITLE_SLOTS, GDX_BRANCH_STORE_SLOTS, GDX_BRANCH_STORE_SLOTS
+    };
+    Bytes store(GDX_COURSE_STATE_MAX_BYTES);
+    int length = gdx_course_store_encode_file(store.data(), store.size());
+    const auto count = [](void* context, const GdxCourseStateEntry* entry) -> int {
+        auto* result = static_cast<int*>(context);
+        result[0] += entry->recordCount != 0;
+        result[1] += entry->hasTitle != 0;
+        return 0;
+    };
+    if (length < 0 || gdx_course_state_decode(store.data(), size_t(length), count, counts) != 0) {
+        return false;
+    }
+    store.resize(GDX_BRANCH_FILE_MAX_BYTES);
+    length = gdx_branch_store_encode_file(store.data(), store.size());
+    if (length < 8) {
+        return false;
+    }
+    counts[2] = store[6] | (unsigned(store[7]) << 8);
+    store.resize(GDX_SETTINGS_FILE_MAX_BYTES);
+    length = gdx_settings_store_encode_file(store.data(), store.size());
+    if (length < 8) {
+        return false;
+    }
+    counts[3] = store[6] | (unsigned(store[7]) << 8);
+    for (size_t i = 0; i < records.size(); ++i) {
+        const auto& r = records[i];
+        for (size_t j = 0; j < i; ++j) {
+            if (identity(records[j]) == identity(r)) {
+                return false;
+            }
+        }
+        if (!canRestoreMetadata(r)) {
+            return false;
+        }
+        for (const auto& c : r.changes) {
+            const int index = int(c.kind) - 2;
+            if (index < 0 || index >= 4) {
+                return false;
+            }
+            Bytes current;
+            if (!readMetadata(r, c.kind, current)) {
+                return false;
+            }
+            counts[index] += int(!c.before.empty()) - int(!current.empty());
+            if (counts[index] > limits[index]) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
 }
