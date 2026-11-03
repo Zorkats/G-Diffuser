@@ -13,7 +13,12 @@
 
 extern "C" void* GdxSnapshotTest_Create(int count);
 #ifdef GDX_SNAPSHOT_MFS_TEST
+#include "gdx_track_recovery_runtime.h"
 extern "C" int GdxSnapshotMfsTest_Run(void);
+extern "C" int GdxSnapshotMfsTest_RollbackFailure(void);
+extern "C" int gMfsError;
+void GdxSnapshotRecoveryTest_Run(const std::filesystem::path& root);
+int GdxSnapshotRecoveryTest_RunChild(const char* executable, const char* root, bool relative);
 #endif
 namespace {
 std::filesystem::path root;
@@ -34,8 +39,8 @@ int gdx_disk_save_recovery_path(char* out, unsigned int capacity) {
 }
 int gdx_course_boot(void) { return 0; }
 int gdx_course_state_recovery_ready(void) { return 1; }
-int gdx_recovery_blocks_writes(void) { return blocked; }
 #ifndef GDX_SNAPSHOT_MFS_TEST
+int gdx_recovery_blocks_writes(void) { return blocked; }
 void* gdx_snapshot_native_thread(void) { return fiber; }
 #endif
 int gdx_course_music_export_key(const char*, const char*) { return 0; }
@@ -49,9 +54,22 @@ int main(int argc, char** argv) {
     using namespace gdx::snapshot;
     root = std::filesystem::temp_directory_path() / ("gdx-snapshot-io-" +
         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+#ifdef GDX_SNAPSHOT_MFS_TEST
+    if (argc < 3 || std::strcmp(argv[1], "--fixture-root") != 0) {
+        assert(std::filesystem::create_directory(root));
+        const int result = GdxSnapshotRecoveryTest_RunChild(argv[0], root.string().c_str(),
+            argc == 2 && std::strcmp(argv[1], "--relative-path") == 0);
+        // The runtime holds its disk lock until process exit, as it does in the game.
+        std::filesystem::remove_all(root);
+        return result;
+    }
+    root = argv[2];
+    relativeRecoveryPath = argc == 4 && std::strcmp(argv[3], "--relative-path") == 0;
+#else
     assert(std::filesystem::create_directory(root));
-    const auto originalDirectory = std::filesystem::current_path();
     relativeRecoveryPath = argc == 2 && std::strcmp(argv[1], "--relative-path") == 0;
+#endif
+    const auto originalDirectory = std::filesystem::current_path();
     if (relativeRecoveryPath) {
         assert(std::filesystem::create_directory(root / "saves"));
         std::filesystem::current_path(root);
@@ -69,6 +87,10 @@ int main(int argc, char** argv) {
     assert(!gdx_snapshot_begin(1));
     blocked = false;
     assert(!gdx_snapshot_busy());
+#endif
+#ifdef GDX_SNAPSHOT_MFS_TEST
+    GdxContentRecovery_RunOnDiskThread();
+    assert(!gdx_recovery_blocks_writes());
 #endif
 
     Bytes base(BaseBytes), restored(gdx_course_snapshot_runtime_bytes(), 0x31);
@@ -99,6 +121,10 @@ int main(int argc, char** argv) {
     assert(!gdx_snapshot_package_member(path.c_str(), 0xA118, "LONG", "CRSD", portableBase.data()));
     assert(gdx_snapshot_import_stage(path.c_str(), 0xA117));
     disk = 18;
+#ifdef GDX_SNAPSHOT_MFS_TEST
+    GdxContentRecovery_RunOnDiskThread();
+    assert(!gdx_recovery_blocks_writes());
+#endif
     assert(!gdx_snapshot_validate(3, "LONG", "CRSD", base.data()));
     assert(gdx_snapshot_import_publish(7, "LONG", "CRSD", portableBase.data()));
     assert(gdx_snapshot_import_restore(7, "LONG", "CRSD", portableBase.data()));
@@ -114,9 +140,15 @@ int main(int argc, char** argv) {
 #ifdef GDX_SNAPSHOT_MFS_TEST
     const int nativeFailure = GdxSnapshotMfsTest_Run();
     if (nativeFailure) {
-        std::fprintf(stderr, "Native MFS fixture failed at line %d\n", nativeFailure);
+        std::fprintf(stderr, "Native MFS fixture failed at line %d (MFS error %d)\n", nativeFailure, gMfsError);
     }
     assert(nativeFailure == 0);
+    const int rollbackFailure = GdxSnapshotMfsTest_RollbackFailure();
+    if (rollbackFailure) {
+        std::fprintf(stderr, "Rollback failure fixture failed at line %d (MFS error %d)\n", rollbackFailure, gMfsError);
+    }
+    assert(rollbackFailure == 0);
+    GdxSnapshotRecoveryTest_Run(root);
 #endif
     gdx_course_store_clear();
     for (int i = 0; i < GDX_COURSE_TITLE_SLOTS - 1; ++i) {
@@ -149,6 +181,8 @@ int main(int argc, char** argv) {
         assert(std::filesystem::is_directory(root / "saves/test.gdd.recovery.snapshots"));
         std::filesystem::current_path(originalDirectory);
     }
+#ifndef GDX_SNAPSHOT_MFS_TEST
     std::filesystem::remove_all(root);
+#endif
     std::puts("All complete snapshot I/O tests passed");
 }

@@ -366,7 +366,10 @@ extern "C" void gdx_recovery_tick(void) {
 }
 
 extern "C" int gdx_recovery_write_await(const char* path, const uint8_t* data, size_t size) {
-    if (!inside || !ownerThread || ownerThread != gdx_recovery_native_thread() || !path || (!data && size)) {
+    void* thread = gdx_recovery_native_thread();
+    const bool recoveryOwner = inside && ownerThread && ownerThread == thread;
+    const bool snapshotOwner = thread && gdx_snapshot_busy() && !gdx_recovery_blocks_writes();
+    if ((!recoveryOwner && !snapshotOwner) || !path || (!data && size)) {
         return 0;
     }
     const std::filesystem::path ownedPath(path);

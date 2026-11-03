@@ -7,7 +7,7 @@ endif()
 
 set(DECOMP "${CMAKE_CURRENT_SOURCE_DIR}/../decomp")
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
-set(GDX_DISPLAY_VERSION "1.2.1" CACHE STRING "Version shown in the About menu")
+set(GDX_DISPLAY_VERSION "1.2.2" CACHE STRING "Version shown in the About menu")
 # The release workflows pass the channel and commit; a local build stays "dev", which never
 # offers updates (gdx_update.cpp).
 set(GDX_BUILD_CHANNEL "dev" CACHE STRING "Update channel: stable, nightly or dev")
@@ -1813,6 +1813,7 @@ endif()
 
 add_executable(gdx_course_snapshot_mfs_tests
     tests/gdx_course_snapshot_io_tests.cpp
+    tests/gdx_snapshot_recovery_fixture.cpp gdx_track_recovery_runtime.cpp gdx_track_recovery.cpp gdx_edit_cup.c
     tests/gdx_course_snapshot_mfs_fixture.c gdx_course_snapshot_mfs.c tests/gdx_course_snapshot_fixture.c
     gdx_course_snapshot_io.cpp gdx_course_snapshot_state.cpp gdx_course_snapshot.cpp gdx_course_snapshot_native.c gdx_course_disk.c
     gdx_recovery_metadata.cpp gdx_course_branch_format.c gdx_course_registry.c gdx_course_settings.c
@@ -1822,6 +1823,7 @@ target_include_directories(gdx_course_snapshot_mfs_tests PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/../include")
 target_compile_definitions(gdx_course_snapshot_mfs_tests PRIVATE
     GDX_SNAPSHOT_MFS_TEST=1 GDX_COURSE_CHECKSUM_TEST=1 PORT=1 EXPANSION_KIT=1 AVOID_UB=1 F3DEX_GBI_2=1 _LANGUAGE_C=1 VERSION_US=1)
+target_link_libraries(gdx_course_snapshot_mfs_tests PRIVATE ImGui)
 if(MSVC)
     target_compile_options(gdx_course_snapshot_mfs_tests PRIVATE /W3 /UNDEBUG /we4013)
 else()

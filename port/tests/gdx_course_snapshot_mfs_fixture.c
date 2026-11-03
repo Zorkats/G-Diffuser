@@ -7,6 +7,8 @@
 extern void* GdxSnapshotTest_Create(int count);
 extern int gdx_course_title_set(const char*, const char*);
 extern int gdx_course_title_get(const char*, char*, int);
+extern int GdxSnapshotRecoveryTest_Flush(const void* bytes, unsigned int size, int fail);
+extern int GdxSnapshotRecoveryTest_Verify(const void* bytes, unsigned int size);
 OSThread* __osRunningThread = (OSThread*) 1;
 MfsRamArea gMfsRamArea;
 s32 gDirectoryEntryCount = 8;
@@ -19,6 +21,10 @@ static int allocation;
 static int failSave;
 static int failRead;
 static int failFlush;
+
+void GdxSnapshotMfsTest_SetThread(void* thread) {
+    __osRunningThread = thread;
+}
 
 u16 Mfs_GetParentDir(u16 directory) {
     return 0;
@@ -50,11 +56,11 @@ s32 Mfs_BackupRamArea(void) {
 }
 
 int gdx_disk_save_recovery_flush(void) {
-    if (failFlush) {
-        failFlush = 0;
-        return 0;
+    const int fail = failFlush > 0;
+    if (fail) {
+        --failFlush;
     }
-    return 1;
+    return GdxSnapshotRecoveryTest_Flush(&gMfsRamArea, sizeof(gMfsRamArea), fail);
 }
 
 static int save(unsigned short directory, char* name, char* extension, unsigned char* bytes, unsigned int size, int attr, int copies, int flush) {
@@ -110,6 +116,8 @@ int GdxSnapshotMfsTest_Run(void) {
         CHECK(gdx_snapshot_native_save(save, 3, "MFS", "CRSD", GdxSnapshotTest_Create(127),
                                         sizeof(CourseContext), 0, 0xFF, 1) == -1);
         CHECK(!memcmp(payload[gMfsRamArea.directoryEntry[0].fileAllocationTableId], previous, sizeof(previous)));
+        CHECK(gMfsError == N64DD_ARGUMENT_ILLEGAL);
+        CHECK(GdxSnapshotRecoveryTest_Verify(&gMfsRamArea, sizeof(gMfsRamArea)));
         CHECK(!gdx_snapshot_busy());
         CHECK(gdx_snapshot_load(3, "MFS", "CRSD", previous, &loaded));
         CHECK(loaded.courseData.controlPointCount == 64);
@@ -126,5 +134,29 @@ int GdxSnapshotMfsTest_Run(void) {
     CHECK(!strcmp(title, "New generation"));
     CHECK(gdx_snapshot_native_backup_entry(0));
     CHECK(!gdx_snapshot_native_backup_entry(8));
+    CHECK(gdx_snapshot_native_save(save, 3, "NEW", "CRSD", GdxSnapshotTest_Create(6),
+                                    sizeof(CourseContext), 0, 0xFF, 1) == 0);
+    CHECK(gdx_snapshot_begin(1));
+    CHECK(gdx_snapshot_prepare(3, "IMPORT", "CRSE", GdxSnapshotTest_Create(127), NULL, previous));
+    CHECK(gdx_snapshot_native_save(save, 3, "IMPORT", "CRSE", previous,
+                                    sizeof(previous), 0, 0xFF, 1) == 0);
+    CHECK(gdx_snapshot_busy());
+    gdx_snapshot_end();
+    CHECK(!gdx_snapshot_busy());
+    CHECK(gdx_snapshot_load(3, "IMPORT", "CRSE", previous, &loaded));
+    CHECK(loaded.courseData.controlPointCount == 127);
+    return 0;
+}
+
+int GdxSnapshotMfsTest_RollbackFailure(void) {
+    failFlush = 2;
+    CHECK(gdx_snapshot_native_save(save, 3, "IMPORT", "CRSE", GdxSnapshotTest_Create(127),
+                                    sizeof(CourseContext), 0, 0xFF, 1) == -1);
+    CHECK(failFlush == 0);
+    CHECK(!gdx_snapshot_busy());
+    CHECK(gMfsError == N64DD_ARGUMENT_ILLEGAL);
+    CHECK(gdx_snapshot_native_save(save, 3, "IMPORT", "CRSE", GdxSnapshotTest_Create(127),
+                                    sizeof(CourseContext), 0, 0xFF, 1) == -1);
+    CHECK(!gdx_snapshot_busy());
     return 0;
 }
