@@ -160,9 +160,24 @@ extern "C" int gdx_snapshot_prepare(unsigned short directory, const char* name, 
             const auto* p = static_cast<const unsigned char*>(previous);
             old.assign(p, p + BaseBytes);
         }
-        if (!identity(g, directory, name, extension) || prepareSave(files, g, runtime, old) != Result::Ok) {
-            gdx_port_logf("[snapshot] %s.%s: save refused; an existing target needs a verified load/backup first.\n",
-                          name, extension);
+        const auto status = identity(g, directory, name, extension)
+            ? prepareSave(files, g, runtime, old) : Result::Invalid;
+        if (status != Result::Ok) {
+            const char* reason = "invalid course or snapshot data";
+            switch (status) {
+                case Result::Missing:
+                    reason = "previous generation missing; verified load/backup required";
+                    break;
+                case Result::Conflict:
+                    reason = "immutable snapshot key conflict; retained history was not overwritten";
+                    break;
+                case Result::Io:
+                    reason = "snapshot storage read/write failed";
+                    break;
+                default:
+                    break;
+            }
+            gdx_port_logf("[snapshot] %s.%s: save refused: %s.\n", name, extension, reason);
             return false;
         }
         std::memcpy(base, g.base.data(), BaseBytes);

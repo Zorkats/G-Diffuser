@@ -163,8 +163,8 @@ void GdxContentWindow::LoadTrackPreview(int row) {
     }
 
     GdxBranchSet storedForks{};
-    const int count = gdx_content_track_preview(mEntries[row].name, payload, mTrackPreviewX,
-                                                 mTrackPreviewZ, GDX_COURSE_POINT_CAPACITY, &storedForks);
+    const int count = gdx_content_track_preview(mEntries[row].name, payload, mTrackPreviewX, mTrackPreviewZ,
+                                               sizeof(mTrackPreviewX) / sizeof(mTrackPreviewX[0]), &storedForks);
     if (count < 2) {
         return;
     }

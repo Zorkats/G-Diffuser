@@ -15,6 +15,7 @@ enum class Metadata : size_t { Extensions, Title, Forks, Settings, Count };
 enum class Result { Ok, Missing, Invalid, Conflict, Io };
 
 struct Generation {
+    uint16_t version = 2;
     uint64_t disk = 0;
     uint16_t directory = 0;
     std::string courseId;

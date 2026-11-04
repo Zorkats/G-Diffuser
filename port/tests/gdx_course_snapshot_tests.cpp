@@ -79,7 +79,7 @@ Generation fixture(int count = 100, unsigned char version = 1) {
 }
 
 void same(const Generation& a, const Generation& b) {
-    assert(a.disk == b.disk && a.directory == b.directory && a.courseId == b.courseId);
+    assert(a.version == b.version && a.disk == b.disk && a.directory == b.directory && a.courseId == b.courseId);
     assert(a.pointCount == b.pointCount && a.nativeChecksum == b.nativeChecksum &&
            a.base == b.base && a.metadata == b.metadata);
 }
@@ -164,6 +164,81 @@ void codecTests() {
     bad = original;
     bad.base.resize(BaseBytes - 1);
     assert(!encode(bad, out));
+}
+
+void contentBindingTests() {
+    auto first = fixture();
+    assert(seal(first) && first.version == 2);
+    Memory memory;
+    assert(publish(memory, first) == Result::Ok);
+    const auto originalFiles = memory.files;
+    for (int field = 0; field < 6; ++field) {
+        auto changed = first;
+        Bytes buffer(65536);
+        int length = 0;
+        Metadata section = Metadata::Title;
+        if (field == 0) {
+            length = gdx_course_title_encode("Snapshot best", binding(changed), buffer.data(), buffer.size());
+        } else if (field == 1) {
+            section = Metadata::Settings;
+            GdxCourseSettings settings{};
+            const auto& bytes = changed.metadata[size_t(section)];
+            assert(gdx_settings_decode(bytes.data(), bytes.size(), binding(changed), &settings) == 0);
+            settings.magnetRange = 199;
+            length = gdx_settings_encode(&settings, binding(changed), buffer.data(), buffer.size());
+        } else if (field == 2) {
+            section = Metadata::Forks;
+            GdxBranchSet forks{};
+            const auto& bytes = changed.metadata[size_t(section)];
+            assert(gdx_branch_decode(bytes.data(), bytes.size(), binding(changed), &forks) == 0);
+            forks.extended[0].pos[0] += 1.0f;
+            length = gdx_branch_encode(&forks, binding(changed), buffer.data(), buffer.size());
+        } else if (field == 3) {
+            section = Metadata::Extensions;
+            GdxCourseExtBlock extensions{};
+            const auto& bytes = changed.metadata[size_t(section)];
+            assert(gdx_course_ext_decode(bytes.data(), bytes.size(), binding(changed), &extensions) == 0);
+            std::memcpy(extensions.records[0].key, "bgm.custom.snapshou", sizeof("bgm.custom.snapshou"));
+            length = gdx_course_ext_encode(extensions.records, extensions.count, binding(changed),
+                                           buffer.data(), buffer.size());
+        } else if (field == 4) {
+            changed.base[0x20] ^= 1;
+        } else {
+            changed.base[CourseBytes + 16] ^= 1;
+        }
+        if (field < 4) {
+            assert(length > 0 && size_t(length) == changed.metadata[size_t(section)].size());
+            changed.metadata[size_t(section)].assign(buffer.begin(), buffer.begin() + length);
+        }
+        assert(seal(changed));
+        assert(changed.base != first.base);
+        assert(publish(memory, changed) == Result::Ok);
+        Bytes encoded;
+        Generation decoded;
+        assert(encode(changed, encoded) && decode(encoded, decoded));
+        same(changed, decoded);
+        const auto sealed = changed;
+        assert(seal(changed));
+        same(changed, sealed);
+        assert(rebind(changed, 7, 8, "IDENTITY.CRSE"));
+        assert(changed.base == sealed.base);
+        for (const auto& entry : originalFiles) {
+            assert(memory.files.at(entry.first) == entry.second);
+        }
+    }
+    assert(memory.files.size() == 7);
+    Bytes encoded;
+    assert(encode(first, encoded));
+    encoded[4] = 3;
+    const auto checksum = gdx_course_registry_crc32(encoded.data(), encoded.size() - 4);
+    for (int i = 0; i < 4; ++i) {
+        encoded[encoded.size() - 4 + size_t(i)] = static_cast<unsigned char>(checksum >> (8 * i));
+    }
+    auto untouched = first;
+    assert(!decode(encoded, untouched));
+    same(first, untouched);
+    untouched.version = 3;
+    assert(!encode(untouched, encoded) && !seal(untouched));
 }
 
 void repositoryTests() {
@@ -269,6 +344,7 @@ static void packageTests() {
 }
 
 int main() {
+    contentBindingTests();
     packageTests();
     {
         auto first = fixture();

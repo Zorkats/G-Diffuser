@@ -98,6 +98,22 @@ int main(int argc, char** argv) {
     assert(gdx_course_snapshot_capture(GdxSnapshotTest_Create(6), base.data(), legacyTail) == 7);
     assert(gdx_snapshot_load(3, "GHOST00", "GOST", base.data(), restored.data()));
     assert(restored[1] == 6);
+    for (const int count : {64, 65, 77, 127}) {
+        assert(gdx_snapshot_prepare(3, "PREVIEW", "CRSD", GdxSnapshotTest_Create(count), nullptr, base.data()));
+        struct GuardedPoints {
+            float before = 12345;
+            float values[127]{};
+            float after = 54321;
+        } x, z;
+        GdxBranchSet forks{};
+        assert(gdx_snapshot_preview(3, "PREVIEW", base.data(), x.values, z.values, 127, &forks) == count);
+        assert(x.values[count - 1] == (count - 1) * 2 && z.values[count - 1] == -(count - 1));
+        assert(!gdx_snapshot_preview(3, "PREVIEW", base.data(), x.values, z.values, count - 1, &forks));
+        auto corrupted = base;
+        corrupted[40] ^= 1;
+        assert(!gdx_snapshot_preview(3, "PREVIEW", corrupted.data(), x.values, z.values, 127, &forks));
+        assert(x.before == 12345 && x.after == 54321 && z.before == 12345 && z.after == 54321);
+    }
     assert(gdx_course_title_set("LONG.CRSD", "Saved generation") == 0);
     assert(gdx_snapshot_prepare(3, "LONG", "CRSD", GdxSnapshotTest_Create(127), nullptr, base.data()));
     assert(base[8] & 0x80);

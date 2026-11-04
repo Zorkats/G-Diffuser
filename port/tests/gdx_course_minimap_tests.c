@@ -100,6 +100,40 @@ int main(void) {
         assert(memcmp(legacyNext, next, sizeof(legacyNext)) == 0);
     }
 
+    {
+        float ringX[128], ringZ[128];
+        const int counts[] = {64, 65, 77, 127};
+        int c;
+        for (i = 0; i < 128; i++) {
+            ringX[i] = (float)i * 2;
+            ringZ[i] = (float)-i;
+        }
+        for (c = 0; c < 4; c++) {
+            int ring = counts[c];
+            GdxBranchSet branch = {0};
+            count = gdx_course_preview_build(ringX, ringZ, ring, NULL, 0,
+                                             outX, outZ, next, GDX_PREVIEW_CAPACITY);
+            assert(count == ring * GDX_PREVIEW_STEPS && next[count - 1] == 0);
+            if (ring == 127) continue;
+            branch.ringCount = (unsigned char)ring;
+            branch.extendedCount = ring > 64 ? (unsigned char)(ring - 64) : 0;
+            branch.forkCount = 1;
+            branch.forks[0].forkPoint = 1;
+            branch.forks[0].mergePoint = (unsigned char)(ring - 1);
+            branch.forks[0].nodeCount = 1;
+            branch.forks[0].nodes[0].pos[0] = 80;
+            branch.forks[0].nodes[0].pos[2] = 80;
+            count = gdx_course_preview_build(ringX, ringZ, ring, &branch, 1,
+                                             outX, outZ, next, GDX_PREVIEW_CAPACITY);
+            assert(count == ring * GDX_PREVIEW_STEPS + 25);
+            assert(next[ring * GDX_PREVIEW_STEPS - 1] == 0 && next[count - 1] == -1);
+            assert(gdx_course_preview_build(ringX, ringZ, ring, &branch, 0,
+                                            outX, outZ, next, GDX_PREVIEW_CAPACITY) == ring * GDX_PREVIEW_STEPS);
+        }
+        assert(!gdx_course_preview_build(ringX, ringZ, 128, NULL, 0,
+                                         outX, outZ, next, GDX_PREVIEW_CAPACITY));
+    }
+
     memset(guarded, 0, sizeof(guarded));
     guarded[0] = guarded[4097] = 99;
     gdx_course_minimap_plot(guarded + 1, 0, 0, 1, 0);

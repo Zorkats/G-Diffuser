@@ -32,6 +32,11 @@ name, up to 20 characters.
 Track and cup packages use complete snapshots. Recipients need a build that understands `.gcs`;
 older executables are unsupported even when all slot names are short.
 
+The snapshot-key repair writes version-2 `.gcs` files and still reads version 1.
+Recipients of version-2 packages need a build with that repair. Before downgrading,
+restore the matching [complete pre-upgrade save set](COURSE_ELEMENTS.md#save-and-share);
+keeping old snapshots alone does not undo a version-2 save.
+
 ### Export a rendered machine model
 
 Create Machine `.gdxc` files are editable machine designs, not Blender models. For the prepared

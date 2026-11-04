@@ -1,7 +1,6 @@
 /* port/gdx_course_branch_edit.c -- see gdx_course_branch_edit.h. */
 
 #include "gdx_course_branch_edit.h"
-#include "gdx_course_limits.h"
 #include "gdx_course_branch_format.h"
 #include "gdx_course_settings.h"
 
@@ -74,8 +73,8 @@ static int edit_total_nodes(void) {
 }
 
 int gdx_branch_edit_can_add(int ringCount, int points) {
-    return ringCount >= 0 && ringCount <= GDX_COURSE_EDIT_POINT_LIMIT && points >= 0 &&
-           points <= GDX_COURSE_EDIT_POINT_LIMIT - ringCount - edit_total_nodes();
+    return ringCount >= 0 && ringCount <= GDX_BRANCH_EDIT_MAX_POINTS && points >= 0 &&
+           points <= GDX_BRANCH_EDIT_MAX_POINTS - ringCount - edit_total_nodes();
 }
 
 static void edit_remove_fork(int f) {
@@ -458,7 +457,7 @@ int gdx_branch_edit_swap(GdxBranchEditPoint* ring, int ringCount, int cap, int* 
             }
         }
     }
-    if ((f != next.set.forkCount) || (outCount > cap) || (outCount > GDX_COURSE_EDIT_POINT_LIMIT)) {
+    if ((f != next.set.forkCount) || (outCount > cap) || (outCount > GDX_BRANCH_EDIT_MAX_POINTS)) {
         return ringCount;
     }
 
@@ -807,7 +806,7 @@ int gdx_branch_edit_split_check(int segment, int ringCount, char* reason, int ca
         edit_reason(reason, cap, "Split: a course has at most 4 forks");
         return -1;
     }
-    if (ringCount + 1 + edit_total_nodes() + 1 > GDX_COURSE_EDIT_POINT_LIMIT) {
+    if (ringCount + 1 + edit_total_nodes() + 1 > GDX_BRANCH_EDIT_MAX_POINTS) {
         edit_reason(reason, cap, "Split: the course and its forks exceed the point budget");
         return -1;
     }
@@ -854,7 +853,7 @@ int gdx_branch_edit_span_check(int forkPoint, int mergePoint, int ringCount, cha
         edit_reason(reason, cap, "Split: a course has at most 4 forks");
         return GDX_BRANCH_ERR_COUNT;
     }
-    if (ringCount + edit_total_nodes() + interior > GDX_COURSE_EDIT_POINT_LIMIT) {
+    if (ringCount + edit_total_nodes() + interior > GDX_BRANCH_EDIT_MAX_POINTS) {
         edit_reason(reason, cap, "Split: the course and its forks exceed the point budget");
         return GDX_BRANCH_ERR_TOTAL;
     }

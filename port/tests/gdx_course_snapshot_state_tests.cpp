@@ -7,6 +7,8 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <fstream>
+#include <iterator>
 
 extern "C" void* GdxSnapshotTest_Create(int count);
 extern "C" int GdxSnapshotTest_InvalidValues(int which, int index);
@@ -37,6 +39,98 @@ struct Memory : gdx::snapshot::Backend {
         return files.emplace(name, bytes).second && !failed;
     }
 };
+
+bool metadataHistoryTests() {
+    using namespace gdx::snapshot;
+    gdx_course_store_clear();
+    gdx_branch_store_clear();
+    gdx_settings_store_clear();
+    Generation first;
+    first.disk = 1;
+    first.courseId = "GENERATED.CRSD";
+    auto* runtime = GdxSnapshotTest_Create(10);
+    assert(gdx_course_title_set(first.courseId.c_str(), "Alpha") == 0);
+    assert(captureState(first, runtime));
+    Memory backend;
+    assert(publish(backend, first) == Result::Ok);
+    const auto history = backend.files;
+    assert(gdx_course_title_set(first.courseId.c_str(), "Bravo") == 0);
+    auto second = first;
+    assert(captureState(second, runtime));
+    assert(first.metadata != second.metadata);
+    if (first.base == second.base || publish(backend, second) != Result::Ok) {
+        std::fputs("Changed same-length title reuses a historical snapshot key\n", stderr);
+        return false;
+    }
+    for (const auto& entry : history) {
+        assert(backend.files.at(entry.first) == entry.second);
+    }
+    Bytes restored(gdx_course_snapshot_runtime_bytes());
+    auto selected = first;
+    assert(loadState(backend, selected, first.base, restored.data()) == Result::Ok);
+    char title[128]{};
+    assert(gdx_course_title_get(first.courseId.c_str(), title, sizeof(title)));
+    assert(std::strcmp(title, "Alpha") == 0);
+    assert(loadState(backend, selected, second.base, restored.data()) == Result::Ok);
+    assert(gdx_course_title_get(first.courseId.c_str(), title, sizeof(title)));
+    assert(std::strcmp(title, "Bravo") == 0);
+    assert(backend.files.size() == 2);
+    gdx_course_store_clear();
+    gdx_branch_store_clear();
+    gdx_settings_store_clear();
+    return true;
+}
+
+void legacyVersionTests() {
+    using namespace gdx::snapshot;
+    for (int count : {10, 100}) {
+        gdx_course_store_clear();
+        gdx_branch_store_clear();
+        gdx_settings_store_clear();
+        const auto path = std::filesystem::path(GDX_SNAPSHOT_TEST_SOURCE_DIR) /
+            ("gdx_course_snapshot_v1_" + std::to_string(count) + ".gcs");
+        std::ifstream input(path, std::ios::binary);
+        assert(input);
+        const Bytes original((std::istreambuf_iterator<char>(input)), {});
+        Generation legacy;
+        assert(decode(original, legacy) && legacy.version == 1 && legacy.pointCount == count);
+        Bytes encoded;
+        assert(encode(legacy, encoded) && encoded == original);
+        Bytes runtime(gdx_course_snapshot_runtime_bytes());
+        assert(restoreState(legacy, runtime.data()));
+        char title[128]{};
+        assert(gdx_course_title_get(legacy.courseId.c_str(), title, sizeof(title)));
+        assert(std::strcmp(title, "Alpha") == 0);
+        Memory backend;
+        assert(publish(backend, legacy) == Result::Ok);
+        const auto history = backend.files;
+        auto upgraded = legacy;
+        assert(prepareSave(backend, upgraded, runtime.data(), legacy.base) == Result::Ok);
+        assert(upgraded.version == 2 && upgraded.base != legacy.base);
+        assert(encode(upgraded, encoded));
+        Generation decoded;
+        assert(decode(encoded, decoded) && decoded.version == 2);
+        for (const auto& entry : history) {
+            assert(backend.files.at(entry.first) == entry.second);
+        }
+        auto selected = legacy;
+        assert(loadState(backend, selected, legacy.base, runtime.data()) == Result::Ok);
+        assert(selected.version == 1);
+        assert(loadState(backend, selected, upgraded.base, runtime.data()) == Result::Ok);
+        assert(selected.version == 2);
+        auto moved = legacy;
+        assert(rebind(moved, 999, 7, "COPIED.CRSD") && moved.base == legacy.base && moved.version == 1);
+        assert(portable(moved, true) && moved.version == 2);
+        assert(packageEncode({moved}, 123, encoded));
+        std::vector<Generation> members;
+        assert(packageDecode(encoded, 123, members) && members.size() == 1);
+        assert(members.front().version == 2);
+        assert(restoreState(members.front(), runtime.data()));
+    }
+    gdx_course_store_clear();
+    gdx_branch_store_clear();
+    gdx_settings_store_clear();
+}
 
 void publicationTests() {
     using namespace gdx::snapshot;
@@ -99,11 +193,15 @@ void publicationTests() {
 
 int main() {
     using namespace gdx::snapshot;
+    if (!metadataHistoryTests()) {
+        return 1;
+    }
     for (int which = 0; which < 5; ++which) {
         for (int index : {0, 63, 64, 126}) {
             assert(GdxSnapshotTest_InvalidValues(which, index) == 3);
         }
     }
+    legacyVersionTests();
     publicationTests();
     constexpr const char* id = "ROUNDTRIP.CRSD";
     for (int count = 0; count <= 127; ++count) {

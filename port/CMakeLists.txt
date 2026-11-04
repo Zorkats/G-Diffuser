@@ -7,7 +7,7 @@ endif()
 
 set(DECOMP "${CMAKE_CURRENT_SOURCE_DIR}/../decomp")
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
-set(GDX_DISPLAY_VERSION "1.2.2" CACHE STRING "Version shown in the About menu")
+set(GDX_DISPLAY_VERSION "1.2.3" CACHE STRING "Version shown in the About menu")
 # The release workflows pass the channel and commit; a local build stays "dev", which never
 # offers updates (gdx_update.cpp).
 set(GDX_BUILD_CHANNEL "dev" CACHE STRING "Update channel: stable, nightly or dev")
@@ -951,7 +951,6 @@ add_executable(gdx_course_branch_edit_tests
     gdx_course_settings_view.c
     gdx_course_branch_format.c
     gdx_course_registry.c)
-target_compile_definitions(gdx_course_branch_edit_tests PRIVATE PORT=1)
 if(MSVC)
     target_compile_options(gdx_course_branch_edit_tests PRIVATE /W3)
 elseif(GDX_PORT_WARN_FLAGS)
@@ -1770,6 +1769,17 @@ else()
 endif()
 
 
+add_executable(gdx_course_save_wait_tests tests/gdx_course_save_wait_tests.c)
+target_include_directories(gdx_course_save_wait_tests PRIVATE
+    "${DECOMP}" "${DECOMP}/include" "${CMAKE_CURRENT_SOURCE_DIR}/../include")
+target_compile_definitions(gdx_course_save_wait_tests PRIVATE
+    PORT=1 EXPANSION_KIT=1 AVOID_UB=1 F3DEX_GBI_2=1 _LANGUAGE_C=1 VERSION_US=1)
+if(MSVC)
+    target_compile_options(gdx_course_save_wait_tests PRIVATE /W3 /UNDEBUG /we4013)
+else()
+    target_compile_options(gdx_course_save_wait_tests PRIVATE -UNDEBUG)
+endif()
+
 add_executable(gdx_course_snapshot_tests tests/gdx_course_snapshot_tests.cpp gdx_recovery_file.cpp
     gdx_course_snapshot.cpp gdx_course_branch_format.c gdx_course_settings.c gdx_course_registry.c)
 target_include_directories(gdx_course_snapshot_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -1788,6 +1798,7 @@ target_include_directories(gdx_course_snapshot_state_tests PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}" "${DECOMP}" "${DECOMP}/include" "${DECOMP}/src"
     "${CMAKE_CURRENT_SOURCE_DIR}/../include")
 target_compile_definitions(gdx_course_snapshot_state_tests PRIVATE
+    GDX_SNAPSHOT_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests"
     GDX_COURSE_CHECKSUM_TEST=1 PORT=1 EXPANSION_KIT=1 AVOID_UB=1 F3DEX_GBI_2=1 _LANGUAGE_C=1 VERSION_US=1)
 if(MSVC)
     target_compile_options(gdx_course_snapshot_state_tests PRIVATE /W3 /UNDEBUG /we4013)
@@ -1887,6 +1898,15 @@ if(MSVC)
 else()
     target_compile_options(gdx_music_folders_tests PRIVATE ${GDX_PORT_WARN_FLAGS} -UNDEBUG)
     target_link_libraries(gdx_music_folders_tests PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+endif()
+
+add_executable(gdx_course_editor_layout_tests tests/gdx_course_editor_layout_tests.c)
+target_include_directories(gdx_course_editor_layout_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_definitions(gdx_course_editor_layout_tests PRIVATE PORT=1)
+if(MSVC)
+    target_compile_options(gdx_course_editor_layout_tests PRIVATE /W3 /UNDEBUG)
+else()
+    target_compile_options(gdx_course_editor_layout_tests PRIVATE -UNDEBUG)
 endif()
 
 endif() # NOT ANDROID (unit tests)

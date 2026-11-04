@@ -1,4 +1,5 @@
 #include "gdx_course_snapshot.h"
+#include "gdx_sha256.h"
 #include "gdx_course_branch_format.h"
 #include "gdx_course_registry.h"
 #include "gdx_course_settings.h"
@@ -46,7 +47,8 @@ bool validId(const std::string& id) {
 bool sealedValid(const Generation&);
 
 bool valid(const Generation& generation) {
-    if (!generation.disk || !validId(generation.courseId) || generation.base.size() != BaseBytes ||
+    if ((generation.version != 1 && generation.version != 2) ||
+        !generation.disk || !validId(generation.courseId) || generation.base.size() != BaseBytes ||
         generation.base[1] > 64 || generation.pointCount > GDX_BRANCH_MAX_TOTAL_POINTS ||
         generation.base[1] != (std::min)(generation.pointCount, uint8_t(64))) {
         return false;
@@ -204,7 +206,18 @@ bool selector(const Generation& g, uint32_t& value) {
     if (!encode(canonical, bytes)) {
         return false;
     }
-    value = gdx_course_registry_crc32(bytes.data(), bytes.size() - 4);
+    if (canonical.version == 1) {
+        value = gdx_course_registry_crc32(bytes.data(), bytes.size() - 4);
+    } else {
+        // CRC-protected sections cancel their own edits under another CRC.
+        gdx::hash::Sha256 hash;
+        unsigned char digest[32];
+        gdx::hash::sha256_init(&hash);
+        gdx::hash::sha256_update(&hash, bytes.data(), bytes.size() - 4);
+        gdx::hash::sha256_final(&hash, digest);
+        value = uint32_t(digest[0]) | uint32_t(digest[1]) << 8 |
+                uint32_t(digest[2]) << 16 | uint32_t(digest[3]) << 24;
+    }
     return true;
 }
 
@@ -241,10 +254,11 @@ bool legacyImage(Generation& generation) {
 }
 
 bool seal(Generation& generation) {
-    if (generation.base.size() != BaseBytes) {
+    if (generation.base.size() != BaseBytes || (generation.version != 1 && generation.version != 2)) {
         return false;
     }
     Generation next = generation;
+    next.version = 2;
     if (!(next.base[8] & 0x80)) {
         next.nativeChecksum = uint32_t(get(next.base, 4, 4));
     }
@@ -274,7 +288,7 @@ bool encode(const Generation& generation, Bytes& out) {
     }
     Bytes bytes(length, 0);
     std::memcpy(bytes.data(), "GCS1", 4);
-    put(bytes, 4, 1, 2);
+    put(bytes, 4, generation.version, 2);
     put(bytes, 6, HeaderBytes, 2);
     put(bytes, 8, length, 4);
     put(bytes, 12, generation.disk, 8);
@@ -302,7 +316,7 @@ bool encode(const Generation& generation, Bytes& out) {
 
 bool decode(const Bytes& bytes, Generation& out) {
     if (bytes.size() < HeaderBytes + 4 || bytes.size() > MaxBytes ||
-        std::memcmp(bytes.data(), "GCS1", 4) || get(bytes, 4, 2) != 1 ||
+        std::memcmp(bytes.data(), "GCS1", 4) || (get(bytes, 4, 2) != 1 && get(bytes, 4, 2) != 2) ||
         get(bytes, 6, 2) != HeaderBytes || get(bytes, 8, 4) != bytes.size() ||
         get(bytes, 24, 4) != BaseBytes || bytes[23] > GDX_COURSE_FILE_ID_MAX ||
         get(bytes, bytes.size() - 4, 4) != gdx_course_registry_crc32(bytes.data(), bytes.size() - 4)) {
@@ -319,6 +333,7 @@ bool decode(const Bytes& bytes, Generation& out) {
         return false;
     }
     Generation generation;
+    generation.version = uint16_t(get(bytes, 4, 2));
     generation.disk = get(bytes, 12, 8);
     generation.directory = uint16_t(get(bytes, 20, 2));
     generation.pointCount = bytes[22];

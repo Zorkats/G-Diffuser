@@ -775,6 +775,48 @@ static void test_extended_commit(void) {
     }
 }
 
+static void test_extended_point_budget(void) {
+    GdxBranchEditPoint nodeB;
+    char reason[128];
+    int count;
+    int dropped;
+
+    gdx_branch_edit_clear();
+    for (count = 64; count < 127; ++count) {
+        CHECK(gdx_branch_edit_can_add(count, 1), "insertion beyond stock capacity admitted");
+    }
+    CHECK(gdx_branch_edit_span_check(1, 4, 125, reason, sizeof(reason)) == 0,
+          "span reaching 127 total points admitted");
+    CHECK(gdx_branch_edit_span_check(1, 4, 126, reason, sizeof(reason)) < 0,
+          "span exceeding 127 total points refused");
+
+    make_ring(126);
+    gdx_branch_edit_sync(sCount);
+    memset(&nodeB, 0, sizeof(nodeB));
+    nodeB.pos[2] = 900.0f;
+    CHECK(gdx_branch_edit_span_check(1, 3, sCount, reason, sizeof(reason)) == 0,
+          "fork at combined ceiling admitted");
+    CHECK(gdx_branch_edit_span_commit(1, 3, &nodeB, 1) == 0, "extended fork committed");
+    CHECK(gdx_branch_edit_can_add(126, 0), "existing fork fits combined ceiling");
+    CHECK(!gdx_branch_edit_can_add(126, 1), "fork reserves the last point");
+    CHECK(gdx_branch_edit_can_add(125, 1), "insertion accounts for stored fork point");
+    CHECK(gdx_branch_edit_split_check(5, 124, reason, sizeof(reason)) == 0,
+          "split with existing fork reaches combined ceiling");
+    CHECK(gdx_branch_edit_split_check(5, 125, reason, sizeof(reason)) < 0,
+          "split with existing fork exceeds combined ceiling");
+    CHECK(gdx_branch_edit_span_check(5, 8, 124, reason, sizeof(reason)) == 0,
+          "span with existing fork reaches combined ceiling");
+    CHECK(gdx_branch_edit_span_check(5, 8, 125, reason, sizeof(reason)) < 0,
+          "span with existing fork exceeds combined ceiling");
+
+    CHECK(gdx_branch_edit_swap(sRing, sCount, GDX_BRANCH_EDIT_MAX_POINTS, &dropped) == 126 &&
+              dropped == 0 && gdx_branch_edit_view_b() && sRing[2].pos[2] == 900.0f,
+          "extended ring swaps to path B at combined ceiling");
+    CHECK(gdx_branch_edit_swap(sRing, sCount, GDX_BRANCH_EDIT_MAX_POINTS, &dropped) == 126 &&
+              dropped == 0 && !gdx_branch_edit_view_b() && sRing[2].pos[2] == 0.0f,
+          "extended ring swaps back at combined ceiling");
+}
+
 int main(void) {
     char ceilingReason[128];
     gdx_branch_edit_clear();
@@ -786,6 +828,7 @@ int main(void) {
     CHECK(!gdx_branch_edit_can_add(123, 5), "five-point loop beyond ceiling refused");
     CHECK(!gdx_branch_edit_can_add(-1, 1) && !gdx_branch_edit_can_add(128, 0) &&
           !gdx_branch_edit_can_add(1, -1), "invalid insertion counts refused");
+    test_extended_point_budget();
     test_extended_commit();
     test_split_and_swap();
     test_link_and_asymmetric_swap();

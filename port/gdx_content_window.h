@@ -3,7 +3,6 @@
 #include "gdx_content_import.h"
 #include "gdx_content_io.h"
 #include "gdx_course_minimap.h"
-#include "gdx_course_limits.h"
 #include "gdx_mfs_image.h"
 #include "gdx_rom_courses.h"
 #include "ship/window/gui/GuiWindow.h"
@@ -50,8 +49,11 @@ class GdxContentWindow : public Ship::GuiWindow {
 
     GdxContentEntry mEntries[GDX_CONTENT_MAX_ENTRIES] = {};
     int mEntryCount = 0;
-    float mTrackPreviewX[GDX_COURSE_POINT_CAPACITY] = {};
-    float mTrackPreviewZ[GDX_COURSE_POINT_CAPACITY] = {};
+    float mTrackPreviewX[GDX_BRANCH_MAX_TOTAL_POINTS] = {};
+    float mTrackPreviewZ[GDX_BRANCH_MAX_TOTAL_POINTS] = {};
+    static_assert(sizeof(mTrackPreviewX) / sizeof(float) == GDX_BRANCH_MAX_TOTAL_POINTS,
+                  "Host previews must retain all supported course points");
+    static_assert(sizeof(mTrackPreviewZ) == sizeof(mTrackPreviewX));
     int mTrackPreviewCount = 0;
     int mTrackPreviewRow = -1;
     static constexpr int kSplineMax = GDX_PREVIEW_CAPACITY;
