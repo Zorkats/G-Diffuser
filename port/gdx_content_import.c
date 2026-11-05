@@ -14,6 +14,8 @@
 #include "gdx_course_snapshot_io.h"
 #include "gdx_content_pack.h"
 #include "gdx_course_bounds.h"
+#include "gdx_course_meta.h"
+#include "gdx_course_meta_sign.h"
 #include "gdx_course_music.h"
 #include "gdx_course_registry.h"
 #include "gdx_course_settings.h"
@@ -1110,6 +1112,7 @@ static uint8_t sImportPayload[GDX_CONTENT_TRACK_PAYLOAD_SIZE];
  * and the .gdd journal persists the write (n64_leo.c:175-176). */
 static int sImportSnapshot;
 static int gdx_import_prepare_snapshot(int index);
+static void gdx_import_store_meta(const char* name, const char* extension, int index, const void* base);
 
 
 
@@ -1502,6 +1505,112 @@ static void gdx_import_store_branch(const char* courseId, const GdxImportBranchS
     }
 }
 
+/* Creator metadata from a .gdxm, one slot per bundle member, slot 0 for a single track (gdx_course_meta.h). Read
+ * in begin() and stored once the course file is written. A slot with nothing clears what the old file had. */
+static GdxCourseMeta sImportMeta[GDX_CONTENT_BUNDLE_MAX_TRACKS];
+
+typedef struct GdxImportMetaCtx {
+    int isBundle;
+    uint32_t payloadCrc; /* the header's CRC, for a single track */
+} GdxImportMetaCtx;
+
+static void gdx_import_meta_visit(const char* courseId, uint32_t bindCrc, const GdxCourseMeta* meta, void* ctxPtr) {
+    const GdxImportMetaCtx* ctx = (const GdxImportMetaCtx*) ctxPtr;
+    int index = 0;
+
+    if (ctx->isBundle) {
+        index = gdx_import_member_index(courseId);
+        if ((index < 0) || (bindCrc != sBundleMemberCrc[index])) {
+            gdx_port_logf("[import] %s: creator metadata belongs to another file, skipped\n", courseId);
+            return;
+        }
+    } else if (bindCrc != ctx->payloadCrc) {
+        gdx_port_logf("[import] %s: creator metadata belongs to another file, skipped\n", courseId);
+        return;
+    }
+    sImportMeta[index] = *meta;
+}
+
+/* Reads the .gdxm of a .gdxc when its header says it has one. A rejected file is logged and ignored in full: the
+ * course still installs, only without its credit and staff time. */
+static void gdx_import_read_meta(const char* gdxcPath, int isBundle) {
+    unsigned char header[GDX_CONTENT_HEADER_SIZE];
+    char sidecarPath[1600];
+    GdxImportMetaCtx ctx;
+    unsigned char* bytes;
+    size_t length;
+    FILE* f;
+    int ioError;
+    int rc;
+
+    memset(sImportMeta, 0, sizeof(sImportMeta));
+    f = fopen(gdxcPath, "rb");
+    if (f == NULL) {
+        return;
+    }
+    length = fread(header, 1, sizeof(header), f);
+    fclose(f);
+    if ((length != sizeof(header)) || ((gdx_import_read_u32le(header + 0x25) & GDX_CONTENT_FLAG_META) == 0)) {
+        return;
+    }
+    if (!gdx_import_sidecar_path(gdxcPath, ".gdxm", sidecarPath, sizeof(sidecarPath))) {
+        return;
+    }
+    f = fopen(sidecarPath, "rb");
+    if (f == NULL) {
+        gdx_port_logf("[import] %s: creator metadata file missing, skipped\n", gdxcPath);
+        return;
+    }
+    bytes = (unsigned char*) malloc(GDX_META_SIDECAR_MAX_BYTES + 1);
+    if (bytes == NULL) {
+        fclose(f);
+        return;
+    }
+    /* One byte past the largest legal file is read, so an oversized file is caught below. */
+    length = fread(bytes, 1, GDX_META_SIDECAR_MAX_BYTES + 1, f);
+    ioError = ferror(f) != 0;
+    fclose(f);
+    if (ioError || (length > GDX_META_SIDECAR_MAX_BYTES)) {
+        gdx_port_logf("[import] %s: creator metadata file unreadable, skipped\n", sidecarPath);
+        free(bytes);
+        return;
+    }
+    ctx.isBundle = isBundle;
+    ctx.payloadCrc = gdx_import_read_u32le(header + 0x2D);
+    rc = gdx_meta_sidecar_decode(bytes, length, gdx_import_meta_visit, &ctx);
+    free(bytes);
+    if (rc != GDX_META_OK) {
+        gdx_port_logf("[import] %s: creator metadata file rejected (%d), skipped\n", sidecarPath, rc);
+        memset(sImportMeta, 0, sizeof(sImportMeta));
+    }
+}
+
+/* Called on the disk thread once name.extension is written and its snapshot restored from base. A signature that
+ * does not check against the installed track is dropped (gdx_course_meta_sign.h); the credit stays. */
+static void gdx_import_store_meta(const char* name, const char* extension, int index, const void* base) {
+    char courseId[GDX_BRANCH_COURSE_ID_MAX + 1];
+    int rc;
+
+    if (!gdx_course_music_course_id(name, extension, courseId, (int) sizeof(courseId))) {
+        return;
+    }
+    if (sImportMeta[index].hasSignature) {
+        GdxMetaSignDigest d;
+
+        d.ok = 0;
+        if (!gdx_snapshot_content(gWorkingDirectory, name, extension, base, gdx_meta_sign_digest_visit, &d)) {
+            d.ok = 0;
+        }
+        if (gdx_meta_sign_check(&sImportMeta[index], d.ok ? d.digest : NULL) == GDX_META_SIGN_DROPPED) {
+            gdx_port_logf("[import] %s: signature does not match the track, dropped\n", courseId);
+        }
+    }
+    rc = gdx_meta_store_set(courseId, &sImportMeta[index]);
+    if (rc != GDX_META_OK) {
+        gdx_port_logf("[import] %s: creator metadata not stored (%d)\n", courseId, rc);
+    }
+}
+
 typedef struct GdxImportCompanionCtx {
     int commit; /* 0 = verify only, 1 = copy into sBundleMember */
     const char* gdxcPath;
@@ -1675,6 +1784,7 @@ int gdx_content_import_begin(const char* fileName) {
     }
     sImportSnapshot = 0;
     memset(sImportBranch, 0, sizeof(sImportBranch));
+    memset(sImportMeta, 0, sizeof(sImportMeta));
     memset(&sImportExtInfo, 0, sizeof(sImportExtInfo));
     sImportTitle[0] = '\0';
     sImportSidecarBlock.count = 0;
@@ -1771,6 +1881,7 @@ static int gdx_import_begin_path(const char* path) {
             gdx_import_load_bundle_companion(path);
             gdx_import_read_branch(path, 1);
         }
+        gdx_import_read_meta(path, 1);
         sImportContentType = GDX_CONTENT_TYPE_BUNDLE; /* keeps result() from applying a stale single-track title */
         sImportRc = 0;
         sImportMfsError = 0;
@@ -1800,6 +1911,10 @@ static int gdx_import_begin_path(const char* path) {
         if (entry.contentType == GDX_CONTENT_TYPE_TRACK) {
             gdx_import_read_branch(path, 0);
         }
+    }
+    memset(sImportMeta, 0, sizeof(sImportMeta));
+    if (entry.contentType == GDX_CONTENT_TYPE_TRACK) {
+        gdx_import_read_meta(path, 0);
     }
     memcpy(sImportTitle, entry.title, sizeof(sImportTitle));
 

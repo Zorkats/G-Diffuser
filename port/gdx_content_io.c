@@ -11,12 +11,15 @@
 
 #include "gdx_content_io.h"
 #include "gdx_content_pack.h"
+#include "gdx_course_meta.h"
+#include "gdx_course_meta_sign.h"
 #include "gdx_course_music.h"
 #include "gdx_course_registry.h"
 #include "gdx_course_settings.h"
 #include "gdx_course_state.h"
 #include "gdx_course_snapshot_io.h"
 #include "gdx_edit_cup.h"
+#include "gdx_profile_state.h"
 #include "port_log.h"
 
 #include <errno.h>
@@ -361,6 +364,19 @@ static int gdx_content_find_entry(const GdxContentEntry* entry, GdxMfsRamDirecto
     return 0;
 }
 
+/* Mfs_LoadFileInDir validates the name with mfsStrLen, so a name that fills all 20 bytes runs on
+ * into the extension field and is refused. Load through terminated copies instead. */
+static int32_t gdx_content_load_entry(const GdxMfsRamDirectoryEntry* dirEntry, uint8_t* out, int32_t size) {
+    char name[sizeof(dirEntry->name) + 1];
+    char extension[sizeof(dirEntry->extension) + 1];
+
+    memcpy(name, dirEntry->name, sizeof(dirEntry->name));
+    name[sizeof(dirEntry->name)] = '\0';
+    memcpy(extension, dirEntry->extension, sizeof(dirEntry->extension));
+    extension[sizeof(dirEntry->extension)] = '\0';
+    return Mfs_LoadFileInDir(gWorkingDirectory, name, extension, out, size);
+}
+
 /* ---------------------------------------------------------------------------------
  * E2 import preflight queries (gdx_content_import.c is the only caller).
  * ------------------------------------------------------------------------------- */
@@ -530,6 +546,85 @@ static int gdx_content_write_bytes_atomic(const char* path, const unsigned char*
     return GDX_CONTENT_OK;
 }
 
+/* Checks or adds the signature of export member index before its sidecar block is written
+ * (gdx_course_meta_sign.h). The local store learns the outcome, so the course select shows it too. *seedState
+ * is 0 until the active profile's seed is first needed, then 1 when seed holds it or -1 when it could not be
+ * had. */
+static void gdx_content_sign_meta(const char* courseId, int index, GdxCourseMeta* meta,
+                                  unsigned char seed[GDX_PROFILE_KEYS_SEED_BYTES], int* seedState) {
+    const char* signer = gdx_profile_state_active_name();
+    GdxMetaSignDigest d;
+    int rc;
+
+    d.ok = 0;
+    if (!gdx_snapshot_export_content(index, gdx_meta_sign_digest_visit, &d)) {
+        d.ok = 0;
+    }
+    /* The seed is made only for a track this profile will sign, never just because something was exported. */
+    if ((*seedState == 0) && d.ok && !meta->hasSignature && meta->madeHere && (signer != NULL) &&
+        (strcmp(signer, meta->author) == 0)) {
+        rc = gdx_profile_state_active_seed(seed);
+        *seedState = (rc == GDX_PROFILE_OK) ? 1 : -1;
+        if (rc != GDX_PROFILE_OK) {
+            gdx_port_logf("[content] no signing key for the active profile (%d)\n", rc);
+        }
+    }
+    rc = gdx_meta_sign_for_export(meta, d.ok ? d.digest : NULL, signer, (*seedState == 1) ? seed : NULL);
+    if ((rc == GDX_META_SIGN_SIGNED) || (rc == GDX_META_SIGN_DROPPED)) {
+        gdx_port_logf("[content] %s: %s\n", courseId,
+                      (rc == GDX_META_SIGN_SIGNED) ? "signed" : "signature no longer matches, dropped");
+        if (gdx_meta_store_set(courseId, meta) != GDX_META_OK) {
+            gdx_port_logf("[content] %s: signature state not stored\n", courseId);
+        }
+    }
+}
+
+/* Writes <stem>.gdxm beside gdxcPath when a track has creator metadata, each block bound to its payload CRC. No
+ * file at all otherwise: 1.2.3 and older refuse a package member they do not know. Returns 1 when written, 0 when
+ * no track has any, -1 on failure. */
+static int gdx_content_write_meta(const char* gdxcPath, const char* const* names, const char* extension,
+                                  const uint32_t* payloadCrcs, int count) {
+    char courseIds[GDX_CONTENT_BUNDLE_MAX_TRACKS][GDX_BRANCH_COURSE_ID_MAX + 1];
+    GdxCourseMeta metas[GDX_CONTENT_BUNDLE_MAX_TRACKS];
+    GdxMetaSidecarEntry entries[GDX_CONTENT_BUNDLE_MAX_TRACKS];
+    unsigned char bytes[GDX_META_SIDECAR_WRITE_MAX_BYTES];
+    unsigned char seed[GDX_PROFILE_KEYS_SEED_BYTES];
+    char metaPath[1600];
+    size_t pathLen = strlen(gdxcPath);
+    int seedState = 0;
+    int length;
+    int i;
+
+    if (count < 1 || count > GDX_CONTENT_BUNDLE_MAX_TRACKS || pathLen >= sizeof(metaPath)) {
+        return -1;
+    }
+    for (i = 0; i < count; i++) {
+        if (!gdx_course_music_course_id(names[i], extension, courseIds[i], (int) sizeof(courseIds[i])) ||
+            !gdx_meta_store_get(courseIds[i], &metas[i])) {
+            memset(&metas[i], 0, sizeof(metas[i]));
+        } else {
+            /* Export members are numbered in the order this loop walks them. */
+            gdx_content_sign_meta(courseIds[i], i, &metas[i], seed, &seedState);
+        }
+        entries[i].courseId = courseIds[i];
+        entries[i].bindCrc = payloadCrcs[i];
+        entries[i].meta = &metas[i];
+    }
+    if (seedState == 1) {
+        gdx_profile_keys_wipe(seed, sizeof(seed));
+    }
+    length = gdx_meta_sidecar_encode(entries, count, bytes, sizeof(bytes));
+    if (length <= 0) {
+        if (length < 0) {
+            gdx_port_logf("[content] creator metadata not written (%d)\n", length);
+        }
+        return length == 0 ? 0 : -1;
+    }
+    memcpy(metaPath, gdxcPath, pathLen + 1);
+    metaPath[pathLen - 1] = 'm'; /* <stem>.gdxc -> <stem>.gdxm */
+    return gdx_content_write_bytes_atomic(metaPath, bytes, (size_t) length) == GDX_CONTENT_OK ? 1 : -1;
+}
+
 int gdx_content_track_preview(const char* name, const void* base, float* x, float* z,
                                int capacity, struct GdxBranchSet* forks) {
     if (gdx_content_mfs_busy()) {
@@ -564,8 +659,7 @@ int gdx_content_load_track_payload(const char* name, uint8_t* out, size_t outCap
     if (dirEntry.fileSize != GDX_CONTENT_TRACK_PAYLOAD_SIZE) {
         return GDX_CONTENT_ERR_BAD_SIZE;
     }
-    if (Mfs_LoadFileInDir(gWorkingDirectory, dirEntry.name, dirEntry.extension, out,
-                          GDX_CONTENT_TRACK_PAYLOAD_SIZE) != 0) {
+    if (gdx_content_load_entry(&dirEntry, out, GDX_CONTENT_TRACK_PAYLOAD_SIZE) != 0) {
         return GDX_CONTENT_ERR_LOAD;
     }
     return GDX_CONTENT_OK;
@@ -660,9 +754,7 @@ int gdx_content_export(const GdxContentEntry* entry, char* outPath, size_t outCa
         free(payload);
         return GDX_CONTENT_ERR_BUSY;
     }
-    /* MFS copies the name/extension out by fixed width; passing the mirrored dir-entry fields
-     * keeps the unterminated-byte semantics exactly. */
-    if (Mfs_LoadFileInDir(gWorkingDirectory, dirEntry.name, dirEntry.extension, payload, expectedSize) != 0) {
+    if (gdx_content_load_entry(&dirEntry, payload, expectedSize) != 0) {
         free(payload);
         return GDX_CONTENT_ERR_LOAD;
     }
@@ -718,10 +810,23 @@ int gdx_content_export(const GdxContentEntry* entry, char* outPath, size_t outCa
     }
 
     if (entry->contentType == GDX_CONTENT_TYPE_TRACK) {
-        if (!gdx_snapshot_export_write(path, gdx_content_crc32(payload, expectedSize))) {
+        const char* names[1] = { entry->name };
+        const uint32_t payloadCrc = gdx_content_crc32(payload, expectedSize);
+        int meta;
+
+        if (!gdx_snapshot_export_write(path, payloadCrc)) {
             free(payload);
             gdx_content_pack_clear_dir(directory, 1);
             return GDX_CONTENT_ERR_IO;
+        }
+        meta = gdx_content_write_meta(path, names, entry->extension, &payloadCrc, 1);
+        if (meta < 0) {
+            free(payload);
+            gdx_content_pack_clear_dir(directory, 1);
+            return GDX_CONTENT_ERR_IO;
+        }
+        if (meta > 0) {
+            flags |= GDX_CONTENT_FLAG_META;
         }
     }
 
@@ -881,8 +986,7 @@ int gdx_content_export_bundle(char* outPath, size_t outCap) {
             free(trackBuf);
             return GDX_CONTENT_ERR_BUSY;
         }
-        if (Mfs_LoadFileInDir(gWorkingDirectory, dirEntry.name, dirEntry.extension, trackBuf,
-                              GDX_CONTENT_TRACK_PAYLOAD_SIZE) != 0) {
+        if (gdx_content_load_entry(&dirEntry, trackBuf, GDX_CONTENT_TRACK_PAYLOAD_SIZE) != 0) {
             free(bundlePayload);
             free(trackBuf);
             return GDX_CONTENT_ERR_LOAD;
@@ -935,6 +1039,23 @@ int gdx_content_export_bundle(char* outPath, size_t outCap) {
         free(bundlePayload);
         gdx_content_pack_clear_dir(directory, 1);
         return GDX_CONTENT_ERR_IO;
+    }
+    {
+        const char* names[GDX_CONTENT_BUNDLE_MAX_TRACKS];
+        int meta;
+
+        for (i = 0; i < trackCount; i++) {
+            names[i] = packedNames[i];
+        }
+        meta = gdx_content_write_meta(path, names, "CRSD", memberCrc, trackCount);
+        if (meta < 0) {
+            free(bundlePayload);
+            gdx_content_pack_clear_dir(directory, 1);
+            return GDX_CONTENT_ERR_IO;
+        }
+        if (meta > 0) {
+            flags |= GDX_CONTENT_FLAG_META;
+        }
     }
     rc = gdx_content_write_container_raw(path, GDX_CONTENT_TYPE_BUNDLE, gdx_content_fourcc("CENT"),
                                          GDX_CONTENT_BUNDLE_NAME, flags, bundlePayload,

@@ -31,6 +31,11 @@ bool seal(Generation&);
 bool legacyImage(Generation&);
 bool rebind(Generation&, uint64_t disk, uint16_t directory, const std::string& courseId);
 bool portable(Generation&, bool stripGhosts);
+// The track as its author made it, for signing (gdx_course_meta_sign.h): the encoding of g with the identity
+// set to CONTENT.CRSD on disk 1, directory 0, the native checksum back in place, and every byte past the
+// course zeroed. Ghosts, records, the name, the slot and the seal leave it unchanged. Course bytes, title,
+// music, settings and forks change it.
+bool content(const Generation&, Bytes&);
 bool packageEncode(const std::vector<Generation>&, uint32_t containerCrc, Bytes&);
 bool packageDecode(const Bytes&, uint32_t containerCrc, std::vector<Generation>&);
 std::string key(uint64_t disk, uint16_t directory, const std::string& courseId, const Bytes& base);

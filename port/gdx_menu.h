@@ -65,6 +65,7 @@ class GdxMenu final : public Ship::GuiWindow {
     void DrawScripts();
     void DrawAssetDump();
     void DrawDdSave();
+    void DrawSaveImport();
     void DrawDevToolButtons();
     // Developer gates (port/gdx_dev_gates.{h,c}). Stays a custom block: the per-gate tooltip is a
     // four-argument runtime format and the value is a gdx_dev_gate() call, not a CVar read.

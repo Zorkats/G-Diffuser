@@ -28,6 +28,24 @@ void gdx_sram_read(unsigned int offset, void* dst, unsigned int size);
 // needed at this size and call frequency.
 void gdx_sram_write(unsigned int offset, const void* src, unsigned int size);
 
+// Imports an emulator cartridge save (.sra, or a RetroArch parallel-n64 .srm) into the save in
+// use. The file is converted and checked now, then waits beside the save as <save>.import until
+// the next launch, when gdx_sram_init backs up the current save and swaps the import in. The
+// running session's save is never touched, because the game still holds it in memory and would
+// write its sections back over the import. Returns 1 when staged; message receives a one-line
+// result either way.
+int gdx_sram_import_stage(const char* sourcePathUtf8, char* message, size_t messageCap);
+
+// 1 while an import waits for the next launch.
+int gdx_sram_import_pending(void);
+
+// Drops a waiting import. Returns 1 when nothing waits afterwards.
+int gdx_sram_import_cancel(void);
+
+// What this launch did with a waiting import: 0 nothing was waiting, 1 applied, -1 not applied.
+// message receives the line the menu shows, and is left empty for 0.
+int gdx_sram_import_launch_result(char* message, size_t messageCap);
+
 #ifdef __cplusplus
 }
 #endif

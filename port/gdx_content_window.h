@@ -46,6 +46,7 @@ class GdxContentWindow : public Ship::GuiWindow {
     void DrawRomImportSection(bool busy, bool inGameplay);
     void LoadTrackPreview(int row);
     void DrawTrackPreview();
+    void DrawTrackCredits(const GdxContentEntry& entry);
 
     GdxContentEntry mEntries[GDX_CONTENT_MAX_ENTRIES] = {};
     int mEntryCount = 0;

@@ -343,9 +343,51 @@ static void packageTests() {
     assert(!packageEncode(members, 123, bytes));
 }
 
+// content() is what a signature covers: blind to identity, seal and ghosts, not to the track.
+static void signedContentTests() {
+    using namespace gdx::snapshot;
+    for (int count : {10, 100}) {
+        auto unsealed = fixture(count);
+        unsealed.base[CourseBytes + 7] = 0x32;
+        Bytes reference;
+        assert(content(unsealed, reference) && !reference.empty());
+        auto sealed = unsealed;
+        assert(seal(sealed) && (sealed.base[8] & 0x80));
+        Bytes bytes;
+        assert(content(sealed, bytes) && bytes == reference);
+        auto moved = sealed;
+        assert(rebind(moved, 0x88776655, 7, "RENAMED.CRSE"));
+        assert(content(moved, bytes) && bytes == reference);
+        auto shipped = sealed;
+        assert(portable(shipped, true) && shipped.base[CourseBytes + 7] == 0);
+        assert(content(shipped, bytes) && bytes == reference);
+        auto raced = sealed;
+        raced.base[BaseBytes - 1] = 0x44;
+        assert(seal(raced));  // the game reseals every save
+        assert(content(raced, bytes) && bytes == reference);
+
+        auto edited = sealed;
+        edited.base[0x100] ^= 1;
+        assert(seal(edited));
+        assert(content(edited, bytes) && bytes != reference);
+        auto retitled = sealed;
+        Bytes title(512);
+        const int n = gdx_course_title_encode("Another title", binding(retitled), title.data(), title.size());
+        assert(n > 0);
+        retitled.metadata[size_t(Metadata::Title)].assign(title.begin(), title.begin() + n);
+        assert(seal(retitled));
+        assert(content(retitled, bytes) && bytes != reference);
+        auto broken = sealed;
+        broken.base.resize(16);
+        assert(!content(broken, bytes));
+    }
+    std::puts("Signed content: identity, seal and ghosts ignored; course and title covered.");
+}
+
 int main() {
     contentBindingTests();
     packageTests();
+    signedContentTests();
     {
         auto first = fixture();
         assert(seal(first));

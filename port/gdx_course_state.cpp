@@ -4,10 +4,12 @@
 #include "gdx_course_state.h"
 
 #include "gdx_course_branch_format.h"
+#include "gdx_course_meta.h"
 #include "gdx_course_music.h"
 #include "gdx_course_packs.h"
 #include "gdx_course_registry.h"
 #include "gdx_course_settings.h"
+#include "gdx_profile_state.h"
 #include "port_log.h"
 #include "gdx_track_recovery_runtime.h"
 #include "gdx_course_snapshot_io.h"
@@ -21,9 +23,9 @@
 
 namespace {
 
-// Course Edit element choices, the course forks (gdx_course_branch_format.h) and the per-track settings
-// (gdx_course_settings.h). Each store has its own file and revision, so one store's edit never rewrites
-// another store's file.
+// Course Edit element choices, the course forks (gdx_course_branch_format.h), the per-track settings
+// (gdx_course_settings.h) and the creator metadata (gdx_course_meta.h). Each store has its own file and
+// revision, so one store's edit never rewrites another store's file.
 struct StoreFile {
     const char* name;
     const char* label;
@@ -46,6 +48,18 @@ StoreFile sForkFile = { "course-forks.gbs",               "course fork store",  
 StoreFile sSettingsFile = { "course-settings.gks",           "course settings store",        GDX_SETTINGS_FILE_MAX_BYTES,
                             gdx_settings_store_restore_file, gdx_settings_store_encode_file, gdx_settings_store_revision,
                             false,                           0 };
+// Not part of track recovery or snapshots (gdx_course_meta.h says why), so recovery never waits on it.
+StoreFile sMetaFile = { "course-meta.gms",            "course creator store",   GDX_META_FILE_MAX_BYTES,
+                        gdx_meta_store_restore_file,  gdx_meta_store_encode_file, gdx_meta_store_revision,
+                        false,                        0 };
+// The player profiles (gdx_profile_state.h). Not a course store, but the same load and save rules apply.
+StoreFile sProfileFile = { "profiles.gps",                  "profile store",               GDX_PROFILE_FILE_MAX_BYTES,
+                           gdx_profile_state_restore_file,  gdx_profile_state_encode_file, gdx_profile_state_revision,
+                           false,                           0 };
+// The signing seeds of the profiles (gdx_profile_keys.h), apart from profiles.gps so a profile never carries one.
+StoreFile sKeyFile = { "profile-keys.gpk",                  "profile key store",                GDX_PROFILE_KEYS_FILE_MAX_BYTES,
+                       gdx_profile_state_keys_restore_file, gdx_profile_state_keys_encode_file, gdx_profile_state_keys_revision,
+                       false,                               0 };
 
 // Course id of the file the Course Edit course came from, empty when it has none.
 char sEditFileId[GDX_COURSE_FILE_ID_MAX + 1] = "";
@@ -185,9 +199,13 @@ extern "C" int gdx_course_state_load(void) {
     const int settings = store_load(&sSettingsFile);
     const int forks = store_load(&sForkFile);
     const int elements = store_load(&sElementFile);
+    const int meta = store_load(&sMetaFile);
+    const int profiles = store_load(&sProfileFile);
+    const int keys = store_load(&sKeyFile);
 
     sRecoveryReady = settings >= 0 && forks >= 0 && elements >= 0;
-    return (elements < 0) ? elements : (forks < 0) ? forks : (settings < 0) ? settings : elements;
+    return (elements < 0) ? elements : (forks < 0) ? forks : (settings < 0) ? settings : (meta < 0) ? meta :
+           (profiles < 0) ? profiles : (keys < 0) ? keys : elements;
 }
 
 extern "C" int gdx_course_state_flush(void) {
@@ -197,8 +215,12 @@ extern "C" int gdx_course_state_flush(void) {
     const int settings = store_flush(&sSettingsFile);
     const int forks = store_flush(&sForkFile);
     const int elements = store_flush(&sElementFile);
+    const int meta = store_flush(&sMetaFile);
+    const int profiles = store_flush(&sProfileFile);
+    const int keys = store_flush(&sKeyFile);
 
-    return (elements < 0) ? elements : (forks < 0) ? forks : (settings < 0) ? settings : elements;
+    return (elements < 0) ? elements : (forks < 0) ? forks : (settings < 0) ? settings : (meta < 0) ? meta :
+           (profiles < 0) ? profiles : (keys < 0) ? keys : elements;
 }
 
 extern "C" void gdx_course_state_on_file_renamed(const char* oldName, const char* oldExtension,
@@ -217,6 +239,7 @@ extern "C" void gdx_course_state_on_file_renamed(const char* oldName, const char
     gdx_course_boot();
     gdx_branch_store_rename(oldId, newId);
     gdx_settings_store_rename(oldId, newId);
+    gdx_meta_store_rename(oldId, newId);
     rc = gdx_course_store_rename(oldId, newId);
     if (rc != GDX_COURSE_OK) {
         gdx_port_logf("[state] rename %s to %s: keys not moved (%d)\n", oldId, newId, rc);
@@ -242,6 +265,8 @@ extern "C" void gdx_course_state_on_file_deleted(const char* name, const char* e
         gdx_branch_store_set(courseId, &noForks);
         const GdxCourseSettings noSettings{};
         gdx_settings_store_set(courseId, &noSettings);
+        const GdxCourseMeta noMeta{};
+        gdx_meta_store_set(courseId, &noMeta);
     }
     gdx_course_state_flush();
 }

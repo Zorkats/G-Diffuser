@@ -375,6 +375,22 @@ bool portable(Generation& generation, bool stripGhosts) {
     return true;
 }
 
+bool content(const Generation& generation, Bytes& out) {
+    if (!valid(generation)) {
+        return false;
+    }
+    Generation canonical = generation;
+    canonical.version = 2;
+    // An unsealed image still holds the native checksum where the seal goes (see seal()).
+    if (!(canonical.base[8] & 0x80)) {
+        canonical.nativeChecksum = uint32_t(get(canonical.base, 4, 4));
+    }
+    canonical.base[8] &= 0x7F;
+    put(canonical.base, 4, canonical.nativeChecksum, 4);
+    std::fill(canonical.base.begin() + CourseBytes, canonical.base.end(), 0);
+    return bindIdentity(canonical, 1, 0, "CONTENT.CRSD") && bindForks(canonical) && encode(canonical, out);
+}
+
 bool packageEncode(const std::vector<Generation>& members, uint32_t containerCrc, Bytes& out) {
     if (members.empty() || members.size() > 6) {
         return false;

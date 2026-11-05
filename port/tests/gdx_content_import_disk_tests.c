@@ -18,7 +18,7 @@ static int32_t sBundleTrackCount = 1, sBundleFailedIndex;
 static char sBundleNames[GDX_CONTENT_BUNDLE_MAX_TRACKS][21] = { "TRACK" };
 static uint8_t sBundleCent[GDX_EDIT_CUP_WIDE_SIZE];
 static uint8_t sBundlePayloads[GDX_CONTENT_BUNDLE_MAX_TRACKS][GDX_CONTENT_TRACK_PAYLOAD_SIZE];
-static int deleteError, centError, saveCalls, restores, ends;
+static int deleteError, centError, saveCalls, restores, ends, metaStores;
 
 int gdx_snapshot_begin(int writing) {
     return writing;
@@ -28,6 +28,12 @@ void gdx_snapshot_end(void) {
 }
 static int gdx_import_prepare_snapshot(int index) {
     return 1;
+}
+/* Counts only calls that pass the installed bytes, which the signature check needs. */
+static void gdx_import_store_meta(const char* name, const char* extension, int index, const void* base) {
+    if (base != NULL) {
+        ++metaStores;
+    }
 }
 int gdx_snapshot_import_check(unsigned short directory, const char* const* names,
                                const void* const* bases, int count) {
@@ -52,7 +58,7 @@ static int32_t Mfs_SaveFile(uint16_t directory, char* name, char* extension, uin
 #include "../gdx_content_import_disk.inc"
 
 static void reset(void) {
-    deleteError = centError = saveCalls = restores = ends = 0;
+    deleteError = centError = saveCalls = restores = ends = metaStores = 0;
     memset(gEditCupTrackNames, 0, sizeof(gEditCupTrackNames));
     memcpy(gEditCupTrackNames[0], "TRACK", 6);
     sImportState = sImportRc = sImportMfsError = sImportCupCleared = 0;
@@ -62,11 +68,11 @@ int main(void) {
     reset();
     deleteError = 0xF1;
     GdxContentImport_RunOnDiskThread();
-    assert(sImportRc != 0 && saveCalls == 0 && sImportMfsError == 0xF1 && ends == 1);
+    assert(sImportRc != 0 && saveCalls == 0 && sImportMfsError == 0xF1 && ends == 1 && metaStores == 0);
     reset();
     deleteError = 0xF2;
     GdxContentImport_RunOnDiskThread();
-    assert(sImportRc == 0 && saveCalls == 2 && restores == 1 && ends == 1);
+    assert(sImportRc == 0 && saveCalls == 2 && restores == 1 && ends == 1 && metaStores == 1);
     reset();
     centError = 0xF1;
     GdxContentImport_RunOnDiskThread();
@@ -75,11 +81,12 @@ int main(void) {
     reset();
     deleteError = 0xF1;
     GdxContentBundle_RunOnDiskThread();
-    assert(sImportRc != 0 && saveCalls == 0 && sBundleFailedIndex == 0 && ends == 1);
+    assert(sImportRc != 0 && saveCalls == 0 && sBundleFailedIndex == 0 && ends == 1 && metaStores == 0);
     reset();
     centError = 0xF1;
     GdxContentBundle_RunOnDiskThread();
-    assert(sImportRc != 0 && sBundleFailedIndex == 1 && restores == 1 && ends == 1);
+    /* The track itself was written, so its creator metadata was stored before the CENT write failed. */
+    assert(sImportRc != 0 && sBundleFailedIndex == 1 && restores == 1 && ends == 1 && metaStores == 1);
     assert(strcmp(gEditCupTrackNames[0], "TRACK") == 0);
     puts("All native import disk failure tests passed");
     return 0;

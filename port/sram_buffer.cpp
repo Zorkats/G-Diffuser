@@ -1,8 +1,13 @@
 #include "sram_buffer.h"
 #include "gdx_hackmods.h" // per-hack save isolation: gdx_hackmod_active_save_basename
+#include "gdx_save_import_stage.h" // #43: emulator saves staged now, applied at the next launch
 #include "port_log.h"
 #include <cstdio>
 #include <cstring>
+#include <ctime>
+#include <filesystem>
+#include <mutex>
+#include <string>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -205,12 +210,126 @@ static bool gdx_sram_path(char* outPath, size_t outCap) {
 }
 #endif // _WIN32 / POSIX gdx_sram_path
 
+} // extern "C"
+
+// The staged-import helpers take and return C++ types, so they sit outside the C-linkage block.
+namespace {
+
+// What this launch did with a staged import, for the menu (gdx_sram_import_launch_result). Written
+// once by gdx_sram_init on the game thread and read by the menu on the render thread.
+std::mutex s_importLaunchMutex;
+int s_importLaunchResult = 0;
+std::string s_importLaunchMessage;
+
+bool gdx_sram_live_path(std::filesystem::path& out) {
+#ifdef _WIN32
+    wchar_t path[MAX_PATH * 2] = {};
+    if (!gdx_sram_path(path, sizeof(path) / sizeof(path[0]))) {
+        return false;
+    }
+#else
+    char path[4096] = {};
+    if (!gdx_sram_path(path, sizeof(path))) {
+        return false;
+    }
+#endif
+    out = std::filesystem::path(path);
+    return true;
+}
+
+std::string gdx_sram_import_stamp() {
+    const std::time_t now = std::time(nullptr);
+    std::tm local{};
+#ifdef _WIN32
+    localtime_s(&local, &now);
+#else
+    localtime_r(&now, &local);
+#endif
+    char stamp[32];
+    if (std::strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", &local) == 0) {
+        snprintf(stamp, sizeof(stamp), "%lld", (long long) now);
+    }
+    return stamp;
+}
+
+// Runs before the live save is read, so the game only ever sees the imported image.
+void gdx_sram_apply_staged_import() {
+    std::filesystem::path live;
+    if (!gdx_sram_live_path(live)) {
+        return;
+    }
+    const gdx::SaveImportApplyResult r = gdx::ApplyStagedSaveImport(live, gdx_sram_import_stamp());
+    if (r.outcome == gdx::SaveImportApply::NothingStaged) {
+        return;
+    }
+    const bool applied = r.outcome == gdx::SaveImportApply::Applied;
+    std::string text = r.message;
+    if (applied) {
+        text = "Your imported save was applied at launch.";
+        if (!r.backup.empty()) {
+            text += " The previous save is kept as saves/" + r.backup.filename().string() + ".";
+        }
+    }
+    gdx_port_logf("[sram] %s: %s\n", gdx_hackmod_active_save_basename(), text.c_str());
+
+    std::lock_guard<std::mutex> lock(s_importLaunchMutex);
+    s_importLaunchResult = applied ? 1 : -1;
+    s_importLaunchMessage = std::move(text);
+}
+
+void gdx_sram_copy_message(const std::string& text, char* message, size_t messageCap) {
+    if (message != nullptr && messageCap > 0) {
+        snprintf(message, messageCap, "%s", text.c_str());
+    }
+}
+
+} // namespace
+
+extern "C" {
+
+int gdx_sram_import_stage(const char* sourcePathUtf8, char* message, size_t messageCap) {
+    std::filesystem::path live;
+    if (sourcePathUtf8 == nullptr || sourcePathUtf8[0] == '\0') {
+        gdx_sram_copy_message("Choose a save file first.", message, messageCap);
+        return 0;
+    }
+    if (!gdx_sram_live_path(live)) {
+        gdx_sram_copy_message("Could not find the saves folder.", message, messageCap);
+        return 0;
+    }
+    const std::filesystem::path source(std::u8string(reinterpret_cast<const char8_t*>(sourcePathUtf8)));
+    const gdx::SaveImportStageResult r = gdx::StageSaveImport(source, live);
+    gdx_port_logf("[sram] import request for %s: %s\n", gdx_hackmod_active_save_basename(), r.message.c_str());
+    gdx_sram_copy_message(r.message, message, messageCap);
+    return r.ok ? 1 : 0;
+}
+
+int gdx_sram_import_pending(void) {
+    std::filesystem::path live;
+    return gdx_sram_live_path(live) && gdx::SaveImportPending(live) ? 1 : 0;
+}
+
+int gdx_sram_import_cancel(void) {
+    std::filesystem::path live;
+    if (!gdx_sram_live_path(live)) {
+        return 0;
+    }
+    return gdx::CancelSaveImport(live) ? 1 : 0;
+}
+
+int gdx_sram_import_launch_result(char* message, size_t messageCap) {
+    std::lock_guard<std::mutex> lock(s_importLaunchMutex);
+    gdx_sram_copy_message(s_importLaunchMessage, message, messageCap);
+    return s_importLaunchResult;
+}
+
 void gdx_sram_init(void) {
     if (s_initialized) {
         return;
     }
     s_initialized = true;
     memset(s_sramBuffer, 0, sizeof(s_sramBuffer));
+    gdx_sram_apply_staged_import();
 
 #ifdef _WIN32
     wchar_t path[MAX_PATH * 2] = {};

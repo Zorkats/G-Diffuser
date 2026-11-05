@@ -277,6 +277,40 @@ extern "C" int gdx_snapshot_export_member(unsigned short directory, const char* 
     });
 }
 
+extern "C" int gdx_snapshot_export_content(int index, GdxSnapshotContentVisit visit, void* ctx) {
+    if (!visit || index < 0 || size_t(index) >= exported.size()) {
+        return 0;
+    }
+    try {
+        Bytes bytes;
+        if (!content(exported[size_t(index)], bytes)) {
+            return 0;
+        }
+        visit(bytes.data(), static_cast<unsigned long>(bytes.size()), ctx);
+        return 1;
+    } catch (...) {
+        return 0;
+    }
+}
+
+extern "C" int gdx_snapshot_content(unsigned short directory, const char* name, const char* extension,
+                                     const void* base, GdxSnapshotContentVisit visit, void* ctx) {
+    if (!base || !visit) {
+        return 0;
+    }
+    return repository([&](Backend& files) {
+        Generation g;
+        Bytes bytes;
+        const auto* p = static_cast<const unsigned char*>(base);
+        if (!identity(g, directory, name, extension) || readState(files, g, Bytes(p, p + BaseBytes)) != Result::Ok ||
+            !content(g, bytes)) {
+            return false;
+        }
+        visit(bytes.data(), static_cast<unsigned long>(bytes.size()), ctx);
+        return true;
+    });
+}
+
 extern "C" int gdx_snapshot_export_write(const char* containerPath, unsigned int containerCrc) {
     try {
         Bytes bytes;

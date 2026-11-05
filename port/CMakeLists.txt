@@ -12,6 +12,12 @@ set(GDX_DISPLAY_VERSION "1.2.3" CACHE STRING "Version shown in the About menu")
 # offers updates (gdx_update.cpp).
 set(GDX_BUILD_CHANNEL "dev" CACHE STRING "Update channel: stable, nightly or dev")
 set(GDX_BUILD_COMMIT "" CACHE STRING "Short commit hash of this build")
+# PowerShell splits an unquoted -DGDX_DISPLAY_VERSION=1.2.3 at the first period, and the cache
+# then keeps "1" over the default above. Nightly versions carry a date and hash instead.
+if(NOT GDX_BUILD_CHANNEL STREQUAL "nightly" AND NOT GDX_DISPLAY_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+")
+    message(FATAL_ERROR "GDX_DISPLAY_VERSION \"${GDX_DISPLAY_VERSION}\" is not an x.y.z version. "
+                        "Quote the whole argument: \"-DGDX_DISPLAY_VERSION=1.2.3\".")
+endif()
 set(GDX_BUILD_DEFS
     GDX_VERSION_STRING="${GDX_DISPLAY_VERSION}"
     GDX_BUILD_CHANNEL="${GDX_BUILD_CHANNEL}"
@@ -152,12 +158,14 @@ list(FILTER GAME_SOURCES EXCLUDE REGEX "/sys/cartridge_offsets\\.c$")
 add_library(gdiffuser_game OBJECT ${GAME_SOURCES}
     "${CMAKE_CURRENT_SOURCE_DIR}/decomp_port.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_branch.c"       # Course Edit forks: race runtime (ring 2)
+    "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_splits_course.c" # CM4 splits: the raced course's checkpoints and mode
     "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_contact.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_cpu_native.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_disk.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_snapshot_native.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_snapshot_mfs.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_branch_editor.c" # Course Edit forks: editor hooks and tools
+    "${CMAKE_CURRENT_SOURCE_DIR}/gdx_det_layout.c"         # GDX_DET_LOG probe fields; needs the decomp Racer layout
     "${CMAKE_CURRENT_SOURCE_DIR}/n64_sched.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/n64_vi.c"
     "${DECOMP}/src/libultra/io/devmgr.c"                  # outside the glob: PORT PI manager, host-backed DMA completion
@@ -353,6 +361,7 @@ gdx_add_main_target(G-Diffuser
     gdx_bg_sprites.c           # Per-course skyline sprites from the mounted archive, same reason
     gdx_game_text.c            # Menu, ending and credits text from the mounted archive, same reason
     gdx_input_script.c
+    gdx_det_probe.c            # GDX_DET_LOG writer; gdx_det_layout.c calls it
     gdx_input_actions.c        # 3A action layer: per-context N64 button tables, called from
                                # gdx_controller_poll before the dev overrides and mouse merges
     gdx_input_profiles.c       # 4A controller profiles: presets that write the 3A Race table
@@ -409,6 +418,20 @@ gdx_add_main_target(G-Diffuser
     gdx_course_branch_edit.c       # Course forks: editor fork set, path B view swap, undo state (pure C)
     gdx_course_settings.c          # Per-track and per-point values: GXK1 block, GKS1 file, .gdxb sidecar (pure C)
     gdx_course_settings_view.c     # The active values in plain types for global.h code
+    gdx_course_meta.c              # Creator metadata: author, Edited by, staff time; GXM1, GMS1, .gdxm (pure C)
+    gdx_course_meta_view.c         # The raced track's staff time CPU target in plain types for cpu.c
+    gdx_course_splits.c            # CM4 staff run splits: GXM1 tag 5 codec, run recorder, pacing curve (pure C)
+    gdx_course_splits_view.c       # CM4 splits recording for racer.c and Expert and Master pacing for cpu.c
+    gdx_draw_distance.c            # Draw distance and Extended draw distance scales (issue #45)
+    gdx_course_sign.c              # CM5 Ed25519 track signatures over Monocypher (pure C)
+    gdx_course_meta_sign.c         # CM5 signature rules: keep, drop or sign on export, check on import
+    gdx_profile_keys.c             # CM5 signing seeds: GPK1 profile-keys.gpk codec (pure C)
+    gdx_profile.c                  # Player profiles: GPF1 profile and GPS1 store codecs (pure C)
+    gdx_profile_state.cpp          # The live profile store, its revision and random profile ids
+    gdx_profile_page.cpp           # Online > Profile menu page
+    gdx_menu_words.c               # Menu row labels composed at runtime from words of the stock menu textures
+    gdx_save_import.c              # Emulator cartridge save to native fzerox.sav image (pure C)
+    gdx_save_import_stage.cpp      # Stages that image beside the save; sram_buffer applies it next launch
     gdx_update.cpp                 # Update check, verified download, and the gdx-update handoff
     gdx_update_ui.cpp              # Launch update check, update notice, About page Updates block
     gdx_rom_courses.c              # W2 ROM course table reader; converts ROM courses (including
@@ -728,6 +751,7 @@ target_link_libraries(G-Diffuser PRIVATE cxd4_rsp)
 target_link_libraries(G-Diffuser PRIVATE discord-rpc)
 target_link_libraries(G-Diffuser PRIVATE gdx_lua)
 target_link_libraries(G-Diffuser PRIVATE gdx_music_decoders)
+target_link_libraries(G-Diffuser PRIVATE monocypher)
 
 if(WIN32)
     # user32: MessageBox; Comdlg32: ROM picker; Comctl32: extraction progress marquee;
@@ -941,6 +965,18 @@ if(MSVC)
     target_compile_options(gdx_course_settings_tests PRIVATE /W3)
 elseif(GDX_PORT_WARN_FLAGS)
     target_compile_options(gdx_course_settings_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+
+# Creator metadata: GXM1 block, editor save rules, CPU target, GMS1 file and .gdxm sidecar. Standalone pure C.
+add_executable(gdx_course_meta_tests
+    tests/gdx_course_meta_tests.c
+    gdx_course_meta.c
+    gdx_course_splits.c
+    gdx_course_registry.c)
+if(MSVC)
+    target_compile_options(gdx_course_meta_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_course_meta_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
 endif()
 
 # Course fork editing: split, link, ring hooks, path B view swap and undo state. Standalone pure C.
@@ -1277,6 +1313,166 @@ if(MSVC)
 elseif(GDX_PORT_WARN_FLAGS)
     target_compile_options(gdx_lap_digits_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
 endif()
+# Menu-words test: compiles gdx_menu_words.c UNMODIFIED with synthesized textures only.
+add_executable(gdx_menu_words_tests
+    tests/gdx_menu_words_tests.c
+    gdx_menu_words.c)
+target_include_directories(gdx_menu_words_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_menu_words_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_menu_words_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# Draw distance test: gdx_draw_distance.c with a CVarGetInteger stub, as the EK game build sees it.
+add_executable(gdx_draw_distance_tests
+    tests/gdx_draw_distance_tests.c
+    gdx_draw_distance.c)
+target_include_directories(gdx_draw_distance_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_definitions(gdx_draw_distance_tests PRIVATE EXPANSION_KIT)
+if(MSVC)
+    target_compile_options(gdx_draw_distance_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_draw_distance_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# Course signing test (CM5): gdx_course_sign.c over libultraship's Monocypher, RFC 8032 vectors.
+add_executable(gdx_course_sign_tests
+    tests/gdx_course_sign_tests.c
+    gdx_course_sign.c)
+target_include_directories(gdx_course_sign_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(gdx_course_sign_tests PRIVATE monocypher)
+if(MSVC)
+    target_compile_options(gdx_course_sign_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_course_sign_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# CM5 signature rules: keep, drop and sign, over the real codec and Monocypher.
+add_executable(gdx_course_meta_sign_tests
+    tests/gdx_course_meta_sign_tests.c
+    gdx_course_meta_sign.c
+    gdx_course_sign.c
+    gdx_course_meta.c
+    gdx_course_splits.c
+    gdx_course_registry.c)
+target_include_directories(gdx_course_meta_sign_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(gdx_course_meta_sign_tests PRIVATE monocypher)
+if(MSVC)
+    target_compile_options(gdx_course_meta_sign_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_course_meta_sign_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# CM5 signing seeds: the GPK1 profile-keys.gpk codec and its small store.
+add_executable(gdx_profile_keys_tests
+    tests/gdx_profile_keys_tests.c
+    gdx_profile_keys.c
+    gdx_course_registry.c)
+target_include_directories(gdx_profile_keys_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_profile_keys_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_profile_keys_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# CM4 per-node splits: the split record codec, the run recorder and the pacing curve.
+add_executable(gdx_course_splits_tests
+    tests/gdx_course_splits_tests.c
+    gdx_course_splits.c)
+target_include_directories(gdx_course_splits_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_course_splits_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_course_splits_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# Save-import test: compiles gdx_save_import.c UNMODIFIED with synthesized save images only.
+add_executable(gdx_save_import_tests
+    tests/gdx_save_import_tests.c
+    gdx_save_import.c)
+target_include_directories(gdx_save_import_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_save_import_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_save_import_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# Staged save-import test: compiles gdx_save_import_stage.cpp and gdx_save_import.c UNMODIFIED and
+# works on synthesized saves in a scratch folder under the system temp directory.
+add_executable(gdx_save_import_stage_tests
+    tests/gdx_save_import_stage_tests.cpp
+    gdx_save_import_stage.cpp
+    gdx_save_import.c)
+target_include_directories(gdx_save_import_stage_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_save_import_stage_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_save_import_stage_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# Online O2 UDP socket test: compiles net/gdx_net_socket.cpp UNMODIFIED and exchanges datagrams
+# between ephemeral sockets on 127.0.0.1 only, so nothing leaves the machine.
+add_executable(gdx_net_socket_tests
+    tests/gdx_net_socket_tests.cpp
+    net/gdx_net_socket.cpp)
+target_compile_features(gdx_net_socket_tests PRIVATE cxx_std_17)
+if(WIN32)
+    target_link_libraries(gdx_net_socket_tests PRIVATE ws2_32)
+endif()
+if(MSVC)
+    target_compile_options(gdx_net_socket_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_net_socket_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# Online O1 profile test: GPF1/GPS1 codecs, the store and the icon helpers. Links the course meta module so
+# the profile name rule is checked against the real track author validator.
+add_executable(gdx_profile_tests
+    tests/gdx_profile_tests.c
+    gdx_profile.c
+    gdx_course_meta.c
+    gdx_course_splits.c
+    gdx_course_registry.c)
+target_include_directories(gdx_profile_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_profile_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_profile_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# CM1: the live profile store (edits, revision, file restore, random ids) and the Author and Edited by
+# rule it feeds in gdx_course_meta.c.
+add_executable(gdx_profile_state_tests
+    tests/gdx_profile_state_tests.cpp
+    gdx_profile_state.cpp
+    gdx_profile_keys.c
+    gdx_profile.c
+    gdx_course_meta.c
+    gdx_course_splits.c
+    gdx_course_registry.c)
+target_include_directories(gdx_profile_state_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_features(gdx_profile_state_tests PRIVATE cxx_std_17)
+if(MSVC)
+    target_compile_options(gdx_profile_state_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_profile_state_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# Online O2 channel test: handshake, ordering, acks and timeouts over a simulated lossy link on a
+# fake clock. No socket, so it runs anywhere.
+add_executable(gdx_net_channel_tests
+    tests/gdx_net_channel_tests.cpp
+    net/gdx_net_channel.cpp)
+target_compile_features(gdx_net_channel_tests PRIVATE cxx_std_17)
+if(MSVC)
+    target_compile_options(gdx_net_channel_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_net_channel_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# Online O2 loopback test: the channel over two real UDP sockets on 127.0.0.1.
+add_executable(gdx_net_loopback_tests
+    tests/gdx_net_loopback_tests.cpp
+    net/gdx_net_channel.cpp
+    net/gdx_net_socket.cpp)
+target_compile_features(gdx_net_loopback_tests PRIVATE cxx_std_17)
+if(WIN32)
+    target_link_libraries(gdx_net_loopback_tests PRIVATE ws2_32)
+endif()
+if(MSVC)
+    target_compile_options(gdx_net_loopback_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_net_loopback_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
 # Game-text test: compiles gdx_game_text.c UNMODIFIED against stub text and archive reader, with
 # synthesized payloads only.
 add_executable(gdx_game_text_tests
@@ -1384,12 +1580,14 @@ if(GDX_BUILD_JP AND NOT ANDROID)
     add_library(gdiffuser_game_jp OBJECT ${GAME_SOURCES}
         "${CMAKE_CURRENT_SOURCE_DIR}/decomp_port.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_branch.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_splits_course.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_contact.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_cpu_native.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_disk.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_snapshot_native.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_snapshot_mfs.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_branch_editor.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/gdx_det_layout.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/n64_sched.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/n64_vi.c"
         "${DECOMP}/src/libultra/io/devmgr.c"
@@ -1464,6 +1662,7 @@ if(GDX_BUILD_JP AND NOT ANDROID)
         gdx_discord.cpp
         input_bridge.c
         gdx_input_script.c
+        gdx_det_probe.c        # GDX_DET_LOG writer; gdx_det_layout.c calls it
         gdx_input_actions.c    # 3A action layer; input_bridge.c calls it, so this target links it too
         gdx_input_profiles.c   # 4A controller profiles; the Actions page in gdx_menu_registry.cpp calls it
         gdx_steering_curve.c   # racer.c calls it, and the Controls page in gdx_menu_registry.cpp
@@ -1527,6 +1726,20 @@ if(GDX_BUILD_JP AND NOT ANDROID)
         gdx_course_branch_edit.c
         gdx_course_settings.c
         gdx_course_settings_view.c
+        gdx_course_meta.c
+        gdx_course_meta_view.c
+        gdx_course_splits.c
+        gdx_course_splits_view.c
+        gdx_draw_distance.c
+        gdx_course_sign.c
+        gdx_course_meta_sign.c
+        gdx_profile_keys.c
+        gdx_profile.c
+        gdx_profile_state.cpp
+        gdx_profile_page.cpp
+        gdx_menu_words.c
+        gdx_save_import.c
+        gdx_save_import_stage.cpp
         gdx_update.cpp
         gdx_update_ui.cpp
         gdx_rom_courses.c
@@ -1604,6 +1817,7 @@ if(GDX_BUILD_JP AND NOT ANDROID)
     target_link_libraries(G-Diffuser-JP PRIVATE discord-rpc)
     target_link_libraries(G-Diffuser-JP PRIVATE gdx_lua)
     target_link_libraries(G-Diffuser-JP PRIVATE gdx_music_decoders)
+    target_link_libraries(G-Diffuser-JP PRIVATE monocypher)
 
     if(WIN32)
         target_link_libraries(G-Diffuser-JP PRIVATE user32 Comdlg32 Comctl32 winhttp)

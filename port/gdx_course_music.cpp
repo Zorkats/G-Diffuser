@@ -291,18 +291,27 @@ extern "C" int gdx_course_music_preview(int extIndex) {
     const GdxCourseElement* entry = music_entry(extIndex);
 
     if (entry == nullptr || entry->sourcePath == nullptr) {
+        gdx_port_logf("[music] preview of custom row %d: no file\n", extIndex);
         return 0;
     }
-    return gdx_music_stream_play_file(entry->sourcePath, entry->displayName);
+    const int queued = gdx_music_stream_play_file(entry->sourcePath, entry->displayName);
+    gdx_port_logf("[music] preview %s: %s\n", entry->sourcePath, queued != 0 ? "queued" : "not queued");
+    return queued;
 }
 
 extern "C" void gdx_course_music_arm_for_course(const char* courseId, int bgmId) {
     const GdxCourseElement* entry = course_music_entry(courseId);
 
     if (entry == nullptr || entry->sourcePath == nullptr) {
+        // A song chosen on another install, or a file removed since, leaves a key with no file behind it.
+        const GdxCourseExtRecord* rec = course_bgm_record(courseId);
+        if (rec != nullptr) {
+            gdx_port_logf("[music] %s: song %s is not in music/, the stock track plays\n", courseId, rec->key);
+        }
         gdx_music_stream_set_course_override(bgmId, nullptr, nullptr);
         return;
     }
+    gdx_port_logf("[music] %s: course song %s for BGM id %d\n", courseId, entry->sourcePath, bgmId);
     gdx_music_stream_set_course_override(bgmId, entry->sourcePath, entry->displayName);
 }
 

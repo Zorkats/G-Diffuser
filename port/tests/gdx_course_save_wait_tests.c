@@ -98,9 +98,13 @@ static struct { char name[21]; } D_xk1_8003A598;
 static int cleanups;
 static int notices;
 static int unlocked;
+static int metaSaves;
 
 static void func_xk2_800EBFE8(char* name) {
     ++cleanups;
+}
+static void gdx_meta_view_editor_saved(void) {
+    ++metaSaves;
 }
 static void func_8070405C(bool enabled) {
     unlocked += enabled;
@@ -123,7 +127,7 @@ static int editorRefusalTests(void) {
             D_80119880 = contextIndex == 0 ? -1 : contextIndex == 1 ? 1 : 9;
             context.courseData.flag = D_xk2_800F7408.courseData.flag = flag;
             gMfsError = N64DD_ARGUMENT_ILLEGAL;
-            cleanups = notices = unlocked = 0;
+            cleanups = notices = unlocked = metaSaves = 0;
             D_80794E14 = 1;
             complete();
             assert(D_800D6CA0.unk_08 == 0x12 && !notices && !unlocked && !cleanups);
@@ -131,12 +135,15 @@ static int editorRefusalTests(void) {
             complete();
             assert(D_800D6CA0.unk_08 == 0 && !cleanups && notices == 1 && unlocked == 1);
             assert(gMfsError == N64DD_ARGUMENT_ILLEGAL && gCourseEditFileOption == -1);
+            // A failed or still waiting save leaves the track's metadata alone.
+            assert(metaSaves == 0);
             D_800D6CA0.unk_08 = 0x12;
             gMfsError = LEO_ERROR_GOOD;
             cleanups = notices = unlocked = 0;
             complete();
             assert(D_800D6CA0.unk_08 == (flag ? 0 : 0x22));
             assert(cleanups == !flag && !notices && !unlocked);
+            assert(metaSaves == 1);
         }
     }
     return 0;

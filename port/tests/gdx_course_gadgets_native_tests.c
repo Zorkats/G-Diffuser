@@ -145,22 +145,38 @@ extern bool gInCourseEditTestRun;
 static void test_testdrive_budget(void) {
     int i;
 
-    reset(5);
+    /* The Expansion Kit holds 8 jumps in the editor and in a race, so every jump the editor takes also races. */
+    reset(9);
     gInCourseEditor = true;
     gInCourseEditTestRun = false;
     D_802CB6D0.controlPointCount = 4;
-    for (i = 0; i < 5; i++) {
+    for (i = 0; i < 8; i++) {
         sParts[i][4] = 0;
     }
     Course_GadgetsInit(0);
-    assert(gCourseFeaturesInfo.jumpCount == 5);
+    assert(gdx_course_gadget_error == 0);
+    assert(gCourseFeaturesInfo.jumpCount == 8);
+    assert(Course_GdxCanTestDrive(0));
+    sParts[8][4] = 0;
     assert(!Course_GdxCanTestDrive(0));
-    sParts[4][4] = -1;
+    Course_GadgetsInit(0);
+    assert(gdx_course_gadget_error == 1);
+    assert(gCourseFeaturesInfo.jumpCount == 0);
+    sParts[8][4] = -1;
     gdx_course_gadget_error = 0;
     assert(Course_GdxCanTestDrive(0));
     gdx_course_gadget_error = 2;
     assert(!Course_GdxCanTestDrive(0));
     gInCourseEditor = false;
+
+    /* A shared course with 6 jumps, raced outside the editor, keeps its gadgets. */
+    reset(9);
+    for (i = 0; i < 6; i++) {
+        sParts[i][4] = 0;
+    }
+    Course_GadgetsInit(0);
+    assert(gdx_course_gadget_error == 0);
+    assert(gCourseFeaturesInfo.jumpCount == 6);
 }
 
 static void test_combined_and_refusal(void) {
@@ -184,8 +200,8 @@ static void test_combined_and_refusal(void) {
     assert(gCourseFeaturesInfo.featureCount == 0 && gCourseEffectsInfo.count == 0);
     assert(((unsigned char*) gCourseFeatures)[0] == 0xAB);
 
-    reset(5);
-    for (i = 0; i < 5; i++) {
+    reset(9);
+    for (i = 0; i < 9; i++) {
         sParts[i][4] = 0;
     }
     Course_GadgetsInit(0);

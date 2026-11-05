@@ -14,7 +14,7 @@
  *   0x10  name          char[21], MFS directory-entry name, NUL-padded
  *   0x25  flags         u32: bit0 = ghosts stripped, bit1 = records stripped, bit2 = GXE1 sidecar (track only),
  *                       bit3 = legacy GXT1 title, bit4 = legacy GXD1 forks/settings,
- *                       bit5 = required GCP1 complete snapshot (.gcs)
+ *                       bit5 = required GCP1 complete snapshot (.gcs), bit6 = GMX1 creator metadata (.gdxm)
  *   0x29  payloadSize   u32: 0xC830 (track) / 0x20 (machine) / variable (bundle)
  *   0x2D  payloadCrc32  u32, CRC-32 of payload
  *   0x31  reserved      16 bytes, zero
@@ -68,6 +68,7 @@ extern "C" {
 #define GDX_CONTENT_FLAG_TITLE (1u << 3)      /* a GXT1 title sidecar, <stem>.gdxt, sits next to the .gdxc */
 #define GDX_CONTENT_FLAG_SNAPSHOT (1u << 5)
 #define GDX_CONTENT_FLAG_BRANCH (1u << 4)     /* a GXD1 fork and settings sidecar, <stem>.gdxb, sits next to it */
+#define GDX_CONTENT_FLAG_META (1u << 6)       /* a GMX1 creator metadata sidecar, <stem>.gdxm, sits next to it */
 
 #define GDX_CONTENT_TRACK_PAYLOAD_SIZE 0xC830 /* sizeof(CourseContext), fzx_course.h:41-47 */
 #define GDX_CONTENT_MACHINE_PAYLOAD_SIZE 0x20 /* sizeof(CustomMachine), unk_structs.h:504-528 */

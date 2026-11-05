@@ -74,6 +74,7 @@ void gdx_perf_sub_end(int id);
 enum GdxPerfCount {
     GDX_PERF_COUNT_MAPS_REPARSE = 0, // POSIX memory-map snapshot parses (a full /proc/self/maps read)
     GDX_PERF_COUNT_MAPS_UNMAPPED,    // snapshot misses answered as unmapped without a re-parse
+    GDX_PERF_COUNT_MAPS_INSERT,      // macOS snapshot misses answered by caching one queried region
     GDX_PERF_COUNT_COUNT
 };
 

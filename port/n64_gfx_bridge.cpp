@@ -2122,13 +2122,18 @@ static void ParseMemoryRegions() {
     gdx_perf_count(GDX_PERF_COUNT_MAPS_REPARSE);
 }
 
-// True when no mapping covers addr, answered with one syscall instead of a full re-parse. Many
-// probes are fall-through attempts that are expected to fail (segment-table and low32 candidates),
-// and a /proc/self/maps re-parse per such miss scales with the process's mapping count: suspected
-// cause of 20-90 ms translation ticks on Linux 1.1.0. Only a mapped page, i.e. a region created
-// after the snapshot, still needs the re-parse.
-static bool PosixAddressIsUnmapped(uintptr_t addr) {
+// Snapshot misses are answered with one syscall instead of a full re-parse. Many probes are
+// fall-through attempts that are expected to fail (segment-table and low32 candidates), and a
+// re-parse per such miss scales with the process's mapping count: suspected cause of 20-90 ms
+// translation ticks on Linux 1.1.0.
 #ifdef __APPLE__
+enum class MachRegionQuery { Unmapped, Found, Inconclusive };
+
+// One mach_vm_region call for the region holding addr. Unlike mincore on Linux, the same call that
+// proves a page is mapped also returns that region's bounds and protection, so a mapped snapshot
+// miss needs no full re-enumeration: #60 traced slow macOS races to ParseMemoryRegions walking
+// every VM region of the process on each such miss.
+static MachRegionQuery MachRegionAt(uintptr_t addr, MapsRegion& out) {
     mach_vm_address_t regionAddress = static_cast<mach_vm_address_t>(addr);
     mach_vm_size_t regionSize = 0;
     vm_region_basic_info_data_64_t info;
@@ -2140,10 +2145,40 @@ static bool PosixAddressIsUnmapped(uintptr_t addr) {
                                             &infoCount, &objectName);
     // mach_vm_region reports the region holding addr, or the next one above it.
     if (kr == KERN_INVALID_ADDRESS) {
-        return true;
+        return MachRegionQuery::Unmapped;
     }
-    return (kr == KERN_SUCCESS) && (regionAddress > addr);
+    if (kr != KERN_SUCCESS || regionSize == 0 || regionSize > UINTPTR_MAX - regionAddress) {
+        return MachRegionQuery::Inconclusive;
+    }
+    if (regionAddress > addr) {
+        return MachRegionQuery::Unmapped;
+    }
+    out.begin = static_cast<uintptr_t>(regionAddress);
+    out.end = static_cast<uintptr_t>(regionAddress + regionSize);
+    out.readable = (info.protection & VM_PROT_READ) != 0;
+    return addr < out.end ? MachRegionQuery::Found : MachRegionQuery::Inconclusive;
+}
+
+// Inserts a freshly queried region into the sorted snapshot. Snapshot entries it overlaps are
+// stale (the mapping changed since they were read), so they go first. The new entry is not
+// coalesced with its neighbours; ReadableByteLimit already walks adjacent readable entries.
+static void InsertMapsRegion(const MapsRegion& region) {
+    auto first = std::lower_bound(sMaps.begin(), sMaps.end(), region.begin,
+                                  [](const MapsRegion& existing, uintptr_t value) {
+                                      return existing.end <= value;
+                                  });
+    auto last = first;
+    while (last != sMaps.end() && last->begin < region.end) {
+        ++last;
+    }
+    first = sMaps.erase(first, last);
+    sMaps.insert(first, region);
+    sMapsGeneration.fetch_add(1, std::memory_order_relaxed);
+}
 #else
+// True when no mapping covers addr. Only a mapped page, i.e. a region created after the snapshot,
+// still needs the re-parse.
+static bool PosixAddressIsUnmapped(uintptr_t addr) {
     static const uintptr_t pageSize = [] {
         const long size = sysconf(_SC_PAGESIZE);
         return static_cast<uintptr_t>(size > 0 ? size : 4096);
@@ -2153,8 +2188,8 @@ static bool PosixAddressIsUnmapped(uintptr_t addr) {
     // mincore never faults: it fails with ENOMEM when the range holds unmapped memory. Any other
     // failure is inconclusive and falls back to the re-parse.
     return (mincore(page, pageSize, &residency) != 0) && (errno == ENOMEM);
-#endif
 }
+#endif
 
 static const MapsRegion* FindMapsRegion(uintptr_t addr) {
     size_t lo = 0;
@@ -2180,10 +2215,30 @@ static bool PosixRegionFor(uintptr_t addr, MapsRegion& out) {
     }
     const MapsRegion* r = FindMapsRegion(addr);
     if (r == nullptr) {
+#ifdef __APPLE__
+        MapsRegion fresh;
+        switch (MachRegionAt(addr, fresh)) {
+            case MachRegionQuery::Unmapped:
+                gdx_perf_count(GDX_PERF_COUNT_MAPS_UNMAPPED);
+                return false;
+            case MachRegionQuery::Found:
+                // Like WindowsMemoryRegionFor: cache readable regions only. An unreadable answer
+                // costs one more syscall next time, and never pins a stale "unreadable" entry.
+                if (fresh.readable) {
+                    InsertMapsRegion(fresh);
+                    gdx_perf_count(GDX_PERF_COUNT_MAPS_INSERT);
+                }
+                out = fresh;
+                return true;
+            case MachRegionQuery::Inconclusive:
+                break; // fall back to the full re-enumeration below
+        }
+#else
         if (PosixAddressIsUnmapped(addr)) {
             gdx_perf_count(GDX_PERF_COUNT_MAPS_UNMAPPED);
             return false;
         }
+#endif
         // Mapped but absent from the snapshot: a region created since the last parse. Steady-state
         // translation should not get here every tick, so the first few are named.
         static int sMappedMissLogs = 0;

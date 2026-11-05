@@ -8,12 +8,17 @@
 
 #include "rom_buffer.h" // gdx_rom_path: the clean ROM baseline for W2 course comparison
 #include "gdx_course_registry.h" // GDX_COURSE_EXT_ERR_* names for the sidecar status line
+#include "gdx_course_meta.h"     // author, Edited by and staff time under the track preview title
+#include "gdx_course_meta_sign.h" // the signing key of a signed track
+#include "gdx_course_meta_view.h" // Clear staff time: clears and writes the state file
+#include "gdx_course_music.h"    // gdx_course_music_course_id: the "NAME.EXT" key of the meta store
 
 #include <cstdarg>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -178,6 +183,77 @@ void GdxContentWindow::LoadTrackPreview(int row) {
     }
 }
 
+// One line of creator metadata (gdx_course_meta.h): who made the track and its staff time. A track without the
+// made-here mark gets a hint instead, because Time Attack only offers Save Record on tracks saved by Course Edit
+// on this install, and tracks saved before that mark existed would otherwise never show the row.
+void GdxContentWindow::DrawTrackCredits(const GdxContentEntry& entry) {
+    char courseId[GDX_BRANCH_COURSE_ID_MAX + 1];
+    GdxCourseMeta meta;
+    if (!gdx_course_music_course_id(entry.name, entry.extension, courseId, sizeof(courseId))) {
+        return;
+    }
+    if (!gdx_meta_store_get(courseId, &meta)) {
+        meta = GdxCourseMeta{};
+    }
+
+    std::string line;
+    auto add = [&line](const std::string& part) {
+        if (!line.empty()) {
+            line += " \xe2\x80\xa2 ";
+        }
+        line += part;
+    };
+    if (meta.author[0] != '\0') {
+        add(std::string("By ") + meta.author);
+    }
+    if (meta.editedBy[0] != '\0') {
+        add(std::string("Edited by ") + meta.editedBy);
+    }
+    char time[16];
+    if (meta.staffTime != 0 && gdx_meta_format_time(meta.staffTime, time, sizeof(time)) > 0) {
+        char staff[48];
+        std::snprintf(staff, sizeof(staff), "Staff time %s (%d laps)", time, static_cast<int>(meta.staffLaps));
+        add(staff);
+    }
+    if (!line.empty()) {
+        ImGui::TextDisabled("%s", line.c_str());
+    }
+    // A kept staff time only gives way to a faster run (Keep staff time after editing), so a track made longer
+    // needs a way back to "no staff time". The first click arms the button, the second clears.
+    static std::string sClearArmedFor;
+    if (meta.staffTime != 0) {
+        const bool armed = sClearArmedFor == courseId;
+        ImGui::SameLine();
+        if (ImGui::SmallButton(armed ? "Confirm clear##staff" : ICON_FA_TIMES " Clear staff time##staff")) {
+            if (armed) {
+                gdx_meta_view_clear_staff(courseId);
+                sClearArmedFor.clear();
+            } else {
+                sClearArmedFor = courseId;
+            }
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(armed ? "Click again to clear the staff time and its checkpoint splits."
+                                    : "Clears the staff time, so the next finished 3-lap Time Attack run can be\n"
+                                      "saved as the staff time even when it is slower.");
+        }
+    } else if (sClearArmedFor == courseId) {
+        sClearArmedFor.clear();
+    }
+    char fingerprint[20];
+    if (gdx_meta_sign_fingerprint(&meta, fingerprint)) {
+        ImGui::TextDisabled("Signed by key %s", fingerprint);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("This key signed the author's name and this exact track. Editing the track\n"
+                              "drops the signature. The key does not prove who holds it: compare it with\n"
+                              "the key the author shares.");
+        }
+    }
+    if (!meta.madeHere && meta.staffTime == 0) {
+        ImGui::TextDisabled("Save this track once in Course Edit, then use Save Record in Time Attack to set its staff time.");
+    }
+}
+
 void GdxContentWindow::DrawTrackPreview() {
     bool includeForks = CVarGetInteger("gEnhancements.CourseEdit.ForkMinimap", 0) != 0;
     if (ImGui::Checkbox("Include forks in minimap", &includeForks)) {
@@ -195,6 +271,7 @@ void GdxContentWindow::DrawTrackPreview() {
         const bool hasTitle = SessionTitle(selected.name, selected.extension, title, sizeof(title));
         ImGui::SameLine();
         ImGui::TextDisabled("%s", hasTitle ? title : selected.name);
+        DrawTrackCredits(selected);
     }
 
     if (mTrackPreviewCount < 2) {

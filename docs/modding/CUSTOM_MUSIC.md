@@ -12,9 +12,11 @@
    `bgm_select` for selection menus. Keep its real format extension: a FLAC becomes
    `bgm_select.flac`, not `bgm_select.ogg`. Enable filename extensions in your file manager so
    you can check the complete name. Title and selection are different slots. `bgm_course_editor`
-   and `bgm_machine_editor` replace the editor soundtracks.
-3. Enable **Settings > Audio > Streamed music replacement**, then leave and re-enter the screen
-   so its music starts again. Music and master volume still apply.
+   and `bgm_machine_editor` replace the editor soundtracks. [Music slots](#music-slots) lists
+   every stem.
+3. Leave and re-enter the screen so its music starts again. **Settings > Audio > Streamed music
+   replacement** is on by default; turn it back on only if you switched it off. Music and master
+   volume still apply.
 
 For example, a FLAC selection-menu replacement belongs here:
 
@@ -31,6 +33,48 @@ file uses a higher-priority format. Within each folder, OGG wins over FLAC, then
 extensions are matched without ASCII case distinctions. Keep only the replacement you intend
 to hear for each slot. Subfolders are not scanned recursively.
 The native sample-pack memory budget below does **not** limit streamed song duration.
+
+### Music slots
+
+Every stem the game recognizes, in game order. The **Streams** column says whether a file in
+`music/` replaces that music today. Slots marked **No** start through the sound-effect player
+instead of the music player, so a streamed file is ignored and the stock jingle plays.
+
+| Id | Stem | Where it plays | Streams |
+|---:|---|---|---|
+| 0 | `bgm_mute_city` | Mute City courses | Yes |
+| 1 | `bgm_silence` | Silence courses (a song, not a mute slot) | Yes |
+| 2 | `bgm_sand_ocean` | Sand Ocean courses | Yes |
+| 3 | `bgm_port_town` | Port Town courses | Yes |
+| 4 | `bgm_big_blue` | Big Blue courses | Yes |
+| 5 | `bgm_devils_forest` | Devil's Forest courses | Yes |
+| 6 | `bgm_red_canyon` | Red Canyon courses | Yes |
+| 7 | `bgm_sector` | Sector courses | Yes |
+| 8 | `bgm_white_land` | White Land courses | Yes |
+| 9 | `bgm_rainbow_road` | Rainbow Road | Yes |
+| 10 | `bgm_new_03` | No stock course; selectable in Course Edit as "New 03" | Yes |
+| 11 | `bgm_new_02` | No stock course; selectable in Course Edit as "New 02" | Yes |
+| 12 | `bgm_new_01` | No stock course; selectable in Course Edit as "New 01" | Yes |
+| 13 | `bgm_new_04` | No stock course; selectable in Course Edit as "New 04" | Yes |
+| 14 | `bgm_title` | Title screen | Yes |
+| 15 | `bgm_select` | Mode, machine and course select, and between Grand Prix races | Yes |
+| 16 | `bgm_option` | Options and the records course select | Yes |
+| 17 | `bgm_deathrace` | Death Race | Yes |
+| 18 | `bgm_course_editor` | Course Edit | Yes |
+| 19 | `bgm_machine_editor` | Create Machine | Yes |
+| 20 | `bgm_ead_demo` | EAD demo | Yes |
+| 21 | `bgm_21` | Finish jingle when you lose a race | No |
+| 22 | `bgm_22` | Finish jingle, and the winner jingle | No |
+| 23 | `bgm_23` | Retire jingle | No |
+| 24 | `bgm_24` | Winner jingle when the winner has crashed | No |
+| 25 | `bgm_gameover` | Game Over | No |
+| 26 | `bgm_end_cs` | Grand Prix ending | No |
+| 27 | `bgm_credits` | Staff credits | No |
+| 28 | `bgm_demo` | Race intro fanfare | No |
+| 29 | `bgm_deathrace2` | Not used: Death Race plays `bgm_deathrace` | No |
+
+Custom tracks use whichever course song their creator picked in Course Edit, or a song from
+`music/` chosen in [Track-specific music](#track-specific-music).
 
 ### Loop a streamed recording
 
@@ -289,8 +333,9 @@ An already playing resource does not become the replacement merely because the a
 ## If something goes wrong
 
 **A streamed menu replacement is not found.** Check the actual launched executable's `music/`
-folder, not `music/custom/` or another installation. Check the stem and real extension, enable
-streamed replacement, and re-enter the intended screen. With [logging enabled](../MODDING_GUIDE.md#logs),
+folder, not `music/custom/` or another installation. Check the stem and real extension against
+[Music slots](#music-slots), check that streamed replacement is still on, and re-enter the
+intended screen. Jingles, Game Over, the ending and the credits cannot be streamed yet. With [logging enabled](../MODDING_GUIDE.md#logs),
 `[music] BGM bgm_select (id 15): no file, stock track` means no matching stream was found, not a
 decoder failure. A found replacement logs its path. Check for higher-priority formats in
 `music/`. A legacy `mods/music/` replacement is used only when `music/` has no matching file.

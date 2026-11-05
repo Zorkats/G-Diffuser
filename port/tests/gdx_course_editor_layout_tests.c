@@ -75,8 +75,22 @@ static Gfx* func_xk1_800264C0(Gfx* gfx, int x, int y, int index) {
 
 #include "../../decomp/src/overlays/expansion_kit/course_file_prompt.inc"
 
+// The English count rows as 191080.c measures them: Size before the node counter, the gadget
+// counts before theirs. Size is the tightest.
+static int englishLabelLimit(void) {
+    const char* labels[] = {"Size", "Boost", "Object", "Jump", "Trap"};
+    const int fields[] = {GDX_COURSE_INFO_SIZE_FIELD_X, 0x108, 0x108, 0x10E, 0x10E};
+    int limit = GDX_COURSE_INFO_RIGHT;
+    int i;
+    for (i = 0; i < 5; i++) {
+        int rowLimit = gdx_course_info_label_limit((const u8*)labels[i], 16, fields[i]);
+        if (rowLimit < limit) limit = rowLimit;
+    }
+    return limit;
+}
+
 int main(void) {
-    assert(gdx_course_info_left((u8*)"A", 20) == 168);
+    const int labelLimit = englishLabelLimit();
     const char* names[] = {"", "A", "DAMNATION", "WARIO-COLOSSEUM", "WARIO-COLOSSEUM ZORK", "ABCDEFGHIJKLMNOPQRS", "ABCDEFGHIJKLMN"};
     Gfx commands[256];
     int n, action, i;
@@ -96,7 +110,8 @@ int main(void) {
             func_xk1_80026830((char*)names[n], expected);
             assert(strcmp((char*)recovered, (char*)expected) == 0);
             assert(strcmp((char*)drawn[draws - 1], D_xk1_800331F0[action + 1]) == 0);
-            if (n == 1) assert(textY[0] == textY[1]);
+            if (n == 1) assert(textY[0] == textY[1] && minY == 70);
+            if (draws > 2) assert(minY >= 62);
             if (n == 4) assert(draws == 3 && textY[0] < textY[1] && textY[1] < textY[2]);
         }
     }
@@ -107,21 +122,33 @@ int main(void) {
         rectangles = draws = 0;
         func_xk1_8002C720(&gfx, 0, 72, full, 0);
         assert(draws == 3 && strlen((char*)drawn[0]) + strlen((char*)drawn[1]) == 40);
-        assert(gdx_course_info_left((u8*)full, 20) == 120);
+        assert(gdx_course_info_left((u8*)full, 20, labelLimit) == 125);
     }
-    assert(gdx_course_info_left((u8*)"A", 20) == 168);
-    assert(gdx_course_info_left((u8*)"", 20) == 168);
-    assert(gdx_course_info_left((u8*)"WARIO-COLOSSEUM", 20) == 160);
-    assert(gdx_course_info_left((u8*)"ABCDEFGHIJKLMNOPQRS", 20) == 128);
+    // Size ends 2 pixels before the node counter, and a four-character Japanese label measures the same.
+    assert(labelLimit == 198);
+    assert(gdx_course_info_label_limit((const u8*)"\x99\xB2\xDD\xC4", 16, GDX_COURSE_INFO_SIZE_FIELD_X) == labelLimit);
+    // Short titles: the label rows set the width. Long ones: the title does.
+    assert(gdx_course_info_left((u8*)"", 20, labelLimit) == 198);
+    assert(gdx_course_info_left((u8*)"A", 20, labelLimit) == 198);
+    assert(gdx_course_info_left((u8*)"DAMNATION", 20, labelLimit) == 198);
+    assert(gdx_course_info_left((u8*)"WARIO-COLOSSEUM", 20, labelLimit) == 165);
+    assert(gdx_course_info_left((u8*)"ABCDEFGHIJKLMNOPQRS", 20, labelLimit) == 133);
     for (n = 0; n <= 20; n++) {
         u8 title[21] = {0};
         int left;
         memset(title, 'W', n);
-        left = gdx_course_info_left(title, 20);
-        assert(left >= 120 && left <= 168);
-        assert(left + 8 + n * 8 <= 288);
-        assert(left + 8 + 6 * 8 < 240);
+        left = gdx_course_info_left(title, 20, labelLimit);
+        assert(left >= 125 && left <= 198);
+        // The title ends on the length row's "M" and stays inside the panel.
+        assert(gdx_course_info_title_x(title, 20) >= left + GDX_COURSE_INFO_PAD);
+        assert(gdx_course_info_title_x(title, 20) + n * 8 == GDX_COURSE_INFO_TITLE_RIGHT);
+        // Every label, drawn at the text column, ends before its count field.
+        assert(left + GDX_COURSE_INFO_PAD + 4 * 8 <= GDX_COURSE_INFO_SIZE_FIELD_X - GDX_COURSE_INFO_LABEL_GAP);
+        assert(left + GDX_COURSE_INFO_PAD + 6 * 8 <= 0x108 - GDX_COURSE_INFO_LABEL_GAP);
+        // With a short title the box is tight: Size sits right against the counter.
+        if (n <= 9) assert(left + GDX_COURSE_INFO_PAD + 4 * 8 == GDX_COURSE_INFO_SIZE_FIELD_X - GDX_COURSE_INFO_LABEL_GAP);
     }
+    assert(gdx_course_info_title_x((u8*)"WARIO-COLOSSEUM ZORK", 20) == 133);
     {
         const char* original = D_xk1_800331F0[1];
         const int positions[] = {54, 72, 90};
@@ -130,7 +157,7 @@ int main(void) {
             Gfx* gfx = commands;
             rectangles = draws = 0;
             func_xk1_8002C720(&gfx, 0, positions[n], "WARIO-COLOSSEUM ZORK", 0);
-            assert(draws == 3 && maxY == positions[n] + 18);
+            assert(draws == 3 && minY == 62 && maxY == 114);
             assert(textWidth[2] == 64);
         }
         D_xk1_800331F0[1] = original;

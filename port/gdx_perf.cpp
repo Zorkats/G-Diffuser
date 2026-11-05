@@ -128,6 +128,7 @@ void emitSummary(PerfState& s) {
 
     const uint32_t mapsReparse = s.counts[GDX_PERF_COUNT_MAPS_REPARSE].exchange(0, std::memory_order_relaxed);
     const uint32_t mapsUnmapped = s.counts[GDX_PERF_COUNT_MAPS_UNMAPPED].exchange(0, std::memory_order_relaxed);
+    const uint32_t mapsInsert = s.counts[GDX_PERF_COUNT_MAPS_INSERT].exchange(0, std::memory_order_relaxed);
 
     // run[...] is the breakdown INSIDE run, not extra time on top of it. Read it per TICK, not per
     // pass: each term is already summed over the M sub-frames the tick presented, which is the
@@ -136,7 +137,7 @@ void emitSummary(PerfState& s) {
                   "spikes=%d | mean: %s| sub: logic=%.2f xlate=%.2f run=%.2f mirror=%.2f "
                   "| run[gui=%.2f sframe=%.2f irun=%.2f eframe=%.2f] "
                   "| gfxrun=%.2f bridge=%.2f decomp=%.2f setup=%.2f post=%.2f fbmirror=%.2f "
-                  "| audio p95=%.2fms max=%.2fms | maps[reparse=%u unmapped=%u]\n",
+                  "| audio p95=%.2fms max=%.2fms | maps[reparse=%u unmapped=%u insert=%u]\n",
                   totals.size(), p50, p95, p99, mx, s.spikeCount, phases, logicMean,
                   subMean[GDX_PERF_SUB_XLATE], subMean[GDX_PERF_SUB_RUN], subMean[GDX_PERF_SUB_MIRROR],
                   subMean[GDX_PERF_SUB_GUI], subMean[GDX_PERF_SUB_SFRAME], subMean[GDX_PERF_SUB_IRUN],
@@ -146,7 +147,7 @@ void emitSummary(PerfState& s) {
                   subMean[GDX_PERF_SUB_GFXRUN] - subMean[GDX_PERF_SUB_XLATE] - subMean[GDX_PERF_SUB_RUN],
                   (s.phaseAccumMs[PerfGameTick] / n) - subMean[GDX_PERF_SUB_GFXRUN],
                   subMean[GDX_PERF_SUB_SETUP], subMean[GDX_PERF_SUB_POST],
-                  subMean[GDX_PERF_SUB_FBMIRROR], aP95, aMax, mapsReparse, mapsUnmapped);
+                  subMean[GDX_PERF_SUB_FBMIRROR], aP95, aMax, mapsReparse, mapsUnmapped, mapsInsert);
 
     s.frameTotals.clear();
     s.spikeCount = 0;

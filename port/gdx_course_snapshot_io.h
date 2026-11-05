@@ -24,6 +24,13 @@ void gdx_snapshot_export_begin(void);
 int gdx_snapshot_export_member(unsigned short directory, const char* name, const char* extension,
                                void* base, int stripGhosts);
 int gdx_snapshot_export_write(const char* containerPath, unsigned int containerCrc);
+// Hands visit the content bytes (gdx::snapshot::content) of a track for signing. export_content reads the
+// index-th member of the export in progress; content reads the stored state of a track, as validate does.
+// Returns 1 after visit ran, 0 when there is no such track or its state does not read.
+typedef void (*GdxSnapshotContentVisit)(const unsigned char* bytes, unsigned long length, void* ctx);
+int gdx_snapshot_export_content(int index, GdxSnapshotContentVisit visit, void* ctx);
+int gdx_snapshot_content(unsigned short directory, const char* name, const char* extension, const void* base,
+                         GdxSnapshotContentVisit visit, void* ctx);
 int gdx_snapshot_package_member(const char* containerPath, unsigned int containerCrc,
                                 const char* name, const char* extension, const void* base);
 int gdx_snapshot_import_stage(const char* containerPath, unsigned int containerCrc);

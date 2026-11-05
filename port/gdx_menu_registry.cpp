@@ -41,6 +41,7 @@
 #include "gdx_menu.h"
 #include "gdx_menu_internal.h"
 #include "gdx_machine_capture_runtime.h"
+#include "gdx_profile_page.h"
 
 #include <imgui.h>
 
@@ -62,6 +63,7 @@
 #include "gdx_xcup_random.h" // X Cup random course toggle CVar
 #include "gdx_achievements.h" // F10 playtime tracker + local achievements
 #include "gdx_gp_resume.h"    // Save GP in progress: saved cup record + Continue Cup (extern "C" API)
+#include "gdx_draw_distance.h" // Draw distance slider range, Extended draw distance (issue #45)
 
 #include <algorithm>
 #include <cctype>
@@ -84,6 +86,7 @@ using namespace gdxmenu;
 extern "C" {
 int gdx_gp_resume_safe_point(void);
 void gdx_gp_resume_request_continue(void);
+int gdx_gp_resume_enabled(void);
 extern const char* gMachineNames[];
 }
 
@@ -104,7 +107,8 @@ static void DrawContinueCupEntry() {
         sNextRead = now + 1.0;
     }
 
-    const bool haveSave = sSavedError == GDX_GP_RESUME_OK;
+    const bool saving = gdx_gp_resume_enabled() != 0;
+    const bool haveSave = saving && (sSavedError == GDX_GP_RESUME_OK);
     const bool safe = gdx_gp_resume_safe_point() != 0;
     const bool enabled = haveSave && safe;
 
@@ -130,6 +134,8 @@ static void DrawContinueCupEntry() {
                      (int) (sSaved.courseIndex % 6) + 1, machineName,
                      safe ? "Resumes the saved cup from the last race boundary."
                           : "Available on the mode select screen, with nothing else in progress.");
+        } else if (!saving) {
+            snprintf(sTooltip, sizeof(sTooltip), "Save cup progress is off, so no cup is saved or resumed.");
         } else if (sSavedError == GDX_GP_RESUME_ERR_IO) {
             snprintf(sTooltip, sizeof(sTooltip),
                      "No cup is saved. Grand Prix saves the cup between races, so a cup in progress shows here.");
@@ -1312,7 +1318,7 @@ void GdxMenu::RegisterMenu() {
     AddSidebarEntry("Workshop", "Mods", 1,
                     "workshop mods texture sequence sample soundfont model packs lua scripts installed");
     AddSidebarEntry("Workshop", "Tools", 1,
-                    "workshop tools asset dump dd save 64dd sidecar");
+                    "workshop tools asset dump dd save 64dd sidecar emulator save import sra srm");
     AddSidebarEntry("Workshop", "Content Library", 1,
                     "workshop content library export import gdxc track ghosts");
     AddSidebarEntry("Workshop", "ROM Hacks", 1,
@@ -1320,6 +1326,8 @@ void GdxMenu::RegisterMenu() {
 
     AddSidebarEntry("Online", "Overview", 1,
                     "online discord rich presence status privacy leaderboard ghost upload download netplay spectator");
+    AddSidebarEntry("Online", "Profile", 1,
+                    "online player profile name author edited by creator colour color machine identity");
 
     AddSidebarEntry("Dev Tools", "General", 1,
                     "developer multi viewport tools gates logging diagnostics behavior overrides "
@@ -2042,26 +2050,51 @@ void GdxMenu::RegisterMenu() {
                   .ModifiedMarker()
                   .SearchTerms("course 6 stray preview outline carousel first course"));
 
-    // Scales each course's own far-render cutoff per-venue (course.c Course_Draw).
+    // Scales each course's own far chunk cull (course.c Course_Draw), through gdx_draw_distance.c.
     //
-    // CAPPED AT 200% ON PURPOSE. The CVar multiplies the per-chunk cull threshold
-    // (sCourseFarRenderDistance * scale), but the track is streamed as a fixed set of chunks that
-    // Course_SegmentsInit builds only out to a bounded horizon (gSegmentChunks, capped at
-    // SEGMENT_CHUNK_COUNT). By ~200% the raised threshold already clears the furthest chunk ever
-    // built, so a higher scale un-culls nothing. A content limit, not a clamp that can be raised.
+    // Every chunk of the track is built, so the cull is not what runs out. Alone, the slider stops
+    // helping at about 150%, where the race camera's 8192 far plane clips what the cull lets
+    // through. Extended draw distance below scales that far plane, the machine cutoff and the
+    // course budgets too, and lets the slider reach 400%. Its preFunc sets the range each frame.
     AddWidget("Enhancements", "Visuals", SECTION_COLUMN_1,
               WidgetInfo{ .name = "Draw distance (%)", .cVar = "gEnhancements.Graphics.DrawDistance",
                           .type = GdxUI::WIDGET_CVAR_SLIDER_INT }
                   .Options(UIWidgets::IntSliderOptions()
-                               .Min(100)
-                               .Max(200)
-                               .DefaultValue(100)
+                               .Min(GDX_DRAW_DISTANCE_MIN_PERCENT)
+                               .Max(GDX_DRAW_DISTANCE_MAX_PERCENT)
+                               .DefaultValue(GDX_DRAW_DISTANCE_MIN_PERCENT)
                                .ShowButtons(false)
                                .LabelPosition(UIWidgets::LabelPositions::Near)
-                               .Tooltip("Extends how far each track's own geometry renders (100% = stock,\n"
-                                        "scales per-venue). 200% is the effective max: beyond it the track's\n"
-                                        "streamed geometry runs out, so there is nothing further to draw."))
+                               .Tooltip("How far each track's own geometry renders (100% = stock, scaled\n"
+                                        "per venue). Without Extended draw distance, the camera's far\n"
+                                        "plane limits it past about 150%."))
+                  .PreFunc([](WidgetInfo& info) {
+                      std::static_pointer_cast<UIWidgets::IntSliderOptions>(info.options)->max =
+                          CVarGetInteger("gEnhancements.Graphics.ExtendedDrawDistance", 0)
+                              ? GDX_DRAW_DISTANCE_EXTENDED_MAX_PERCENT
+                              : GDX_DRAW_DISTANCE_MAX_PERCENT;
+                  })
                   .SearchTerms("render distance fog pop-in culling horizon"));
+
+    // Issue #45. Off, or at 100%, everything stays stock (gdx_draw_distance.h). Turning it off
+    // brings a slider value above 200% back into the stock range.
+    AddWidget("Enhancements", "Visuals", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Extended draw distance", .cVar = "gEnhancements.Graphics.ExtendedDrawDistance",
+                          .type = GdxUI::WIDGET_CVAR_CHECKBOX }
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(false).Tooltip(
+                      "Lets Draw distance reach 400%. The camera sees further, fog starts\n"
+                      "further away, and machines stay visible from further. Costs more\n"
+                      "GPU time on long tracks. Off = stock."))
+                  .Callback([](WidgetInfo&) {
+                      if (!CVarGetInteger("gEnhancements.Graphics.ExtendedDrawDistance", 0) &&
+                          CVarGetInteger("gEnhancements.Graphics.DrawDistance", GDX_DRAW_DISTANCE_MIN_PERCENT) >
+                              GDX_DRAW_DISTANCE_MAX_PERCENT) {
+                          CVarSetInteger("gEnhancements.Graphics.DrawDistance", GDX_DRAW_DISTANCE_MAX_PERCENT);
+                          GdxSaveCvars();
+                      }
+                  })
+                  .ModifiedMarker()
+                  .SearchTerms("render distance view distance fog far plane horizon long view machines"));
 
     AddWidget("Enhancements", "Visuals", SECTION_COLUMN_1,
               WidgetInfo{ .name = "Track depth test", .cVar = "gEnhancements.Graphics.TrackDepthTest",
@@ -2399,6 +2432,16 @@ void GdxMenu::RegisterMenu() {
                   .SearchTerms("cpu ai width range lava dirt ice magnet avoidance"));
 
     // Save GP in progress: resumes the GP cup saved at the last race boundary (port/gdx_gp_resume.h).
+    // Read by gdx_gp_resume_enabled in decomp/src/game/game.c, default on.
+    AddWidget("Enhancements", "Gameplay", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Save cup progress", .cVar = "gEnhancements.Gameplay.SaveCupProgress",
+                          .type = GdxUI::WIDGET_CVAR_CHECKBOX }
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(true).Tooltip(
+                      "Grand Prix saves the cup between races, so a quit cup can be resumed with\n"
+                      "Continue Cup here or on the main menu.\n"
+                      "Off: no cup is saved, the CONTINUE row never shows, and a quit cup is gone as in stock."))
+                  .ModifiedMarker()
+                  .SearchTerms("save cup progress continue resume grand prix gp disable hide"));
     AddWidget("Enhancements", "Gameplay", SECTION_COLUMN_1,
               WidgetInfo{ .name = "Continue Cup", .type = GdxUI::WIDGET_CUSTOM }
                   .CustomFunction([](WidgetInfo&) { DrawContinueCupEntry(); })
@@ -2722,6 +2765,19 @@ void GdxMenu::RegisterMenu() {
                       "Draw alternate paths in the race minimap and Content Library track preview."))
                   .ModifiedMarker()
                   .SearchTerms("fork branch path minimap preview"));
+    // Read by gdx_meta_view_editor_saved (port/gdx_course_meta_view.c) on every Course Edit save.
+    AddWidget("Enhancements", "Course Edit & Machine", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Keep staff time after editing",
+                          .cVar = "gEnhancements.CourseEdit.KeepStaffTime",
+                          .type = GdxUI::WIDGET_CVAR_CHECKBOX }
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(true).Tooltip(
+                      "Saving a track in Course Edit keeps its staff time and checkpoint splits.\n"
+                      "A faster Time Attack run still replaces it. If the checkpoint count changed,\n"
+                      "Expert and Master CPUs pace per lap instead of per checkpoint.\n"
+                      "Clear staff time in the Content window lets a slower run replace it.\n"
+                      "Off: every save clears the staff time, as before."))
+                  .ModifiedMarker()
+                  .SearchTerms("staff time keep editing save record splits ghost cpu pace"));
     // Gates the PORT branch in course_edit/19C470.c func_xk2_800EB3B4: B inside the
     // OFFICIAL course list reopens the parent picker instead of closing the File menu.
     AddWidget("Enhancements", "Course Edit & Machine", SECTION_COLUMN_1,
@@ -3104,6 +3160,14 @@ void GdxMenu::RegisterMenu() {
                   .CustomFunction([this](WidgetInfo&) { DrawDdSave(); })
                   .SearchTerms("64dd disk save sidecar mfs format journal course edit machine create"));
 
+    AddWidget("Workshop", "Tools", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Emulator Save Import", .type = GdxUI::WIDGET_SEPARATOR_TEXT });
+    AddWidget("Workshop", "Tools", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Emulator Save Import", .type = GdxUI::WIDGET_CUSTOM }
+                  .CustomFunction([this](WidgetInfo&) { DrawSaveImport(); })
+                  .SearchTerms("import emulator save sra srm retroarch parallel-n64 mupen project64 cartridge "
+                               "progress transfer"));
+
     // ═════════════════════════════════════════════════════════════════════════════════════════
     // WORKSHOP -> Content Library
     // GdxContentWindow is registered in main.cpp at boot under the name "Content Library"; this
@@ -3141,6 +3205,12 @@ void GdxMenu::RegisterMenu() {
     // ═════════════════════════════════════════════════════════════════════════════════════════
     // ONLINE -> Overview
     // ═════════════════════════════════════════════════════════════════════════════════════════
+    // ONLINE -> Profile (gdx_profile_page.cpp). The active profile names the Author of saved tracks.
+    AddWidget("Online", "Profile", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Player profiles", .type = GdxUI::WIDGET_CUSTOM }
+                  .CustomFunction([](WidgetInfo&) { GdxProfilePage_Draw(); })
+                  .SearchTerms("player profile name author edited by creator colour color machine"));
+
     // A privacy setting, framed as one: master default OFF, and each field the presence may publish
     // has its own opt-out. Everything the toggles govern is built in port/gdx_discord.cpp.
     AddWidget("Online", "Overview", SECTION_COLUMN_1,

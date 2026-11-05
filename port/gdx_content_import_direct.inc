@@ -189,6 +189,7 @@ static int gdx_import_begin_payload(const char* name, const char* extension, int
 
     sImportSnapshot = 0;
     memset(sImportBranch, 0, sizeof(sImportBranch));
+    memset(sImportMeta, 0, sizeof(sImportMeta)); /* a disk image carries none, so the install clears the old value */
     memset(&sImportExtInfo, 0, sizeof(sImportExtInfo));
     sImportTitle[0] = '\0';
     sImportSidecarBlock.count = 0;

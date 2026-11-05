@@ -20,9 +20,12 @@ systemctl --user stop gdiffuser-run.service >/dev/null 2>&1
 
 # Pass GDX_TRACE/GDX_LOG through only when set: systemd-run starts a clean environment,
 # so an exported trace gate in the caller's shell would otherwise never reach the game.
+# The determinism experiment's script, seed and probe variables travel the same way.
 trace_env=""
-[ -n "$GDX_TRACE" ] && trace_env="GDX_TRACE=$GDX_TRACE"
-[ -n "$GDX_LOG" ] && trace_env="$trace_env GDX_LOG=$GDX_LOG"
+for name in GDX_TRACE GDX_LOG GDX_INPUT_SCRIPT GDX_RAND_SEED1 GDX_RAND_SEED2 GDX_DET_LOG GDX_DET_DUMP GDX_DET_RACE_SEED; do
+    eval "value=\${$name}"
+    [ -n "$value" ] && trace_env="$trace_env $name=$value"
+done
 
 exec systemd-run --user --collect --same-dir --unit=gdiffuser-run \
     --property=StandardOutput=append:"$log" \

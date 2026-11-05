@@ -12,6 +12,7 @@
 /* Last, like n64_rdram.h: it declares size_t parameters and deliberately includes no platform
    headers of its own (see the contract note at the top of it), so global.h must land first. */
 #include "gdx_camera_pose.h"
+#include "gdx_draw_distance.h"
 #include "gdx_discord.h" /* GdxDiscordSnapshot, filled by gdx_discord_snapshot below */
 
 /* port_log.h pulls in <stdio.h> which clashes with the decomp's libc/stdint.h.
@@ -1391,7 +1392,7 @@ int gdx_camera_pose_read(int index, GdxCameraPose* out) {
     out->upZ = camera->basis.y.z;
     out->fov = camera->fov;
     out->nearZ = camera->near;
-    out->farZ = camera->far;
+    out->farZ = camera->far * gdx_draw_distance_far_scale(); /* the far plane camera.c builds */
     out->fovScaleX = camera->fovScaleX;
     out->fovScaleY = camera->fovScaleY;
     out->frustrumCenterX = camera->frustrumCenterX;

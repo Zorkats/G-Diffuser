@@ -21,6 +21,7 @@
 #endif
 #include <windows.h> // ShellExecuteA for the Workshop "Open folder" buttons
 #include <shellapi.h> // ShellExecuteA (excluded by WIN32_LEAN_AND_MEAN)
+#include <commdlg.h>  // GetOpenFileNameW for the emulator save import (excluded by WIN32_LEAN_AND_MEAN)
 #endif
 
 #include "gdx_menu.h"
@@ -73,6 +74,11 @@ extern "C" const char* SDL_GetCurrentAudioDriver(void);
 #include "gdx_lua.h"         // Workshop tab: Lua script pack status list (DrawScripts)
 #include "gdx_dump_launch.h" // Workshop tab "Asset Dump" section: per-class offline dump launcher
 #include "disk_savefile.h"   // Workshop tab "DD Save" subsection: sidecar status + one-shot format
+#include "sram_buffer.h"     // Workshop tab "Emulator Save Import": stage, cancel, launch result
+#include "gdx_hackmods.h"    // Emulator Save Import: the save file the import replaces
+#ifdef __ANDROID__
+#include "android/gdx_android_bridge.h" // Emulator Save Import: the system document picker
+#endif
 #include "rom_buffer.h"      // Data & Files: gdx_rom_buffer/gdx_rom_path (live ROM residency signal)
 #include "gdx_firstboot.h"   // Data & Files: canonical file names + gdx::ManagedDiskPath
 #include "gdx_segment_source.h" // Data & Files: archive-coverage telemetry (fallback counters)
@@ -471,6 +477,10 @@ GdxMenu::GdxMenu() : Ship::GuiWindow("gOpenMenuBar", false, "G-Diffuser Menu") {
     CVarRegisterInteger("gEnhancements.Audio.Reverb", 1);
     CVarRegisterInteger("gEnhancements.Audio.StreamedMusic", 1);
     CVarRegisterInteger("gEnhancements.Audio.BufferFrames", 4096);
+    // Save cup progress (decomp/src/game/game.c gdx_gp_resume_enabled): on, as Continue Cup shipped.
+    CVarRegisterInteger("gEnhancements.Gameplay.SaveCupProgress", 1);
+    // Keep staff time after editing (port/gdx_course_meta_view.c): on, so a re-saved course keeps its run.
+    CVarRegisterInteger("gEnhancements.CourseEdit.KeepStaffTime", 1);
 
     // GRAPHICS (port-owned; distinct from the libultraship g* CVars). Every default reproduces
     // today's rendering, except the two widescreen switches below. Widescreen is read live in
@@ -2324,6 +2334,100 @@ void GdxMenu::DrawDdSave() {
             ImGui::SetItemDefaultFocus();
             ImGui::EndPopup();
         }
+    }
+}
+
+#ifdef _WIN32
+// Native open dialog; other platforms type or paste the path, the split every other picker makes.
+static bool GdxPickEmulatorSave(char* outPath, size_t outCap) {
+    wchar_t fileName[MAX_PATH] = {};
+    OPENFILENAMEW ofn = {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFilter = L"Emulator saves (*.sra, *.srm)\0*.sra;*.srm\0All files (*.*)\0*.*\0";
+    ofn.lpstrFile = fileName;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrTitle = L"Open an F-Zero X emulator save";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (!GetOpenFileNameW(&ofn)) {
+        return false;
+    }
+    return WideCharToMultiByte(CP_UTF8, 0, fileName, -1, outPath, (int) outCap, nullptr, nullptr) > 0;
+}
+#endif
+
+// #43: brings cartridge progress over from an emulator. The import is staged, not applied: the
+// running game holds its save in memory and writes sections of it back, so the converted file
+// replaces the save at the next launch (gdx_sram_init), after the current save is backed up.
+void GdxMenu::DrawSaveImport() {
+    static char sPath[1024] = { 0 };
+    static char sStatus[256] = { 0 };
+    static bool sStatusOk = false;
+    // -1 until first checked, then refreshed only on stage and cancel, so an open page does not
+    // touch the disk every frame.
+    static int sPending = -1;
+    const ImVec4 kGreen = ImVec4(0.4f, 1.0f, 0.4f, 1.0f);
+    const ImVec4 kRed = ImVec4(1.0f, 0.35f, 0.35f, 1.0f);
+
+    if (sPending < 0) {
+        sPending = gdx_sram_import_pending();
+    }
+
+    ImGui::TextWrapped("Bring your records, cup clears and saved ghost over from an emulator. Choose a cartridge "
+                       "save (.sra, or a RetroArch parallel-n64 .srm). It replaces saves/%s the next time "
+                       "G-Diffuser starts, and your current save is backed up first.",
+                       gdx_hackmod_active_save_basename());
+    ImGui::TextDisabled("Expansion Kit cup progress starts empty: a cartridge save has none.");
+
+    char launch[256];
+    const int launchResult = gdx_sram_import_launch_result(launch, sizeof(launch));
+    if (launchResult != 0) {
+        ImGui::PushStyleColor(ImGuiCol_Text, launchResult > 0 ? kGreen : kRed);
+        ImGui::TextWrapped("%s", launch);
+        ImGui::PopStyleColor();
+    }
+
+    ImGui::InputTextWithHint("##saveimportpath", "Path to a .sra or .srm...", sPath, sizeof(sPath));
+#ifdef _WIN32
+    ImGui::SameLine();
+    if (ImGui::Button("Browse...##saveimport")) {
+        GdxPickEmulatorSave(sPath, sizeof(sPath));
+    }
+#elif defined(__ANDROID__)
+    ImGui::SameLine();
+    if (ImGui::Button("Browse...##saveimport")) {
+        const std::string picked = gdx::android::PickDocumentBlocking();
+        if (!picked.empty()) {
+            snprintf(sPath, sizeof(sPath), "%s", picked.c_str());
+        }
+    }
+#endif
+
+    ImGui::BeginDisabled(sPath[0] == '\0');
+    if (ImGui::Button(sPending ? "Replace waiting import" : "Import at next launch")) {
+        sStatusOk = gdx_sram_import_stage(sPath, sStatus, sizeof(sStatus)) != 0;
+        sPending = gdx_sram_import_pending();
+    }
+    ImGui::EndDisabled();
+    UIWidgets::Tooltip("Checks the file now. Nothing changes until G-Diffuser restarts.");
+
+    if (sPending) {
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel import")) {
+            sStatusOk = gdx_sram_import_cancel() != 0;
+            snprintf(sStatus, sizeof(sStatus), "%s",
+                     sStatusOk ? "Import cancelled. Your save will not change." : "Could not remove the waiting import.");
+            sPending = gdx_sram_import_pending();
+        }
+    }
+
+    if (sStatus[0] != '\0') {
+        ImGui::PushStyleColor(ImGuiCol_Text, sStatusOk ? kGreen : kRed);
+        ImGui::TextWrapped("%s", sStatus);
+        ImGui::PopStyleColor();
+    }
+    if (sPending) {
+        ImGui::TextWrapped("An import is waiting. Restart G-Diffuser to apply it. Progress you make before then "
+                           "is kept only in the backup.");
     }
 }
 

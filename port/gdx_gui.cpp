@@ -20,7 +20,16 @@ ImFont* LoadFontWithIcons(const std::string& path, float size) {
     textConfig.OversampleH = 2;
     textConfig.OversampleV = 2;
 
-    ImFont* font = io.Fonts->AddFontFromFileTTF(path.c_str(), size, &textConfig);
+    // ImGui loads Latin-1 alone by default, so the dashes, bullets, ellipses and arrows in UI text would draw
+    // as '?'. Montserrat and Inconsolata both carry these blocks.
+    static const ImWchar textRanges[] = {
+        0x0020, 0x00FF, // Basic Latin, Latin-1 Supplement
+        0x2000, 0x206F, // General Punctuation
+        0x2100, 0x214F, // Letterlike Symbols
+        0x2190, 0x21FF, // Arrows
+        0,
+    };
+    ImFont* font = io.Fonts->AddFontFromFileTTF(path.c_str(), size, &textConfig, textRanges);
     if (font == nullptr) {
         return nullptr;
     }

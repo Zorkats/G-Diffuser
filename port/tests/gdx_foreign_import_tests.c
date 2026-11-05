@@ -53,6 +53,7 @@ static int32_t sImportContentType;
 static GdxContentImportExtension sImportExtInfo;
 static GdxCourseExtBlock sImportSidecarBlock;
 static unsigned char sImportBranch[1];
+static GdxCourseMeta sImportMeta[GDX_CONTENT_BUNDLE_MAX_TRACKS];
 
 static void gdx_import_validate_machine(const uint8_t* payload, uint32_t* errors) {
     assert(!"machine validation is outside this track-only admission harness");

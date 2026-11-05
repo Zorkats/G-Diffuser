@@ -28,6 +28,9 @@ void GdxContentImport_RunOnDiskThread(void) {
         !gdx_snapshot_import_restore(gWorkingDirectory, sImportName, sImportExtension, sImportPayload)) {
         rc = -1;
     }
+    if (rc == 0 && sImportContentType == GDX_CONTENT_TYPE_TRACK) {
+        gdx_import_store_meta(sImportName, sImportExtension, 0, sImportPayload);
+    }
 
     if (rc == 0 && sImportContentType == GDX_CONTENT_TYPE_TRACK && sImportExtension[3] == 'E') {
         /* CRSE import: clear edit-cup slots naming it, mirroring the editor's post-save clear
@@ -110,6 +113,7 @@ void GdxContentBundle_RunOnDiskThread(void) {
             failedIndex = i;
             break;
         }
+        gdx_import_store_meta(sBundleNames[i], "CRSD", i, sBundlePayloads[i]);
     }
     if (rc == 0) {
         memcpy(previousCup, gEditCupTrackNames, sizeof(previousCup));
