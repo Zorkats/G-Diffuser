@@ -48,13 +48,12 @@ jobs:
     steps:
       - name: Install build tools
         # git has to exist before actions/checkout runs, or checkout falls back to a source
-        # download that cannot fetch the four submodules. lsb-release is how actions/setup-python
-        # recognises the container as Ubuntu 22.04 and picks the matching Python build.
+        # download that cannot fetch the four submodules.
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
             build-essential gcc-12 g++-12 ninja-build pkg-config \
-            git ca-certificates wget lsb-release \
+            git ca-certificates wget \
             python3 python3-yaml python3-pil \
             zlib1g-dev libbz2-dev nlohmann-json3-dev libpng-dev \
             libgl1-mesa-dev libopengl-dev libegl1-mesa-dev libglew-dev \
@@ -77,23 +76,32 @@ jobs:
         with:
           submodules: recursive
 
-      - uses: actions/setup-python@v5
+      - name: Install Python for the Companion worker
         # Only for freezing the Companion worker: the pinned Pillow needs Python 3.11 or newer and
-        # 22.04 ships 3.10. Its build is made for 22.04, so the frozen worker keeps the same glibc
-        # floor as the game. The game's own build keeps using /usr/bin/python3 and its apt modules.
-        # The runner's shared tool cache (/__t) already holds a 3.12 built for the host's newer
-        # Ubuntu, which needs GLIBC_2.38 and fails here. An empty cache inside the container makes
-        # setup-python download the 22.04 build instead.
+        # 22.04 ships 3.10. This is the actions/python-versions build made for 22.04, so the
+        # frozen worker keeps the same glibc floor as the game. Not actions/setup-python: in a
+        # container it takes the runner's shared tool cache first, which holds a 3.12 built for the
+        # host's newer Ubuntu (GLIBC_2.38). The interpreter's RUNPATH is fixed at python_dir/lib,
+        # so it is unpacked exactly there; the path is empty inside the container. The path is set
+        # in the script, not in env, so the runner cannot map it onto the shared cache. It stays off
+        # PATH: the game's own build keeps using /usr/bin/python3 and its apt modules.
         env:
-          AGENT_TOOLSDIRECTORY: /opt/hostedtoolcache
-        with:
-          python-version: '3.12'
+          PYTHON_URL: https://github.com/actions/python-versions/releases/download/3.12.16-40260402378/python-3.12.16-linux-22.04-x64.tar.gz
+          PYTHON_SHA256: ebdd874c6bb02d1ade9069da60b6b09f8346ba0ae0db11e60e6ce90cf5542fb7
+        run: |
+          set -eux
+          python_dir=/opt/hostedtoolcache/Python/3.12.16/x64
+          wget -q -O /tmp/python.tar.gz "$PYTHON_URL"
+          echo "$PYTHON_SHA256  /tmp/python.tar.gz" | sha256sum -c -
+          mkdir -p "$python_dir"
+          tar -xzf /tmp/python.tar.gz -C "$python_dir"
+          "$python_dir/bin/python3.12" -I -c "import ssl, sys, venv; print(sys.version)"
 
       - name: Freeze the Companion worker
         # Before the build, so G-Diffuser-Companion-worker has a frozen worker to copy. Pinned
         # PyInstaller and Pillow go into a venv under build/, and the result passes its own smoke
         # test with Python off PATH, so players need no Python.
-        run: python -I tools/build_companion_worker.py
+        run: /opt/hostedtoolcache/Python/3.12.16/x64/bin/python3.12 -I tools/build_companion_worker.py
 
       - name: Build pinned dependencies
         # 22.04's own packages are too old for libultraship, and distribution packages would
@@ -166,7 +174,7 @@ jobs:
           CHANNEL: ${{ steps.version.outputs.channel }}
           COMMIT: ${{ steps.version.outputs.commit }}
         # Python3_EXECUTABLE is pinned to the system interpreter that has python3-yaml and
-        # python3-pil: setup-python's 3.12 is first on PATH and has neither module.
+        # python3-pil; the Companion's 3.12 has neither module.
         run: |
           cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DPython3_EXECUTABLE=/usr/bin/python3 \
             "-DGDX_DISPLAY_VERSION=$VERSION" "-DGDX_BUILD_CHANNEL=$CHANNEL" "-DGDX_BUILD_COMMIT=$COMMIT"
@@ -210,13 +218,12 @@ jobs:
     steps:
       - name: Install build tools
         # git has to exist before actions/checkout runs, or checkout falls back to a source
-        # download that cannot fetch the four submodules. lsb-release is how actions/setup-python
-        # recognises the container as Ubuntu 22.04 and picks the matching Python build.
+        # download that cannot fetch the four submodules.
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
             build-essential gcc-12 g++-12 ninja-build pkg-config \
-            git ca-certificates wget lsb-release \
+            git ca-certificates wget \
             python3 python3-yaml python3-pil \
             zlib1g-dev libbz2-dev nlohmann-json3-dev libpng-dev \
             libgl1-mesa-dev libopengl-dev libegl1-mesa-dev libglew-dev \
@@ -239,23 +246,32 @@ jobs:
         with:
           submodules: recursive
 
-      - uses: actions/setup-python@v5
+      - name: Install Python for the Companion worker
         # Only for freezing the Companion worker: the pinned Pillow needs Python 3.11 or newer and
-        # 22.04 ships 3.10. Its build is made for 22.04, so the frozen worker keeps the same glibc
-        # floor as the game. The game's own build keeps using /usr/bin/python3 and its apt modules.
-        # The runner's shared tool cache (/__t) already holds a 3.12 built for the host's newer
-        # Ubuntu, which needs GLIBC_2.38 and fails here. An empty cache inside the container makes
-        # setup-python download the 22.04 build instead.
+        # 22.04 ships 3.10. This is the actions/python-versions build made for 22.04, so the
+        # frozen worker keeps the same glibc floor as the game. Not actions/setup-python: in a
+        # container it takes the runner's shared tool cache first, which holds a 3.12 built for the
+        # host's newer Ubuntu (GLIBC_2.38). The interpreter's RUNPATH is fixed at python_dir/lib,
+        # so it is unpacked exactly there; the path is empty inside the container. The path is set
+        # in the script, not in env, so the runner cannot map it onto the shared cache. It stays off
+        # PATH: the game's own build keeps using /usr/bin/python3 and its apt modules.
         env:
-          AGENT_TOOLSDIRECTORY: /opt/hostedtoolcache
-        with:
-          python-version: '3.12'
+          PYTHON_URL: https://github.com/actions/python-versions/releases/download/3.12.16-40260402378/python-3.12.16-linux-22.04-arm64.tar.gz
+          PYTHON_SHA256: 3d21bfd81696dfcea3eb6007d2e6085f4abd114a3d402d1c9af088647ab8c1f9
+        run: |
+          set -eux
+          python_dir=/opt/hostedtoolcache/Python/3.12.16/arm64
+          wget -q -O /tmp/python.tar.gz "$PYTHON_URL"
+          echo "$PYTHON_SHA256  /tmp/python.tar.gz" | sha256sum -c -
+          mkdir -p "$python_dir"
+          tar -xzf /tmp/python.tar.gz -C "$python_dir"
+          "$python_dir/bin/python3.12" -I -c "import ssl, sys, venv; print(sys.version)"
 
       - name: Freeze the Companion worker
         # Before the build, so G-Diffuser-Companion-worker has a frozen worker to copy. Pinned
         # PyInstaller and Pillow go into a venv under build/, and the result passes its own smoke
         # test with Python off PATH, so players need no Python.
-        run: python -I tools/build_companion_worker.py
+        run: /opt/hostedtoolcache/Python/3.12.16/arm64/bin/python3.12 -I tools/build_companion_worker.py
 
       - name: Build pinned dependencies
         # 22.04's own packages are too old for libultraship, and distribution packages would
@@ -328,7 +344,7 @@ jobs:
           CHANNEL: ${{ steps.version.outputs.channel }}
           COMMIT: ${{ steps.version.outputs.commit }}
         # Python3_EXECUTABLE is pinned to the system interpreter that has python3-yaml and
-        # python3-pil: setup-python's 3.12 is first on PATH and has neither module.
+        # python3-pil; the Companion's 3.12 has neither module.
         run: |
           cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DPython3_EXECUTABLE=/usr/bin/python3 \
             "-DGDX_DISPLAY_VERSION=$VERSION" "-DGDX_BUILD_CHANNEL=$CHANNEL" "-DGDX_BUILD_COMMIT=$COMMIT"
