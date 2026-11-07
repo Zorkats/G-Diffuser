@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "gdx_companion_dialog.h"
 #include "gdx_companion_install.h"
 #include "gdx_companion_jobs.h"
 #include "gdx_companion_log.h"
@@ -26,18 +27,6 @@ struct WorkerStatus {
     std::string detail;  // the worker in use, or the reason it failed
     std::string version;  // worker_version from the hello event
     std::vector<std::string> ops;  // operations from the hello event
-};
-
-// A system file dialog a page asked for. The result lands in AppState::browse_results under target.
-enum class BrowseKind { OpenFile, SaveFile, Folder };
-
-struct BrowseRequest {
-    std::string target;          // the page field that receives the pick
-    BrowseKind kind = BrowseKind::OpenFile;
-    std::string filter_name;     // for example "Texture caches"; empty for every file
-    std::string filter_pattern;  // for example "*.htc;*.HTC"
-    std::string start;           // UTF-8 folder or file to start in, or empty
-    std::string title;
 };
 
 // A job a page asked for. owner names the page, so only that page reads the result.

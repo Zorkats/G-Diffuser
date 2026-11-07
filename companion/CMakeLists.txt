@@ -29,9 +29,10 @@ add_library(gdx_companion_game_c STATIC
 )
 target_include_directories(gdx_companion_game_c PUBLIC ${CMAKE_SOURCE_DIR}/port)
 
-# Host logic: child process, worker session, paths, the installation check, packer forms, tracks, music,
-# loop editing, loudness and project files. No SDL or ImGui.
+# Host logic: child process, worker session, external file dialogs, paths, the installation check, packer
+# forms, tracks, music, loop editing, loudness and project files. No SDL or ImGui.
 add_library(gdx_companion_host STATIC
+    gdx_companion_dialog.cpp
     gdx_companion_install.cpp
     gdx_companion_jobs.cpp
     gdx_companion_loop.cpp
@@ -72,6 +73,9 @@ target_link_libraries(companion_theme_tests PRIVATE gdx_companion_host)
 add_executable(companion_install_tests tests/companion_install_tests.cpp)
 target_link_libraries(companion_install_tests PRIVATE gdx_companion_host)
 
+add_executable(companion_dialog_tests tests/companion_dialog_tests.cpp)
+target_link_libraries(companion_dialog_tests PRIVATE gdx_companion_host)
+
 # Job tests drive the real worker script with the build's Python, in temporary folders only.
 find_package(Python3 COMPONENTS Interpreter)
 add_executable(companion_job_tests tests/companion_job_tests.cpp)
@@ -92,6 +96,12 @@ add_executable(G-Diffuser-Companion
 )
 if(WIN32)
     set_target_properties(G-Diffuser-Companion PROPERTIES WIN32_EXECUTABLE TRUE)
+elseif(NOT APPLE)
+    # The Linux package puts the Companion in G-Diffuser/companion/ and the bundled SDL2 in
+    # G-Diffuser/lib/ (tools/package_linux.sh), so the loader looks one folder up.
+    set_target_properties(G-Diffuser-Companion PROPERTIES
+        BUILD_WITH_INSTALL_RPATH TRUE
+        INSTALL_RPATH "$ORIGIN/../lib")
 endif()
 target_link_libraries(G-Diffuser-Companion PRIVATE
     gdx_companion_host

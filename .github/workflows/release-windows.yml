@@ -73,6 +73,12 @@ jobs:
           "channel=$channel" >> $env:GITHUB_OUTPUT
           "commit=$($env:GITHUB_SHA.Substring(0, 7))" >> $env:GITHUB_OUTPUT
 
+      - name: Freeze the Companion worker
+        # Before the build, so G-Diffuser-Companion-worker has a frozen worker to copy. Pinned
+        # PyInstaller and Pillow go into a venv under build/, and the result passes its own smoke
+        # test with Python off PATH, so players need no Python.
+        run: python -I tools/build_companion_worker.py
+
       - name: Build
         # USE_AUTO_VCPKG lets libultraship bootstrap vcpkg into the build tree. --config Release
         # is required: the Visual Studio generator is multi-config and ignores CMAKE_BUILD_TYPE.
@@ -89,12 +95,14 @@ jobs:
         run: |
           cmake -S . -B build/x64 -DUSE_AUTO_VCPKG=ON "-DPython3_EXECUTABLE=$env:pythonLocation\python.exe" `
             "-DGDX_DISPLAY_VERSION=$env:VERSION" "-DGDX_BUILD_CHANNEL=$env:CHANNEL" "-DGDX_BUILD_COMMIT=$env:COMMIT"
-          cmake --build build/x64 --config Release --target G-Diffuser
+          cmake --build build/x64 --config Release --target G-Diffuser G-Diffuser-Companion G-Diffuser-Companion-worker
 
       - name: Package and verify dependencies
+        # -Companion stages the Companion into G-Diffuser/companion/ and refuses the package when
+        # its executable needs a DLL, the worker's licenses are missing, or its --selftest fails.
         env:
           VERSION: ${{ steps.version.outputs.value }}
-        run: pwsh tools/package_windows.ps1 -BuildDir build/x64 -Version $env:VERSION -OutDir dist
+        run: pwsh tools/package_windows.ps1 -BuildDir build/x64 -Version $env:VERSION -OutDir dist -Companion
 
       - uses: actions/upload-artifact@v4
         with:

@@ -274,11 +274,15 @@ void CompanionUi::DrawInstallation(AppState& state) {
         state.install_choice = install_path_;
         if (state.install_choice.empty()) state.installation_error = "Type a path first, or use Browse.";
     }
+    if (state.browse_available) {
+        ImGui::SameLine();
+        if (ImGui::Button("Browse...")) state.install_browse = true;
 #if defined(_WIN32)
-    ImGui::SameLine();
-    if (ImGui::Button("Browse...")) state.install_browse = true;
-    ImGui::SetItemTooltip("Pick G-Diffuser.exe in the game's folder.");
+        ImGui::SetItemTooltip("Pick G-Diffuser.exe in the game's folder.");
+#else
+        ImGui::SetItemTooltip("Pick the folder that holds the game.");
 #endif
+    }
     if (state.installation_chosen) {
         ImGui::SameLine();
         if (ImGui::Button("Find automatically")) state.install_reset = true;

@@ -3,18 +3,23 @@
 // G-Diffuser Companion entry point.
 //
 //   G-Diffuser-Companion [--python <interpreter> --worker <worker.py>] [--selftest] [--theme <id>]
-//                        [--section <music|textures|models|tracks|advanced|settings>]
+//                        [--section <music|textures|models|tracks|inspect|advanced|settings>]
 //
 // --selftest runs the worker handshake and shutdown without a window, prints the result, and exits
 // 0 on success or 1 on failure. Without it, a window opens and the worker starts in the background.
 // Without --python and --worker, the frozen worker beside the executable is used. --theme starts with
 // that theme id (for example user.big_blue) when it exists; the theme is not saved, so this is how a
-// shortcut keeps one. --section opens on that workspace instead of Settings. The only setting the Companion saves is the game folder chosen in Settings, in
-// companion-settings.json beside the executable.
+// shortcut keeps one. --section opens on that workspace instead of Settings. The only setting the
+// Companion saves is the game folder chosen in Settings, in companion-settings.json beside the executable.
+//
+// Outside Windows, Browse runs zenity or kdialog (see gdx_companion_dialog.h). GDX_COMPANION_DIALOG set to
+// zenity, kdialog or none picks one; with neither installed, paths are typed.
 
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -46,6 +51,7 @@
 #include "imgui_impl_sdl2.h"
 
 #include "gdx_companion_backdrop.h"
+#include "gdx_companion_dialog.h"
 #include "gdx_companion_install.h"
 #include "gdx_companion_paths.h"
 #include "gdx_companion_preview.h"
@@ -63,7 +69,10 @@ namespace {
 
 constexpr const char* kUsage =
     "usage: G-Diffuser-Companion [--selftest] [--python <interpreter> --worker <worker.py>] [--theme <id>]\n"
-    "                            [--section <music|textures|models|tracks|advanced|settings>]\n";
+    "                            [--section <music|textures|models|tracks|inspect|advanced|settings>]\n";
+
+// The shortest frame, about 125 frames a second; vsync normally paces the loop at the display rate.
+constexpr Uint64 kMinFrameMs = 8;
 
 struct Options {
     bool selftest = false;
@@ -427,6 +436,83 @@ bool BrowseWithDialog(AppState& app, SDL_Window* window, const BrowseRequest& re
 }
 #endif
 
+#if !defined(_WIN32)
+// Browse outside Windows: one zenity or kdialog process at a time, polled each frame.
+constexpr const char* kInstallTarget = "settings.installation";
+
+struct ExternalDialogs {
+    DialogToolChoice choice;
+    std::string home;
+    DialogRunner runner;
+    std::string target;  // the request the open dialog answers
+};
+
+std::string EnvironmentText(const char* name) {
+    const char* value = std::getenv(name);
+    return value != nullptr ? std::string(value) : std::string();
+}
+
+void FindExternalDialog(AppState& app, ExternalDialogs& dialogs) {
+    const std::string search = EnvironmentText("PATH");
+    dialogs.choice = PickDialogTool(EnvironmentText("GDX_COMPANION_DIALOG"), EnvironmentText("XDG_CURRENT_DESKTOP"),
+                                    FindExecutable("zenity", search), FindExecutable("kdialog", search));
+    dialogs.home = EnvironmentText("HOME");
+    app.browse_available = dialogs.choice.tool != DialogTool::None;
+    if (app.browse_available) {
+        app.log.Append(LogLevel::Info, std::string("file dialogs use ") + dialogs.choice.path);
+    } else {
+        app.log.Append(LogLevel::Warning, "file dialogs are off: install zenity or kdialog, or type the paths");
+    }
+}
+
+// Opens the dialog a page or Settings asked for, and hands over what the open one returned.
+void PumpExternalDialog(AppState& app, ExternalDialogs& dialogs, const fs::path& exe_dir) {
+    std::optional<BrowseRequest> request;
+    if (app.install_browse) {
+        app.install_browse = false;
+        BrowseRequest install;
+        install.target = kInstallTarget;
+        install.kind = BrowseKind::Folder;
+        install.start = app.installation_dir.empty() ? PathToUtf8(exe_dir.parent_path()) : app.installation_dir;
+        install.title = "Choose the G-Diffuser folder";
+        request = install;
+    } else if (app.browse.has_value()) {
+        request = *app.browse;
+        app.browse.reset();
+    }
+    if (request.has_value()) {
+        if (dialogs.runner.running()) {
+            app.log.Append(LogLevel::Info, "a file dialog is already open");
+        } else if (app.browse_available) {
+            std::string error;
+            if (dialogs.runner.Start(BuildDialogArgv(dialogs.choice, *request, dialogs.home), error)) {
+                dialogs.target = request->target;
+            } else {
+                app.log.Append(LogLevel::Error, "the file dialog did not open: " + error);
+            }
+        }
+    }
+    if (!dialogs.runner.running()) return;
+    std::string picked;
+    std::string error;
+    switch (dialogs.runner.Poll(picked, error)) {
+        case DialogOutcome::Running:
+        case DialogOutcome::Cancelled:
+            break;
+        case DialogOutcome::Picked:
+            if (dialogs.target == kInstallTarget) {
+                ChooseInstallation(app, exe_dir, PathFromUtf8(picked));
+            } else {
+                app.browse_results[dialogs.target] = picked;
+            }
+            break;
+        case DialogOutcome::Failed:
+            app.log.Append(LogLevel::Error, error);
+            break;
+    }
+}
+#endif
+
 // Starts the worker; on failure the worker status says why.
 void StartWorker(AppState& app, WorkerSession& session, const Options& options, const fs::path& exe_dir) {
     std::vector<std::string> argv;
@@ -444,17 +530,17 @@ void StartWorker(AppState& app, WorkerSession& session, const Options& options, 
 // Carries out what the pages asked for this frame: dialogs, jobs, cancel and restart.
 void HandlePageRequests(AppState& app, WorkerSession& session, const Options& options, const fs::path& exe_dir,
                         SDL_Window* window) {
+#if defined(_WIN32)
     if (app.browse.has_value()) {
         const BrowseRequest request = *app.browse;
         app.browse.reset();
-#if defined(_WIN32)
         fs::path picked;
         if (BrowseWithDialog(app, window, request, picked)) app.browse_results[request.target] = PathToUtf8(picked);
-#else
-        (void)request;
-        (void)window;
-#endif
     }
+#else
+    // PumpExternalDialog has already taken any request.
+    (void)window;
+#endif
     if (app.job_cancel) {
         app.job_cancel = false;
         session.CancelJob();
@@ -539,6 +625,9 @@ int RunWindow(const Options& options, const fs::path& exe_dir) {
     const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     app.browse_available = SUCCEEDED(com);
     if (!app.browse_available) app.log.Append(LogLevel::Warning, "file dialogs are off: COM did not start");
+#else
+    ExternalDialogs dialogs;
+    FindExternalDialog(app, dialogs);
 #endif
 
     WorkerSession session(app);
@@ -610,7 +699,9 @@ int RunWindow(const Options& options, const fs::path& exe_dir) {
             if (!found) app.log.Append(LogLevel::Warning, "--theme " + options.theme + ": no theme has that id");
         }
         bool running = true;
+        const Uint64 ticks_per_second = SDL_GetPerformanceFrequency();
         while (running) {
+            const Uint64 frame_start = SDL_GetPerformanceCounter();
             SDL_Event event;
             while (SDL_PollEvent(&event)) {
                 ImGui_ImplSDL2_ProcessEvent(&event);
@@ -645,15 +736,17 @@ int RunWindow(const Options& options, const fs::path& exe_dir) {
                 app.open_folder.clear();
                 OpenFolder(app, PathFromUtf8(folder), folder, false);
             }
+#if defined(_WIN32)
             if (app.install_browse) {
                 app.install_browse = false;
-#if defined(_WIN32)
                 const fs::path start =
                     app.installation_dir.empty() ? exe_dir.parent_path() : PathFromUtf8(app.installation_dir);
                 fs::path picked;
                 if (BrowseForGame(app, window, start, picked)) ChooseInstallation(app, exe_dir, picked);
-#endif
             }
+#else
+            PumpExternalDialog(app, dialogs, exe_dir);
+#endif
             if (!app.install_choice.empty()) {
                 const std::string choice = app.install_choice;
                 app.install_choice.clear();
@@ -694,6 +787,10 @@ int RunWindow(const Options& options, const fs::path& exe_dir) {
             glClear(GL_COLOR_BUFFER_BIT);
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
             SDL_GL_SwapWindow(window);
+            // Vsync does not always block (XWayland, a hidden or minimized window), and then the loop
+            // would spin a whole core. Each frame takes at least kMinFrameMs.
+            const Uint64 elapsed_ms = (SDL_GetPerformanceCounter() - frame_start) * 1000 / ticks_per_second;
+            if (elapsed_ms < kMinFrameMs) SDL_Delay(static_cast<Uint32>(kMinFrameMs - elapsed_ms));
         }
 
         preview.Stop();

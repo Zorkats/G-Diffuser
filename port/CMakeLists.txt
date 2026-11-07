@@ -7,7 +7,7 @@ endif()
 
 set(DECOMP "${CMAKE_CURRENT_SOURCE_DIR}/../decomp")
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
-set(GDX_DISPLAY_VERSION "1.2.3" CACHE STRING "Version shown in the About menu")
+set(GDX_DISPLAY_VERSION "1.3.0" CACHE STRING "Version shown in the About menu")
 # The release workflows pass the channel and commit; a local build stays "dev", which never
 # offers updates (gdx_update.cpp).
 set(GDX_BUILD_CHANNEL "dev" CACHE STRING "Update channel: stable, nightly or dev")

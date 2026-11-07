@@ -9,7 +9,13 @@ the packaged tree turns all three into a build failure instead of a release.
 
     python3 tools/check_linux_abi.py --lib-dir dist/lib dist/G-Diffuser dist/gdx-extract
 
-Exits non-zero on the first binary that fails.
+A frozen Python program (the Companion worker) is a folder that carries its own libraries, which its
+bootloader finds without a RUNPATH. --frozen-dir checks every ELF file in such a folder for the same
+glibc, libstdc++ and CPU limits, and requires each dependency to be a system library or a file in it:
+
+    python3 tools/check_linux_abi.py --frozen-dir dist/companion/worker
+
+Exits non-zero when any binary fails.
 """
 
 import argparse
@@ -202,7 +208,7 @@ def _cstr(blob, offset):
     return blob[offset:end].decode("utf-8", "replace")
 
 
-def check(path, limits, bundled):
+def check(path, limits, bundled, require_runpath=True):
     elf = ElfFile(path)
     failures = []
     name = os.path.basename(path)
@@ -232,7 +238,7 @@ def check(path, limits, bundled):
     # neighbours. When one does, it needs its own entry: DT_RUNPATH is not inherited, so the
     # executable's does not cover a library's own dependencies.
     from_lib = [lib for lib in libs if lib in bundled]
-    if from_lib and "$ORIGIN" not in (runpath or ""):
+    if require_runpath and from_lib and "$ORIGIN" not in (runpath or ""):
         failures.append("loads {} from lib/, but its RUNPATH is {}".format(
             ", ".join(from_lib), runpath or "unset"))
 
@@ -247,11 +253,30 @@ def check(path, limits, bundled):
     return not failures
 
 
+def frozen_tree(root):
+    """The ELF files under a frozen program's folder, and every shared-object name it carries."""
+    elves, names = [], set()
+    for folder, _, files in os.walk(root):
+        for entry in sorted(files):
+            path = os.path.join(folder, entry)
+            if ".so" in entry:
+                names.add(entry)
+            if os.path.islink(path) or not os.path.isfile(path):
+                continue
+            with open(path, "rb") as handle:
+                if handle.read(4) == b"\x7fELF":
+                    elves.append(path)
+    return sorted(elves), names
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("binaries", nargs="+", help="executables or shared objects")
+    parser.add_argument("binaries", nargs="*", help="executables or shared objects")
     parser.add_argument("--lib-dir",
                         help="directory of libraries shipped beside the executable")
+    parser.add_argument("--frozen-dir",
+                        help="folder of a frozen program whose loader finds the libraries it "
+                             "carries; every ELF file in it is checked")
     parser.add_argument("--max-glibc", default="2.35",
                         help="highest glibc symbol version allowed (default: %(default)s, "
                              "Ubuntu 22.04)")
@@ -262,6 +287,10 @@ def main():
                         help="print the dependencies that must ship in lib/, one per line, "
                              "and exit; this is how the packaging step decides what to copy")
     args = parser.parse_args()
+    if not args.binaries and not args.frozen_dir:
+        parser.error("give binaries, --frozen-dir, or both")
+    if args.frozen_dir and not os.path.isdir(args.frozen_dir):
+        parser.error("--frozen-dir is not a folder: " + args.frozen_dir)
 
     if args.list_unbundled:
         for lib in sorted({lib for path in args.binaries
@@ -280,7 +309,14 @@ def main():
     targets = list(args.binaries) + [
         os.path.join(args.lib_dir, entry) for entry in sorted(bundled)]
     # Check every binary before deciding, so one CI run reports every problem at once.
-    if all([check(path, limits, bundled) for path in targets]):
+    results = [check(path, limits, bundled) for path in targets]
+    if args.frozen_dir:
+        elves, carried = frozen_tree(args.frozen_dir)
+        if not elves:
+            print(f"FAIL  {args.frozen_dir}: no ELF files in the frozen folder")
+            results.append(False)
+        results += [check(path, limits, carried, require_runpath=False) for path in elves]
+    if all(results):
         return 0
     print("\nThese binaries would fail to start on the distributions the release targets.")
     return 1

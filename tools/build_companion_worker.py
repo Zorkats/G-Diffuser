@@ -12,7 +12,9 @@ Steps:
      the job module, the htc, sample, sequence, texture, model and soundfont packers, Pillow, and
      tools/music_targets.json. Pillow's LICENSE is copied to _internal/LICENSES/MIT-CMU-Pillow.txt
      and the interpreter's LICENSE.txt to _internal/LICENSES/PSF-2.0-Python.txt, the repository's
-     LICENSES naming (<SPDX id>-<component>.txt).
+     LICENSES naming (<SPDX id>-<component>.txt). On Linux, libstdc++ and libgcc_s are removed (the
+     host provides them) and each other carried system library's Debian copyright file is copied to
+     _internal/LICENSES/debian-<package>.txt.
   4. Smoke test with Python removed from PATH: a hello request, then sequence, sample, htc and texture
      jobs in a temporary folder (the texture PNG is written here with zlib, not Pillow), model and
      soundfont names requests, inspect and unpack of the texture pack, and an import of every bundled
@@ -25,6 +27,7 @@ Exit status is 0 only when every step succeeds. Failures print the exact command
 
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -35,11 +38,21 @@ from pathlib import Path
 
 PYINSTALLER_VERSION = "6.22.3"
 # Newest Pillow on the index with a wheel for the build Python (cp313 win_amd64), checked 2026-11-06.
+# It needs Python 3.11 or newer; release CI freezes with 3.12, which has win_amd64 and manylinux_2_28
+# x86_64 and aarch64 wheels.
 PILLOW_VERSION = "13.0.0"
 PILLOW_LICENSE_NAME = "MIT-CMU-Pillow.txt"
-# The frozen worker carries the interpreter's DLLs (python3xx, OpenSSL, libffi, bzip2, xz, expat,
-# mpdecimal). The base interpreter's LICENSE.txt holds the PSF license and those components' notices.
+# On Windows the frozen worker carries the interpreter's DLLs (python3xx, OpenSSL, libffi, bzip2, xz,
+# expat, mpdecimal), and the base interpreter's LICENSE.txt holds the PSF license and those components'
+# notices. A POSIX LICENSE.txt holds only the PSF license, so on Linux the system libraries the freeze
+# carries get their own notices (collect_linux_library_notices).
 PYTHON_LICENSE_NAME = "PSF-2.0-Python.txt"
+# Libraries every supported Linux distribution provides (tools/check_linux_abi.py, SYSTEM_LIBS).
+# PyInstaller copies them anyway; the worker uses the host's, as the game does.
+LINUX_HOST_LIBRARIES = ("libstdc++.so.6", "libgcc_s.so.1")
+# auditwheel renames a wheel's vendored libraries to <name>-<8 hex digits>.so; Pillow's LICENSE covers
+# the ones Pillow vendors.
+WHEEL_VENDORED_NAME = re.compile(r"-[0-9a-f]{8}\.so")
 EXE_NAME = "gdx_companion_worker.exe" if os.name == "nt" else "gdx_companion_worker"
 PYTHON_NAMES = ("python.exe", "python3.exe", "py.exe", "python", "python3")
 
@@ -102,6 +115,65 @@ def pillow_license(py):
     if not found or not Path(found).is_file():
         fail("Pillow's LICENSE file was not found in the venv: " + (found or "no path reported"))
     return Path(found)
+
+
+def interpreter_license():
+    """Returns the build interpreter's LICENSE.txt.
+
+    Windows installs keep it in the prefix; a POSIX install keeps it in the standard library folder.
+    """
+    base = Path(sys.base_prefix)
+    candidates = (base / "LICENSE.txt",
+                  base / "lib" / ("python%d.%d" % sys.version_info[:2]) / "LICENSE.txt")
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    fail("the build interpreter has no LICENSE.txt; looked at " + ", ".join(str(c) for c in candidates))
+
+
+def debian_package_of(name):
+    """The Debian package that installed a library file of this name, or None."""
+    result = subprocess.run(["dpkg-query", "-S", "*/" + name], capture_output=True, text=True)
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    return result.stdout.splitlines()[0].split(":", 1)[0].strip()
+
+
+def collect_linux_library_notices(license_dir):
+    """Drops the host libraries from the freeze and copies the license of every system library it carries.
+
+    Python's own library and the Pillow-vendored ones are covered by the two licenses already copied.
+    Every other carried library came from a Debian package, whose copyright file is its notice. Without
+    dpkg (a non-Debian development machine) the notices are skipped with a note; release packages are
+    built on Ubuntu, where a carried library without a package is an error.
+    """
+    internal = OUTPUT / "_internal"
+    for name in LINUX_HOST_LIBRARIES:
+        path = internal / name
+        if path.exists() or path.is_symlink():
+            path.unlink()
+            print("build_companion_worker: removed %s; the worker uses the host's" % name)
+    if shutil.which("dpkg-query") is None:
+        print("build_companion_worker: note: no dpkg-query, so the carried system libraries' licenses "
+              "were not collected")
+        return
+    copied = set()
+    for path in sorted(internal.iterdir()):
+        name = path.name
+        if ".so" not in name or ".cpython-" in name or name.startswith("libpython") \
+                or WHEEL_VENDORED_NAME.search(name):
+            continue
+        package = debian_package_of(name)
+        if package is None:
+            fail("cannot find the package, and so the license, of the carried library " + name)
+        if package in copied:
+            continue
+        notice = Path("/usr/share/doc") / package / "copyright"
+        if not notice.is_file():
+            fail("package %s, which provides %s, has no %s" % (package, name, notice))
+        shutil.copyfile(str(notice), str(license_dir / ("debian-%s.txt" % package)))
+        copied.add(package)
+        print("build_companion_worker: %s is from %s; copied its copyright file" % (name, package))
 
 
 def png_chunk(kind, data):
@@ -296,12 +368,12 @@ def main():
     license_dir = OUTPUT / "_internal" / "LICENSES"
     license_dir.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(str(license_source), str(license_dir / PILLOW_LICENSE_NAME))
-    python_license = Path(sys.base_prefix) / "LICENSE.txt"
-    if not python_license.is_file():
-        fail("the build interpreter has no LICENSE.txt at " + str(python_license))
+    python_license = interpreter_license()
     shutil.copyfile(str(python_license), str(license_dir / PYTHON_LICENSE_NAME))
     if (license_dir / PYTHON_LICENSE_NAME).read_bytes() != python_license.read_bytes():
         fail("Python's license text was not copied to " + str(license_dir))
+    if sys.platform.startswith("linux"):
+        collect_linux_library_notices(license_dir)
     print("build_companion_worker: frozen worker at " + str(OUTPUT))
 
     smoke_test_frozen_worker(license_source)

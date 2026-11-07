@@ -160,7 +160,7 @@ Options live in the enhancement menu, which opens with **F1**. Editing tools are
   [sharing guide](docs/modding/SHARING_TRACKS_AND_MACHINES.md).
 - **Import from a disk image (experimental):** read tracks and machines straight out of a 64DD disk
   dump from an emulator or a console.
-- **G-Diffuser Companion (Windows):** a separate desktop program that installs replacement music
+- **G-Diffuser Companion (Windows and Linux):** a separate desktop program that installs replacement music
   and builds texture, model and audio packs, with checks before every build. See the
   [Companion guide](docs/COMPANION.md).
 - **ROM hacks (experimental):** play a hack packaged as an `.o2r` archive from `mods/~romhacks/`,

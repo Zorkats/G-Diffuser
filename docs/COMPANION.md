@@ -2,16 +2,24 @@
 
 The Companion is a separate desktop program that builds the files G-Diffuser loads: replacement
 music, texture packs, machine model packs, native audio packs, and track files from other players'
-disk images. It also opens packs other people made, so you can study them. It never edits the game's settings, saves or stores. It writes only the files you ask
-it to build, and it tells you which game option turns each one on.
+disk images. It also opens packs other people made, so you can study them. It never edits the
+game's settings, saves or stores. It writes only the files you ask it to build, and it tells you
+which game option turns each one on.
 
-> **Platforms.** The Companion is built and tested on Windows x64 only. The source has Linux and
-> macOS paths, but it has not been built or run there yet: treat those platforms as unverified.
+> **Platforms.** The Windows x64, Linux x64 and Linux arm64 downloads include the Companion in a
+> `companion` folder. It is tested on Windows x64 and on Linux x64 (KDE Plasma on Wayland). Linux
+> arm64 builds pass the same automated checks but have not been tried on a device yet. macOS
+> downloads do not include it: it is unverified there.
+>
+> On Linux, **Browse...** opens `kdialog` on KDE and `zenity` elsewhere. Install one of them
+> (most desktops already have one), or type the paths into the fields. To pick one yourself, set
+> `GDX_COMPANION_DIALOG` to `zenity`, `kdialog` or `none` before starting the Companion.
 
 ## Quick path
 
 1. Put the `companion` folder inside your G-Diffuser folder, so `G-Diffuser.exe` sits one folder
-   above `G-Diffuser-Companion.exe`. A release zip built with the Companion already has this layout.
+   above `G-Diffuser-Companion.exe` (`G-Diffuser` and `G-Diffuser-Companion` on Linux). Release
+   downloads already have this layout.
 2. Start `G-Diffuser-Companion.exe`. The status bar should say **Installation: Validated** and
    **Worker: Ready**. If the game is somewhere else, open **Settings > Installation** and choose
    `G-Diffuser.exe`.
@@ -212,13 +220,18 @@ The only setting the Companion saves is the game folder chosen in Settings, in
 
 1. Configure and build the repository as usual. The `G-Diffuser-Companion` target builds the
    program and copies `tools/music_targets.json` beside it.
-2. Freeze the worker: `python -I tools/build_companion_worker.py`. This installs pinned PyInstaller
-   and Pillow into a virtual environment under `build/`, freezes the worker into
-   `build/companion-worker/`, and smoke-tests it with Python removed from `PATH`.
+2. Freeze the worker: `python -I tools/build_companion_worker.py`. This needs Python 3.11 or newer.
+   It installs pinned PyInstaller and Pillow into a virtual environment under `build/`, freezes the
+   worker into `build/companion-worker/`, and smoke-tests it with Python removed from `PATH`.
 3. Build `G-Diffuser-Companion-worker` to copy the frozen worker beside the program.
-4. Package: `pwsh tools/package_windows.ps1 -BuildDir build/x64 -Version <version> -Companion`. The
-   script refuses to package when a Companion file or license is missing, when the program needs a
-   DLL beside it, or when the staged copy fails `--selftest`.
+4. Package:
+   - Windows: `pwsh tools/package_windows.ps1 -BuildDir build/x64 -Version <version> -Companion`
+   - Linux: `bash tools/package_linux.sh --companion build <version> dist linux-x64`
+
+   Both refuse to package when a Companion file or license is missing, when the program needs a
+   library the package does not carry, or when the staged copy fails `--selftest`. On Linux the
+   frozen worker must also pass the same glibc and CPU limits as the game
+   (`tools/check_linux_abi.py --frozen-dir`), so freeze it on Ubuntu 22.04 for a release.
 
 User themes in the build folder are test data and are never packaged.
 
@@ -230,12 +243,13 @@ game's dump on your machine.
 | Component | License | Where it is | License text |
 | --- | --- | --- | --- |
 | Dear ImGui | MIT | statically linked into the program | `LICENSES/MIT-Dear-ImGui.txt` |
-| SDL2 | zlib | statically linked into the program | `LICENSES/zlib-SDL2.txt` |
+| SDL2 | zlib | statically linked into the program on Windows; on Linux the game's `lib/libSDL2-2.0.so.0` | `LICENSES/zlib-SDL2.txt` |
 | stb_image | MIT or public domain | statically linked into the program | `LICENSES/MIT-stb.txt` |
 | stb_vorbis | public domain, or MIT | statically linked into the program (the game's music decoders) | end of `port/third_party/stb_vorbis/stb_vorbis.c` |
 | dr_flac, dr_wav | public domain, or MIT-0 | statically linked into the program (the game's music decoders) | end of each header in `port/third_party/dr_libs/` |
-| Python 3.13 runtime, with OpenSSL, libffi, bzip2, xz, expat and mpdecimal | PSF-2.0 and the components' own licenses | `worker/_internal/` | `worker/_internal/LICENSES/PSF-2.0-Python.txt` |
+| Python 3.12 runtime (Windows: with OpenSSL, libffi, bzip2, xz, expat and mpdecimal) | PSF-2.0 and, on Windows, the components' own licenses | `worker/_internal/` | `worker/_internal/LICENSES/PSF-2.0-Python.txt` |
+| Linux only: the Ubuntu 22.04 system libraries the worker carries (OpenSSL, zlib, bzip2, xz, libuuid) | each package's own licenses | `worker/_internal/` | `worker/_internal/LICENSES/debian-<package>.txt` |
 | Pillow, with the image libraries its wheel bundles | MIT-CMU and the bundled libraries' licenses | `worker/_internal/PIL/` | `worker/_internal/LICENSES/MIT-CMU-Pillow.txt` |
-| PyInstaller bootloader | GPL-2.0 with the bootloader exception, which allows shipping it with any program | `worker/gdx_companion_worker.exe` | none required |
+| PyInstaller bootloader | GPL-2.0 with the bootloader exception, which allows shipping it with any program | `worker/gdx_companion_worker.exe` (`worker/gdx_companion_worker` on Linux) | none required |
 
 PyInstaller and Pillow are build-time tools. Players do not need Python installed.

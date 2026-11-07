@@ -48,12 +48,13 @@ jobs:
     steps:
       - name: Install build tools
         # git has to exist before actions/checkout runs, or checkout falls back to a source
-        # download that cannot fetch the four submodules.
+        # download that cannot fetch the four submodules. lsb-release is how actions/setup-python
+        # recognises the container as Ubuntu 22.04 and picks the matching Python build.
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
             build-essential gcc-12 g++-12 ninja-build pkg-config \
-            git ca-certificates wget \
+            git ca-certificates wget lsb-release \
             python3 python3-yaml python3-pil \
             zlib1g-dev libbz2-dev nlohmann-json3-dev libpng-dev \
             libgl1-mesa-dev libopengl-dev libegl1-mesa-dev libglew-dev \
@@ -75,6 +76,19 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - uses: actions/setup-python@v5
+        # Only for freezing the Companion worker: the pinned Pillow needs Python 3.11 or newer and
+        # 22.04 ships 3.10. Its build is made for 22.04, so the frozen worker keeps the same glibc
+        # floor as the game. The game's own build keeps using /usr/bin/python3 and its apt modules.
+        with:
+          python-version: '3.12'
+
+      - name: Freeze the Companion worker
+        # Before the build, so G-Diffuser-Companion-worker has a frozen worker to copy. Pinned
+        # PyInstaller and Pillow go into a venv under build/, and the result passes its own smoke
+        # test with Python off PATH, so players need no Python.
+        run: python -I tools/build_companion_worker.py
 
       - name: Build pinned dependencies
         # 22.04's own packages are too old for libultraship, and distribution packages would
@@ -146,19 +160,23 @@ jobs:
           VERSION: ${{ steps.version.outputs.value }}
           CHANNEL: ${{ steps.version.outputs.channel }}
           COMMIT: ${{ steps.version.outputs.commit }}
+        # Python3_EXECUTABLE is pinned to the system interpreter that has python3-yaml and
+        # python3-pil: setup-python's 3.12 is first on PATH and has neither module.
         run: |
-          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release \
+          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DPython3_EXECUTABLE=/usr/bin/python3 \
             "-DGDX_DISPLAY_VERSION=$VERSION" "-DGDX_BUILD_CHANNEL=$CHANNEL" "-DGDX_BUILD_COMMIT=$COMMIT"
-          cmake --build build --target G-Diffuser
+          cmake --build build --target G-Diffuser G-Diffuser-Companion G-Diffuser-Companion-worker
 
       - name: Package and verify portability
         # package_linux.sh runs check_linux_abi.py before it writes the tarball, so a binary
         # that would fail to start on a supported distribution fails the build here instead.
+        # --companion stages the Companion into G-Diffuser/companion/, checks the frozen worker
+        # against the same limits, and runs the staged copy's --selftest.
         env:
           VERSION: ${{ steps.version.outputs.value }}
         run: |
           export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
-          bash tools/package_linux.sh build "$VERSION" dist linux-x64
+          bash tools/package_linux.sh --companion build "$VERSION" dist linux-x64
 
       - uses: actions/upload-artifact@v4
         with:
@@ -187,12 +205,13 @@ jobs:
     steps:
       - name: Install build tools
         # git has to exist before actions/checkout runs, or checkout falls back to a source
-        # download that cannot fetch the four submodules.
+        # download that cannot fetch the four submodules. lsb-release is how actions/setup-python
+        # recognises the container as Ubuntu 22.04 and picks the matching Python build.
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
             build-essential gcc-12 g++-12 ninja-build pkg-config \
-            git ca-certificates wget \
+            git ca-certificates wget lsb-release \
             python3 python3-yaml python3-pil \
             zlib1g-dev libbz2-dev nlohmann-json3-dev libpng-dev \
             libgl1-mesa-dev libopengl-dev libegl1-mesa-dev libglew-dev \
@@ -214,6 +233,19 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - uses: actions/setup-python@v5
+        # Only for freezing the Companion worker: the pinned Pillow needs Python 3.11 or newer and
+        # 22.04 ships 3.10. Its build is made for 22.04, so the frozen worker keeps the same glibc
+        # floor as the game. The game's own build keeps using /usr/bin/python3 and its apt modules.
+        with:
+          python-version: '3.12'
+
+      - name: Freeze the Companion worker
+        # Before the build, so G-Diffuser-Companion-worker has a frozen worker to copy. Pinned
+        # PyInstaller and Pillow go into a venv under build/, and the result passes its own smoke
+        # test with Python off PATH, so players need no Python.
+        run: python -I tools/build_companion_worker.py
 
       - name: Build pinned dependencies
         # 22.04's own packages are too old for libultraship, and distribution packages would
@@ -285,19 +317,23 @@ jobs:
           VERSION: ${{ steps.version.outputs.value }}
           CHANNEL: ${{ steps.version.outputs.channel }}
           COMMIT: ${{ steps.version.outputs.commit }}
+        # Python3_EXECUTABLE is pinned to the system interpreter that has python3-yaml and
+        # python3-pil: setup-python's 3.12 is first on PATH and has neither module.
         run: |
-          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release \
+          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DPython3_EXECUTABLE=/usr/bin/python3 \
             "-DGDX_DISPLAY_VERSION=$VERSION" "-DGDX_BUILD_CHANNEL=$CHANNEL" "-DGDX_BUILD_COMMIT=$COMMIT"
-          cmake --build build --target G-Diffuser
+          cmake --build build --target G-Diffuser G-Diffuser-Companion G-Diffuser-Companion-worker
 
       - name: Package and verify portability
         # package_linux.sh runs check_linux_abi.py before it writes the tarball, so a binary
         # that would fail to start on a supported distribution fails the build here instead.
+        # --companion stages the Companion into G-Diffuser/companion/, checks the frozen worker
+        # against the same limits, and runs the staged copy's --selftest.
         env:
           VERSION: ${{ steps.version.outputs.value }}
         run: |
           export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
-          bash tools/package_linux.sh build "$VERSION" dist linux-arm64
+          bash tools/package_linux.sh --companion build "$VERSION" dist linux-arm64
 
       - uses: actions/upload-artifact@v4
         with:
