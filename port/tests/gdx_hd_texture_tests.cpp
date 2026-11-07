@@ -36,6 +36,17 @@ extern "C" const char* GDiffuser_LookupLoadedAssetKeyContaining(const void* addr
 extern "C" const char* GdxWorkshopLookupAtlasTileOverride(const char*, size_t, int, int, int, int) {
     return sAtlasPath;
 }
+// Palette variants (gdx_workshop.cpp, AssetLoader.cpp) are off here: no pack holds one.
+extern "C" int GdxWorkshopPaletteVariantsPresent(void) {
+    return 0;
+}
+extern "C" const char* GdxWorkshopLookupPaletteVariant(const char*, const uint8_t*, size_t) {
+    return nullptr;
+}
+extern "C" const char* GDiffuser_LookupLoadedAssetKeyAndSize(const void*, size_t* outSize) {
+    *outSize = 0;
+    return nullptr;
+}
 
 namespace {
 class CaptureBackend final : public Fast::GfxRenderingAPI {
@@ -415,6 +426,139 @@ void DrawCoordinates() {
         } else {
             Check(f.backend.vertices == baseline, "HD draw coordinates preserve native UV units");
         }
+    }
+}
+
+// A race background sprite: gDPLoadTextureBlock_4b of a 16x16 CI4 image, loaded as a 16-bit block
+// with the width-1 sentinel before the render tile is set. A raw RGBA32 pack entry at 2x replaces
+// it. The upload must be the whole 32x32 image, and the draw must submit the same vertices as the
+// stock CI4 draw; a line stride longer than the load made it sample one row, wrapped 16 times.
+void RawCi4Sprite() {
+    constexpr uint32_t kSide = 16, kScale = 2, kHd = kSide * kScale;
+    uint8_t indices[kSide * kSide / 2];
+    std::memset(indices, 0x11, sizeof(indices));
+    uint8_t palette[256] = {};
+    palette[2] = 0xF8;
+    palette[3] = 1;
+    auto init = std::make_shared<Ship::ResourceInitData>();
+    init->Path = "fixture/raw-ci4";
+    auto tex = std::make_shared<Fast::Texture>(init);
+    tex->Type = Fast::TextureType::RGBA32bpp;
+    tex->Flags = TEX_FLAG_LOAD_AS_RAW;
+    tex->Width = kHd;
+    tex->Height = kHd;
+    // Byte scale: 4 replacement bytes per HD texel against half a byte per CI4 texel.
+    tex->HByteScale = static_cast<float>(4 * kHd) / (kSide / 2);
+    tex->VPixelScale = static_cast<float>(kScale);
+    tex->ImageDataSize = kHd * kHd * 4;
+    tex->ImageData = new uint8_t[tex->ImageDataSize];
+    for (uint32_t p = 0; p < tex->ImageDataSize; ++p) {
+        tex->ImageData[p] = static_cast<uint8_t>(p * 7 + p / (kHd * 4));
+    }
+
+    std::vector<float> baseline;
+    for (const bool hd : {false, true}) {
+        Fixture f;
+        auto& source = f.interpreter.mRdp->texture_to_load;
+        source.addr = hd ? tex->ImageData : indices;
+        source.siz = G_IM_SIZ_16b;
+        source.width = 1;
+        source.tex_flags = hd ? TEX_FLAG_LOAD_AS_RAW : 0;
+        source.raw_tex_metadata = {};
+        if (hd) {
+            source.raw_tex_metadata = {tex->Width, tex->Height, tex->HByteScale, tex->VPixelScale, tex, tex->Type};
+        }
+        f.interpreter.GfxDpSetTile(G_IM_FMT_CI, G_IM_SIZ_16b, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0);
+        f.interpreter.GfxDpLoadBlock(7, 0, 0, (kSide * kSide + 3) / 4 - 1, 2048);
+        f.interpreter.GfxDpSetTile(G_IM_FMT_CI, G_IM_SIZ_4b, (kSide / 2 + 7) / 8, 0, 0, 0, G_TX_CLAMP, 0, 0,
+                                   G_TX_CLAMP, 0, 0);
+        f.interpreter.GfxDpSetTileSize(0, 0, 0, (kSide - 1) * 4, (kSide - 1) * 4);
+        f.interpreter.mRdp->palettes[0] = palette;
+        f.interpreter.mRdp->palette_dram_addr[0] = palette;
+        f.interpreter.GfxDpSetCombineMode(uint32_t(G_CCMUX_TEXEL0) << 13, 0, 0, 0);
+        auto* v = f.interpreter.mRsp->loaded_vertices;
+        v[0] = {-0.5f, -0.5f, 0, 1, 0, 0, {255, 255, 255, 255}, 0};
+        v[1] = {0.5f, -0.5f, 0, 1, kSide * 32, 0, {255, 255, 255, 255}, 0};
+        v[2] = {-0.5f, 0.5f, 0, 1, 0, kSide * 32, {255, 255, 255, 255}, 0};
+        f.interpreter.GfxSpTri1(0, 1, 2, false);
+        f.interpreter.Flush();
+        if (!hd) {
+            baseline = f.backend.vertices;
+            Check(!baseline.empty() && f.backend.width == kSide && f.backend.height == kSide,
+                  "stock CI4 sprite draws at native size");
+            continue;
+        }
+        Check(f.backend.width == kHd && f.backend.height == kHd &&
+                  std::memcmp(f.backend.pixels.data(), tex->ImageData, tex->ImageDataSize) == 0,
+              "raw RGBA32 sprite uploads the whole HD image");
+        Check(!f.backend.vertices.empty() && f.backend.vertices == baseline,
+              "raw RGBA32 sprite keeps the stock CI4 UVs");
+    }
+}
+
+// The skybox strip (background.c): gDPLoadTextureBlock of a 64x1 RGBA16 gradient, clamped, with a
+// raw RGBA32 replacement eight times wider so a dark gradient keeps 8 bits per channel.
+void RawSkyStrip() {
+    constexpr uint32_t kWidth = 64, kScale = 8, kHd = kWidth * kScale;
+    uint8_t strip[kWidth * 2];
+    for (uint32_t x = 0; x < kWidth; ++x) {
+        strip[x * 2] = 0;
+        strip[x * 2 + 1] = static_cast<uint8_t>((x / 8) << 1 | 1);
+    }
+    auto init = std::make_shared<Ship::ResourceInitData>();
+    init->Path = "fixture/raw-sky";
+    auto tex = std::make_shared<Fast::Texture>(init);
+    tex->Type = Fast::TextureType::RGBA32bpp;
+    tex->Flags = TEX_FLAG_LOAD_AS_RAW;
+    tex->Width = kHd;
+    tex->Height = 1;
+    // Byte scale: 4 replacement bytes per HD texel, kScale HD texels per 2-byte native texel.
+    tex->HByteScale = static_cast<float>(4 * kHd) / (kWidth * 2);
+    tex->VPixelScale = 1.0f;
+    tex->ImageDataSize = kHd * 4;
+    tex->ImageData = new uint8_t[tex->ImageDataSize];
+    for (uint32_t x = 0; x < kHd; ++x) {
+        tex->ImageData[x * 4] = 10;
+        tex->ImageData[x * 4 + 1] = 10;
+        tex->ImageData[x * 4 + 2] = static_cast<uint8_t>(10 + x / 20);
+        tex->ImageData[x * 4 + 3] = 255;
+    }
+
+    std::vector<float> baseline;
+    for (const bool hd : {false, true}) {
+        Fixture f;
+        auto& source = f.interpreter.mRdp->texture_to_load;
+        source.addr = hd ? tex->ImageData : strip;
+        source.siz = G_IM_SIZ_16b;
+        source.width = 1;
+        source.tex_flags = hd ? TEX_FLAG_LOAD_AS_RAW : 0;
+        source.raw_tex_metadata = {};
+        if (hd) {
+            source.raw_tex_metadata = {tex->Width, tex->Height, tex->HByteScale, tex->VPixelScale, tex, tex->Type};
+        }
+        f.interpreter.GfxDpSetTile(G_IM_FMT_RGBA, G_IM_SIZ_16b, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0);
+        f.interpreter.GfxDpLoadBlock(7, 0, 0, kWidth - 1, 128);
+        f.interpreter.GfxDpSetTile(G_IM_FMT_RGBA, G_IM_SIZ_16b, (kWidth * 2 + 7) / 8, 0, 0, 0, G_TX_CLAMP, 0, 0,
+                                   G_TX_CLAMP, 0, 0);
+        f.interpreter.GfxDpSetTileSize(0, 0, 0, (kWidth - 1) * 4, 0);
+        f.interpreter.GfxDpSetCombineMode(uint32_t(G_CCMUX_TEXEL0) << 13, 0, 0, 0);
+        auto* v = f.interpreter.mRsp->loaded_vertices;
+        v[0] = {-0.5f, -0.5f, 0, 1, 0, 0, {255, 255, 255, 255}, 0};
+        v[1] = {0.5f, -0.5f, 0, 1, kWidth * 32, 0, {255, 255, 255, 255}, 0};
+        v[2] = {-0.5f, 0.5f, 0, 1, 0, 32, {255, 255, 255, 255}, 0};
+        f.interpreter.GfxSpTri1(0, 1, 2, false);
+        f.interpreter.Flush();
+        if (!hd) {
+            baseline = f.backend.vertices;
+            Check(!baseline.empty() && f.backend.width == kWidth && f.backend.height == 1,
+                  "stock skybox strip draws at native size");
+            continue;
+        }
+        Check(f.backend.width == kHd && f.backend.height == 1 &&
+                  std::memcmp(f.backend.pixels.data(), tex->ImageData, tex->ImageDataSize) == 0,
+              "raw RGBA32 skybox strip uploads every HD texel unquantized");
+        Check(!f.backend.vertices.empty() && f.backend.vertices == baseline,
+              "raw RGBA32 skybox strip keeps the stock UVs");
     }
 }
 
@@ -928,6 +1072,8 @@ int main(int argc, char**) {
     Subrectangle();
     LayoutAndBounds();
     DrawCoordinates();
+    RawCi4Sprite();
+    RawSkyStrip();
     BlendCoefficients();
     TileOverfetch();
     NativeControls();

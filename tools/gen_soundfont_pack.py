@@ -149,9 +149,15 @@ _DUMP_AUDIO = os.path.join(_REPO_ROOT, "dump", "audio")
 
 
 def _load_sample_packer():
-    """Import tools/gen_sample_pack.py by path (it has a __main__ guard). The whole VADPCM
+    """Import tools/gen_sample_pack.py (it has a __main__ guard). The whole VADPCM
     pipeline (load_wav, resample_linear, design_book, encode_adpcm, snr_db, pack_gsmp,
-    parse_gsmp) is reused from there — never duplicated here."""
+    parse_gsmp) is reused from there — never duplicated here. A plain import comes first, so a
+    frozen Companion worker, which bundles the module but not the tools folder, finds it too."""
+    try:
+        import gen_sample_pack
+        return gen_sample_pack
+    except ImportError:
+        pass
     path = os.path.join(_REPO_ROOT, "tools", "gen_sample_pack.py")
     spec = importlib.util.spec_from_file_location("gen_sample_pack", path)
     mod = importlib.util.module_from_spec(spec)
@@ -861,7 +867,7 @@ def cmd_init(args):
         return 2
     os.makedirs(os.path.join(outdir, "samples"), exist_ok=True)
 
-    _known_keys, rates = gsp.load_dump_info()
+    _known_keys, rates = gsp.load_dump_info(_DUMP_AUDIO)
     warnings = []
     sample_entries = {}
     n_reencoded = 0
@@ -1148,6 +1154,7 @@ def check_pack(path):
 
 
 def main():
+    global _DUMP_AUDIO
     ap = argparse.ArgumentParser(
         description="Build, scaffold and validate soundfont overlay packs (GFT1 v1)",
         epilog="Examples:\n"
@@ -1173,6 +1180,9 @@ def main():
                               "like FONT_SOUND_EFFECTS takes hours at ~2k frames/sec)")
     ap_init.add_argument("--predictors", type=int, default=2,
                          help="codebook predictors per sample, 1..8 (default 2, matching stock)")
+    ap_init.add_argument("--dump-dir", default=None,
+                         help="dump audio folder with fonts/ and samples/ (default: dump/audio "
+                              "beside the tools folder)")
 
     ap_pack = sub.add_parser("pack", help="validate a project and write a deterministic .o2r")
     ap_pack.add_argument("input_dir", help="font project directory (contains font.json)")
@@ -1196,6 +1206,11 @@ def main():
     args = ap.parse_args()
 
     if args.command == "init":
+        if args.dump_dir is not None:
+            if not os.path.isdir(args.dump_dir):
+                sys.stderr.write("error: --dump-dir directory not found: %s\n" % args.dump_dir)
+                return 2
+            _DUMP_AUDIO = args.dump_dir
         if args.names:
             for i, name in enumerate(FONT_NAMES):
                 print("%2d %s" % (i, name))

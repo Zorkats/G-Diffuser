@@ -51,6 +51,7 @@
 
 #include "gdx_content_io.h"
 #include "gdx_course_registry.h"
+#include "gdx_foreign_track.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -95,21 +96,8 @@ extern "C" {
 /* A real disk holds at most 100 files per extension class; 64 import rows is generous. */
 #define GDX_CONTENT_IMPORT_MAX 64
 
-#define GDX_FOREIGN_HOST_ORDER 0
-#define GDX_FOREIGN_BIG_ENDIAN 1
-
-typedef struct GdxForeignCourseDiagnostic {
-    int present;
-    int encoding;
-    int rawCreator;
-    int rawCount;
-    int creator;
-    int count;
-    uint32_t storedChecksum;
-    uint32_t computedChecksum;
-    int checksumChecked;
-    int sanitizedPits;
-} GdxForeignCourseDiagnostic;
+/* GDX_FOREIGN_HOST_ORDER, GDX_FOREIGN_BIG_ENDIAN and GdxForeignCourseDiagnostic come from
+ * gdx_foreign_track.h; the normalizer below runs it against gdx_course_edit_max_y(). */
 
 // The caller owns a full fixed-size output buffer, which may alias raw and need not be aligned.
 // Nonzero validation bits mean the output must not be installed; the input remains unchanged unless aliased.

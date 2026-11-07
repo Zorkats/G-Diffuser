@@ -44,6 +44,7 @@ extern "C" bool gInCourseEditTestRun;
 extern "C" int gCreateOption;
 extern "C" int gMoveOption;
 extern "C" int gDesignStyleOption;
+extern "C" int gPartsStyleOption;
 
 // Exported by gdx_course_edit_mouse.cpp.
 extern "C" const char* gdx_course_edit_action_name(int index);
@@ -177,6 +178,14 @@ void DrawSegmentLines(int createOption) {
         ImGui::TextUnformatted("Click: set a point");
         ImGui::TextUnformatted("Ctrl+click the track: select that segment");
         ImGui::TextUnformatted("Ctrl+click a white node: select the other path");
+        return;
+    }
+    if (createOption == 3 /* CREATE_OPTION_PARTS */ && gPartsStyleOption == 9 /* TRACK_PART_STYLE_WIND */) {
+        ImGui::TextColored(title, "Wind");
+        ImGui::TextUnformatted("Click the track: place the wind on that segment");
+        ImGui::TextUnformatted("New wind blows the way the camera faces");
+        ImGui::TextUnformatted("CLEAR: take the segment's wind away");
+        ImGui::TextDisabled("Set the angle and exact strength in the settings panel");
         return;
     }
     if (createOption == 3 /* CREATE_OPTION_PARTS */) {
@@ -399,5 +408,6 @@ void GdxCourseEditDrawControlsHelp(void) {
         HelpRow(keyLabel, gdx_course_edit_action_name(i));
     }
     ImGui::EndTable();
-    ImGui::TextDisabled("Tool keys are rebindable in the Course Edit tool keys block above.");
+    ImGui::TextDisabled("Press a tool's key again to go back to Course and pick points. Tool keys are "
+                        "rebindable in the Course Edit tool keys block above.");
 }

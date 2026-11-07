@@ -11,6 +11,7 @@
 #include "decoders.h"
 
 #include <ctype.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -35,6 +36,10 @@ typedef struct GdxTagScan {
     int haveLength;
     uint64_t start;
     uint64_t length;
+    int haveGain;
+    int havePeak;
+    double gain;
+    double peak;
 } GdxTagScan;
 
 static int gdx_parse_u64(const char* s, size_t n, uint64_t* out) {
@@ -59,6 +64,56 @@ static int gdx_parse_u64(const char* s, size_t n, uint64_t* out) {
     return 1;
 }
 
+// A decimal number as ReplayGain writes it: optional spaces and sign, digits with an optional fraction,
+// then optional spaces and an optional "dB" unit. Read by hand so the C locale's decimal point does not
+// matter.
+static int gdx_parse_decimal(const char* s, size_t n, double* out) {
+    size_t i = 0;
+    double value = 0.0;
+    double scale = 0.1;
+    int negative = 0;
+    int digits = 0;
+
+    while (i < n && s[i] == ' ') {
+        i++;
+    }
+    if (i < n && (s[i] == '-' || s[i] == '+')) {
+        negative = s[i] == '-';
+        i++;
+    }
+    while (i < n && s[i] >= '0' && s[i] <= '9') {
+        value = value * 10.0 + (double)(s[i] - '0');
+        digits++;
+        i++;
+    }
+    if (i < n && s[i] == '.') {
+        i++;
+        while (i < n && s[i] >= '0' && s[i] <= '9') {
+            value += scale * (double)(s[i] - '0');
+            scale *= 0.1;
+            digits++;
+            i++;
+        }
+    }
+    if (digits == 0 || digits > 24) {
+        return 0;
+    }
+    while (i < n && s[i] == ' ') {
+        i++;
+    }
+    if (i + 2 <= n && toupper((unsigned char)s[i]) == 'D' && toupper((unsigned char)s[i + 1]) == 'B') {
+        i += 2;
+    }
+    while (i < n && s[i] == ' ') {
+        i++;
+    }
+    if (i != n) {
+        return 0;
+    }
+    *out = negative ? -value : value;
+    return 1;
+}
+
 // True when the comment is KEY=value with KEY matched case-insensitively. key is upper case.
 static int gdx_tag_is(const char* s, size_t n, const char* key) {
     size_t k = strlen(key);
@@ -78,6 +133,9 @@ static int gdx_tag_is(const char* s, size_t n, const char* key) {
 static void gdx_tag_scan_one(GdxTagScan* scan, const char* s, size_t n) {
     static const char kStart[] = "LOOPSTART";
     static const char kLength[] = "LOOPLENGTH";
+    static const char kGain[] = "REPLAYGAIN_TRACK_GAIN";
+    static const char kPeak[] = "REPLAYGAIN_TRACK_PEAK";
+    double value = 0.0;
 
     if (gdx_tag_is(s, n, kStart)) {
         size_t k = strlen(kStart);
@@ -89,7 +147,26 @@ static void gdx_tag_scan_one(GdxTagScan* scan, const char* s, size_t n) {
         if (gdx_parse_u64(s + k + 1, n - k - 1, &scan->length)) {
             scan->haveLength = 1;
         }
+    } else if (gdx_tag_is(s, n, kGain)) {
+        size_t k = strlen(kGain);
+        if (gdx_parse_decimal(s + k + 1, n - k - 1, &value) && value >= -60.0 && value <= 60.0) {
+            scan->gain = value;
+            scan->haveGain = 1;
+        }
+    } else if (gdx_tag_is(s, n, kPeak)) {
+        size_t k = strlen(kPeak);
+        if (gdx_parse_decimal(s + k + 1, n - k - 1, &value) && value > 0.0 && value <= 100.0) {
+            scan->peak = value;
+            scan->havePeak = 1;
+        }
     }
+}
+
+static void gdx_level_from_tags(const GdxTagScan* scan, GdxMusicInfo* info) {
+    info->hasGain = scan->haveGain;
+    info->gainDb = scan->haveGain ? (float)scan->gain : 0.0f;
+    info->hasPeak = scan->havePeak;
+    info->peak = scan->havePeak ? (float)scan->peak : 0.0f;
 }
 
 // Applies the Vorbis-style tags when both are present and fit inside the file. Otherwise the loop
@@ -160,6 +237,7 @@ static GdxMusicDecoder* gdx_open_ogg(const char* path, GdxMusicInfo* info) {
         gdx_tag_scan_one(&scan, comments.comment_list[i], strlen(comments.comment_list[i]));
     }
     gdx_loop_from_tags(&scan, info);
+    gdx_level_from_tags(&scan, info);
     return dec;
 }
 
@@ -188,6 +266,7 @@ static GdxMusicDecoder* gdx_open_flac(const char* path, GdxMusicInfo* info) {
     info->channels = dec->channels;
     info->totalFrames = dec->flac->totalPCMFrameCount;
     gdx_loop_from_tags(&scan, info);
+    gdx_level_from_tags(&scan, info);
     return dec;
 }
 
@@ -202,7 +281,7 @@ static GdxMusicDecoder* gdx_open_wav(const char* path, GdxMusicInfo* info) {
     if (dec == NULL) {
         return NULL;
     }
-    if (!drwav_init_file_with_metadata(&dec->wav, path, drwav_metadata_type_smpl, NULL)) {
+    if (!drwav_init_file_with_metadata(&dec->wav, path, drwav_metadata_type_smpl | drwav_metadata_type_bext, NULL)) {
         gdx_decoder_free(dec);
         return NULL;
     }
@@ -211,12 +290,27 @@ static GdxMusicDecoder* gdx_open_wav(const char* path, GdxMusicInfo* info) {
         gdx_decoder_free(dec);
         return NULL;
     }
-    for (m = 0; m < dec->wav.metadataCount && !found; m++) {
+    for (m = 0; m < dec->wav.metadataCount; m++) {
         const drwav_metadata* md = &dec->wav.pMetadata[m];
-        if (md->type == drwav_metadata_type_smpl && md->data.smpl.sampleLoopCount > 0 && md->data.smpl.pLoops != NULL) {
+        if (!found && md->type == drwav_metadata_type_smpl && md->data.smpl.sampleLoopCount > 0 &&
+            md->data.smpl.pLoops != NULL) {
             first = md->data.smpl.pLoops[0].firstSampleOffset;
             last = md->data.smpl.pLoops[0].lastSampleOffset;
             found = 1;
+        }
+        // bext version 2 (EBU Tech 3285): loudness in LUFS and true peak in dBTP, both times 100 as signed
+        // 16-bit values, 0x7FFF when not measured.
+        if (md->type == drwav_metadata_type_bext && md->data.bext.version >= 2) {
+            const int16_t loudness = (int16_t)md->data.bext.loudnessValue;
+            const int16_t peak = (int16_t)md->data.bext.maxTruePeakLevel;
+            if (loudness != 0x7FFF) {
+                info->hasGain = 1;
+                info->gainDb = GDX_MUSIC_REPLAYGAIN_REFERENCE_LUFS - (float)loudness / 100.0f;
+            }
+            if (peak != 0x7FFF) {
+                info->hasPeak = 1;
+                info->peak = powf(10.0f, (float)peak / 2000.0f);
+            }
         }
     }
 
@@ -294,6 +388,31 @@ uint64_t gdx_music_decoder_read(GdxMusicDecoder* dec, float* out, uint64_t frame
             return drwav_read_pcm_frames_f32(&dec->wav, frames, out);
     }
     return 0;
+}
+
+float gdx_music_level_gain(const GdxMusicInfo* info) {
+    float db;
+    float gain;
+
+    if (info == NULL || !info->hasGain) {
+        return 1.0f;
+    }
+    db = info->gainDb + (GDX_MUSIC_STOCK_LUFS - GDX_MUSIC_REPLAYGAIN_REFERENCE_LUFS);
+    if (db < -60.0f) {
+        db = -60.0f;
+    }
+    if (db > 24.0f) {
+        db = 24.0f;
+    }
+    gain = powf(10.0f, db / 20.0f);
+    if (info->hasPeak && info->peak > 0.0f) {
+        if (gain * info->peak > 1.0f) {
+            gain = 1.0f / info->peak;
+        }
+    } else if (gain > 1.0f) {
+        gain = 1.0f;
+    }
+    return gain;
 }
 
 int gdx_music_decoder_seek(GdxMusicDecoder* dec, uint64_t frame) {

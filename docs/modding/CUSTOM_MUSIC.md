@@ -4,6 +4,10 @@
 
 ## Replace a complete song (no Python required)
 
+The [G-Diffuser Companion](../COMPANION.md) does these steps for you on Windows: it names the file,
+sets the loop on a waveform or suggests one, lets you hear the loop seam, matches the song's level
+to the game's music, and keeps the file it replaces. The steps below do the same by hand.
+
 1. Put an Ogg Vorbis (`.ogg`), FLAC (`.flac`), or WAV (`.wav`) recording in `music/` next to
    the executable you actually launch, not another installed copy. Startup creates this folder
    on first and later launches. Use it for both game replacements and custom course songs.
@@ -128,6 +132,32 @@ cut is seamless.
 If you already have JSON loop points, first establish which recording and sample rate they
 describe. Native-pack points use the **converted** recording's frames. Do not copy those numbers
 unchanged into a stream with a different sample rate; recalculate from the intended times.
+
+Course music starts from the beginning at every race start, including a retry, as the stock music
+does. To hear a loop that sits late in a course song, play a race longer than the loop end, or use
+**Hear the loop seam** in the Companion.
+
+### Match the game's music level
+
+**A recording without a level tag plays as it was mastered.** Modern masters are often about
+12 dB louder than the game's own music and drown out the sound effects. The game reads a level tag
+and plays the recording at its stock music level, about -17 LUFS:
+
+| Recording format | Level information read by the game |
+|---|---|
+| Ogg Vorbis or FLAC | `REPLAYGAIN_TRACK_GAIN` (for example `-12.34 dB`) and `REPLAYGAIN_TRACK_PEAK` (for example `0.987654`) comment tags |
+| WAV | The loudness and true peak fields of a version 2 `bext` chunk (EBU Tech 3285) |
+
+The track gain follows ReplayGain 2, which brings a recording to -18 LUFS; the game adds 1 dB to
+reach its own level. A gain written by another ReplayGain tool works too, as long as it uses the
+same reference. The game never raises a recording so far that its peak passes full scale, and
+without a peak tag it only turns a recording down. Album gain tags are ignored.
+
+The Companion measures the recording and writes these tags when it installs it, with **Match the
+game's music level** on, without re-encoding the audio. **Settings > Audio > Match custom music
+loudness** turns the game's use of the tags off; it is on by default and applies from the next
+song. The game log names the gain it applies, for example
+`[music] bgm_title: level -12.03 dB (track gain -13.03 dB, peak 0.977)`.
 
 ### Track-specific music
 

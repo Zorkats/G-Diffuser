@@ -54,12 +54,17 @@ int gdx_course_branch_editor_active_point(void);
 #define GDX_BRANCH_EDITOR_PART_MAGNET (1 << 1)
 #define GDX_BRANCH_EDITOR_PART_DIRT (1 << 2)
 #define GDX_BRANCH_EDITOR_PART_ICE (1 << 3)
+#define GDX_BRANCH_EDITOR_PART_DASH (1 << 4) /* a dash pad, which can be Super or Brake */
 
 /* GDX_BRANCH_EDITOR_PART_* of a point. */
 int gdx_course_branch_editor_point_parts(int point);
 
 /* Applies a change the panel queued (gdx_course_edit_input_request_extra). Runs on the game thread. */
 void gdx_course_branch_editor_apply_extra(void);
+
+/* The WIND part (Parts tab, port/gdx_wind.h). The stock parts press calls this. A click places the picked row's
+ * wind on the point's segment; new wind blows the camera's way. The settings panel sets the exact angle. */
+void gdx_course_branch_editor_wind_place(void);
 
 /* Controller press at the cursor, before the stock pick: switches paths when a stored node is under the cursor,
  * so the stock pick then takes that node. */

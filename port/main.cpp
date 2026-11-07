@@ -44,6 +44,7 @@
 #include "gdx_frame_pacer.h"
 #include "gdx_workshop.h"
 #include "gdx_gp_resume.h"
+#include "gdx_death_race.h"
 #include "n64_gfx_bridge.h"
 #include <SDL2/SDL.h>
 
@@ -87,6 +88,9 @@ void GdxAchievements_Tick(void); // port/gdx_achievements.h — F10 tracker; C++
 extern "C" void gdx_disk_save_flush(void);
 extern "C" void gdx_discord_tick(void);
 extern "C" void gdx_discord_shutdown(void);
+namespace gdx::lan {
+void Shutdown();
+}
 extern "C" void gdx_pcm_capture_init(void);
 extern "C" int  gdx_pcm_capture_finished(void);
 extern "C" void gdx_pcm_capture_shutdown(void);
@@ -1018,8 +1022,14 @@ int main(int argc, char** argv) {
         if (gdx_hackmod_sanitize_name(GdxHackModsActiveName().c_str(), safeHackName, sizeof(safeHackName))) {
             const std::string resumeFile = std::string("gp_resume-hack-") + safeHackName + ".bin";
             gdx_gp_resume_set_file_name(resumeFile.c_str());
+            const std::string deathRaceFile = std::string("death_race_records-hack-") + safeHackName + ".bin";
+            gdx_death_race_records_set_file_name(deathRaceFile.c_str());
         }
     }
+    // Death Race records off the stock setup live in their own file beside gp_resume.bin. A missing or
+    // damaged file starts with no records.
+    gdx_death_race_records_set_directory(Ship::Context::GetAppDirectoryPath().c_str());
+    gdx_death_race_records_load();
     // libultraship's built-in version gate (validHashes) is reject-only and does NOT special-case
     // unversioned archives, so a non-empty set would refuse to mount f3d.o2r and the texture packs
     // (no "version" file) and break boot. It therefore stays DISABLED and the post-mount check
@@ -1290,6 +1300,8 @@ int main(int argc, char** argv) {
 
     logStep("RegisterResourceFactories");
     GDiffuser::RegisterResourceFactories(ctx->GetResourceManager()->GetResourceLoader());
+
+    GdxWorkshopApplyAltAssets(0);
 
     logStep("GDiffuser_LoadAllAssets");
     GDiffuser_LoadAllAssets();
@@ -1824,6 +1836,8 @@ int main(int argc, char** argv) {
     // window is already gone; last, it would leave a silent zombie process. ClearPresence +
     // RunCallbacks run inside so the profile clears before the socket dies.
     gdx_discord_shutdown();
+    // Says goodbye to an open LAN room and joins its worker thread (gdx_lan_lobby.cpp).
+    gdx::lan::Shutdown();
     // gdx_disk_save_tick() only flushes after the write burst has been idle for kDebounceFrames
     // (~0.5s), so a save landing inside that final window would be dropped on close.
     gdx_disk_save_flush();

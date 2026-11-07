@@ -20,6 +20,7 @@ changes packs cannot make, you can edit the source code and build your own versi
 | Share tracks and machines I built | [Sharing tracks and machines](modding/SHARING_TRACKS_AND_MACHINES.md) | None |
 | Change gameplay, physics, or menus | [Code mods](modding/CODE_MODS.md) | A C/C++ build setup |
 | Add a venue, song, or track effect to Course Edit | [Course elements](modding/COURSE_ELEMENTS.md) | A C/C++ build setup |
+| See how someone else's pack is built | [Companion: Inspect](COMPANION.md#inspect) | The Companion |
 
 Every guide is self-contained. Start with the one that matches what you want to make.
 

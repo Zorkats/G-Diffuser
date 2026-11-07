@@ -9,6 +9,7 @@
 #include "../gdx_course_settings.h"
 #include "../gdx_course_settings_view.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -560,6 +561,21 @@ static void test_extras(void) {
     gdx_branch_edit_set_point_extra(99, GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH, 50);
     CHECK(gdx_branch_edit_point_extra(99, GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH) == 0, "a point out of the ring has no value");
 
+    gdx_branch_edit_set_point_extra(5, GDX_BRANCH_EDIT_EXTRA_PAD_BOOST, 80);
+    CHECK(gdx_branch_edit_point_extra(5, GDX_BRANCH_EDIT_EXTRA_PAD_BOOST) == 0, "a pad that is not Super takes no boost");
+    gdx_branch_edit_set_point_extra(5, GDX_BRANCH_EDIT_EXTRA_PAD_KIND, 9);
+    CHECK(gdx_branch_edit_point_extra(5, GDX_BRANCH_EDIT_EXTRA_PAD_KIND) == GDX_SETTINGS_PAD_BRAKE,
+          "a pad kind stops at Brake");
+    gdx_branch_edit_set_point_extra(5, GDX_BRANCH_EDIT_EXTRA_PAD_KIND, GDX_SETTINGS_PAD_SUPER);
+    gdx_branch_edit_set_point_extra(5, GDX_BRANCH_EDIT_EXTRA_PAD_BOOST, 500);
+    CHECK(gdx_branch_edit_point_extra(5, GDX_BRANCH_EDIT_EXTRA_PAD_BOOST) == GDX_SETTINGS_PAD_BOOST_MAX,
+          "a boost stops at its maximum");
+    CHECK(fabsf(gdx_settings_view_pad_boost(5) - 3.0f) < 0.001f, "the race reads a pad's boost");
+    gdx_branch_edit_set_point_extra(5, GDX_BRANCH_EDIT_EXTRA_PAD_KIND, GDX_SETTINGS_PAD_BRAKE);
+    CHECK(gdx_branch_edit_point_extra(5, GDX_BRANCH_EDIT_EXTRA_PAD_BOOST) == 0, "turning a Super pad into Brake drops its boost");
+    gdx_branch_edit_set_point_extra(5, GDX_BRANCH_EDIT_EXTRA_PAD_KIND, 0);
+    CHECK(gdx_settings_view_pad_kind(5) == GDX_SETTINGS_PAD_NORMAL, "0 makes a stock dash again");
+
     /* Point 3's value follows its segment through the ring edits. */
     ring_insert(1, 1500.0f);
     CHECK((gdx_branch_edit_point_extra(4, GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH) == 50) &&
@@ -593,6 +609,20 @@ static void test_extras(void) {
           "the race reads the track's values");
     gdx_branch_edit_set_track_setting(GDX_BRANCH_EDIT_TRACK_LAVA, 9);
     CHECK(gdx_branch_edit_track_setting(GDX_BRANCH_EDIT_TRACK_LAVA) == GDX_SETTINGS_LAVA_NEVER_KILLS, "a lava mode stops at its maximum");
+    gdx_branch_edit_set_track_setting(GDX_BRANCH_EDIT_TRACK_AI, GDX_SETTINGS_AI_FIERCE);
+    CHECK((gdx_branch_edit_track_setting(GDX_BRANCH_EDIT_TRACK_AI) == GDX_SETTINGS_AI_FIERCE) &&
+              (gdx_settings_view_ai_scale() == 1.5f),
+          "a CPU aggression preset is published for the race");
+    gdx_branch_edit_set_track_setting(GDX_BRANCH_EDIT_TRACK_AI, 9);
+    CHECK(gdx_branch_edit_track_setting(GDX_BRANCH_EDIT_TRACK_AI) == GDX_SETTINGS_AI_BRUTAL, "a preset stops at Brutal");
+    gdx_branch_edit_set_track_setting(GDX_BRANCH_EDIT_TRACK_AI, -3);
+    CHECK(gdx_branch_edit_track_setting(GDX_BRANCH_EDIT_TRACK_AI) == GDX_SETTINGS_AI_TRACK, "and at Track below");
+    CHECK(gdx_settings_view_ai_resolve(1.5f) == 1.5f, "a Track preset keeps the player's option for the race");
+    gdx_branch_edit_set_track_setting(GDX_BRANCH_EDIT_TRACK_AI, GDX_SETTINGS_AI_NORMAL);
+    CHECK((gdx_settings_view_ai_resolve(0.5f) == 1.0f) && (gdx_settings_view_ai_resolve(0.0f) == 1.0f),
+          "a Normal preset publishes 100% for the race, whatever the player's option is");
+    gdx_branch_edit_set_track_setting(GDX_BRANCH_EDIT_TRACK_AI, GDX_SETTINGS_AI_CALM);
+    CHECK(gdx_settings_view_ai_resolve(2.0f) == 1.0f, "a Calm preset halves the player's option for the race");
 
     /* Undo holds the values. */
     gdx_branch_edit_state_save(state);
@@ -600,6 +630,12 @@ static void test_extras(void) {
     gdx_branch_edit_set_point_extra(3, GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH, 70);
     CHECK(!gdx_branch_edit_state_equal(state), "a changed value is a changed state");
     gdx_branch_edit_state_load(state);
+    gdx_branch_edit_set_track_setting(GDX_BRANCH_EDIT_TRACK_AI, GDX_SETTINGS_AI_BRUTAL);
+    CHECK(!gdx_branch_edit_state_equal(state), "a changed preset is a changed state");
+    gdx_branch_edit_state_load(state);
+    CHECK((gdx_branch_edit_track_setting(GDX_BRANCH_EDIT_TRACK_AI) == GDX_SETTINGS_AI_CALM) &&
+              (gdx_settings_view_ai_scale() == 0.5f),
+          "undo brings the preset back and publishes it");
     CHECK((gdx_branch_edit_point_extra(3, GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH) == 50) && (gdx_settings_view_pit_width(3) == 50),
           "loading the state brings the value back and publishes it");
 
@@ -610,7 +646,8 @@ static void test_extras(void) {
           "clear drops the values and what the race reads");
     gdx_branch_edit_select("EXTRA.CRSD", sCount);
     CHECK((gdx_branch_edit_point_extra(3, GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH) == 50) &&
-              (gdx_branch_edit_track_setting(GDX_BRANCH_EDIT_TRACK_RANGE) == 120),
+              (gdx_branch_edit_track_setting(GDX_BRANCH_EDIT_TRACK_RANGE) == 120) &&
+              (gdx_branch_edit_track_setting(GDX_BRANCH_EDIT_TRACK_AI) == GDX_SETTINGS_AI_CALM),
           "selecting the course brings the values back");
 
     /* Each path keeps its own values through a swap. */
@@ -633,6 +670,68 @@ static void test_extras(void) {
 
     gdx_branch_edit_clear();
     gdx_branch_edit_commit("EXTRA.CRSD", NULL, sCount, 1u, reason, sizeof(reason));
+    gdx_settings_store_clear();
+}
+
+static void test_wind_extras(void) {
+    static unsigned char state[GDX_BRANCH_EDIT_STATE_BYTES];
+    char reason[96];
+
+    make_ring(8);
+    gdx_branch_edit_clear();
+    gdx_branch_edit_sync(sCount);
+
+    gdx_branch_edit_set_point_extra(2, GDX_BRANCH_EDIT_EXTRA_WIND_ANGLE, 90);
+    CHECK(gdx_branch_edit_point_extra(2, GDX_BRANCH_EDIT_EXTRA_WIND_ANGLE) == 0,
+          "a point with no wind of its own takes no angle");
+    gdx_branch_edit_set_point_extra(2, GDX_BRANCH_EDIT_EXTRA_WIND_STRENGTH, 60);
+    gdx_branch_edit_set_point_extra(2, GDX_BRANCH_EDIT_EXTRA_WIND_ANGLE, 450);
+    CHECK((gdx_branch_edit_point_extra(2, GDX_BRANCH_EDIT_EXTRA_WIND_STRENGTH) == 60) &&
+              (gdx_branch_edit_point_extra(2, GDX_BRANCH_EDIT_EXTRA_WIND_ANGLE) == 90),
+          "a point keeps its wind and an angle wraps");
+    CHECK((gdx_settings_view_wind_strength(2) == 60) && (gdx_settings_view_wind_angle(2) == 90),
+          "the race reads a point's wind as soon as it changes");
+    gdx_branch_edit_set_point_extra(2, GDX_BRANCH_EDIT_EXTRA_WIND_ANGLE, -10);
+    CHECK(gdx_branch_edit_point_extra(2, GDX_BRANCH_EDIT_EXTRA_WIND_ANGLE) == 350, "a negative angle wraps");
+    gdx_branch_edit_set_point_extra(2, GDX_BRANCH_EDIT_EXTRA_WIND_STRENGTH, 180);
+    CHECK(gdx_branch_edit_point_extra(2, GDX_BRANCH_EDIT_EXTRA_WIND_STRENGTH) == GDX_SETTINGS_WIND_MAX,
+          "a strength stops at 100");
+    gdx_branch_edit_set_point_extra(2, GDX_BRANCH_EDIT_EXTRA_WIND_STRENGTH, 30);
+    gdx_branch_edit_set_point_extra(2, GDX_BRANCH_EDIT_EXTRA_WIND_ANGLE, 200);
+    gdx_branch_edit_set_point_extra(2, GDX_BRANCH_EDIT_EXTRA_WIND_STRENGTH, 0);
+    CHECK((gdx_branch_edit_point_extra(2, GDX_BRANCH_EDIT_EXTRA_WIND_STRENGTH) == 0) &&
+              (gdx_branch_edit_point_extra(2, GDX_BRANCH_EDIT_EXTRA_WIND_ANGLE) == 0) &&
+              (gdx_settings_active() == NULL),
+          "0 takes the wind away and clears the angle");
+
+    /* A new point splits its segment, so it keeps the wind there. */
+    gdx_branch_edit_set_point_extra(4, GDX_BRANCH_EDIT_EXTRA_WIND_STRENGTH, 80);
+    gdx_branch_edit_set_point_extra(4, GDX_BRANCH_EDIT_EXTRA_WIND_ANGLE, 270);
+    ring_insert(4, 1500.0f);
+    CHECK((gdx_branch_edit_point_extra(5, GDX_BRANCH_EDIT_EXTRA_WIND_STRENGTH) == 80) &&
+              (gdx_branch_edit_point_extra(5, GDX_BRANCH_EDIT_EXTRA_WIND_ANGLE) == 270) &&
+              (gdx_branch_edit_point_extra(4, GDX_BRANCH_EDIT_EXTRA_WIND_STRENGTH) == 80),
+          "an insert keeps the wind on both halves");
+    ring_delete(5);
+
+    gdx_branch_edit_state_save(state);
+    gdx_branch_edit_set_point_extra(4, GDX_BRANCH_EDIT_EXTRA_WIND_STRENGTH, 0);
+    CHECK(!gdx_branch_edit_state_equal(state) && (gdx_branch_edit_point_extra(4, GDX_BRANCH_EDIT_EXTRA_WIND_ANGLE) == 0),
+          "taking a point's wind away clears its angle and is a changed state");
+    gdx_branch_edit_state_load(state);
+    CHECK((gdx_branch_edit_point_extra(4, GDX_BRANCH_EDIT_EXTRA_WIND_STRENGTH) == 80) &&
+              (gdx_branch_edit_point_extra(4, GDX_BRANCH_EDIT_EXTRA_WIND_ANGLE) == 270),
+          "undo brings the point's wind back");
+
+    CHECK(gdx_branch_edit_commit("WIND.CRSD", sRing, sCount, 1u, reason, sizeof(reason)) == 0, "a commit stores the wind");
+    gdx_branch_edit_clear();
+    gdx_branch_edit_select("WIND.CRSD", sCount);
+    CHECK((gdx_branch_edit_point_extra(4, GDX_BRANCH_EDIT_EXTRA_WIND_STRENGTH) == 80) &&
+              (gdx_branch_edit_point_extra(4, GDX_BRANCH_EDIT_EXTRA_WIND_ANGLE) == 270),
+          "selecting the course brings the wind back");
+
+    gdx_branch_edit_clear();
+    gdx_branch_edit_commit("WIND.CRSD", NULL, sCount, 1u, reason, sizeof(reason));
     gdx_settings_store_clear();
 }
 
@@ -842,6 +941,7 @@ int main(void) {
     test_first_style();
     test_first_values();
     test_extras();
+    test_wind_extras();
     test_reload_then_select_without_split();
     if (sFailures != 0) {
         printf("%d course branch edit test(s) failed\n", sFailures);

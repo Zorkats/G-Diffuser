@@ -53,8 +53,22 @@ if(ANDROID)
     set(DISABLE_DLL_LOADER ON CACHE BOOL "" FORCE)
 endif()
 
+# --- Companion ----------------------------------------------------------------
+# G-Diffuser Companion: a standalone ImGui and SDL2 tool with no game code. On by default on
+# desktop; Android has no use for it.
+if(ANDROID)
+    set(GDX_COMPANION_DEFAULT OFF)
+else()
+    set(GDX_COMPANION_DEFAULT ON)
+endif()
+option(GDX_BUILD_COMPANION "Build the G-Diffuser Companion tool (ImGui and SDL2, no game code)"
+       ${GDX_COMPANION_DEFAULT})
+
 # --- Components ---------------------------------------------------------------
 add_subdirectory(libultraship)     # runtime + Fast3D renderer
+if(GDX_BUILD_COMPANION)
+    add_subdirectory(companion)    # needs the ImGui target that libultraship defines
+endif()
 add_subdirectory(port)             # game glue + decomp sources + G-Diffuser executable
 #
 # Asset extraction: port/CMakeLists.txt builds the standalone `gdx-extract` (a trimmed,

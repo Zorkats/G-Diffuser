@@ -38,61 +38,26 @@
 #endif
 
 /* ---------------------------------------------------------------------------------
- * Mirrored course payload layout (decomp/include/fzx_course.h:7-34). Only CourseData (the
- * first 0x7E0 bytes of the 0xC830 payload) is validated; ghosts/records ride uninspected.
+ * Course payload layout and track validators live in gdx_foreign_track.{h,c}, which the
+ * Companion's Tracks inspector links too. The import names below are the same types.
+ * Only CourseData (the first 0x7E0 bytes of the 0xC830 payload) is validated; ghosts and
+ * records ride uninspected.
  * ------------------------------------------------------------------------------- */
 
-typedef struct GdxImportVec3f {
-    float x;
-    float y;
-    float z;
-} GdxImportVec3f;
+typedef GdxForeignCourseData GdxImportCourseData;
 
-/* Mirrors ControlPoint, fzx_course.h:7-12. Size 0x14. */
-typedef struct GdxImportControlPoint {
-    GdxImportVec3f pos;
-    int16_t radiusLeft;
-    int16_t radiusRight;
-    int32_t trackSegmentInfo;
-} GdxImportControlPoint;
-
-/* Mirrors CourseData, fzx_course.h:14-34. Size 0x7E0. */
-typedef struct GdxImportCourseData {
-    uint8_t creatorId;
-    int8_t controlPointCount;
-    int8_t venue;
-    int8_t skybox;
-    uint32_t checksum;
-    uint8_t flag;
-    char fileName[22];
-    int8_t bgm;
-    GdxImportControlPoint controlPoint[64];
-    int16_t bankAngle[64];
-    int8_t pit[64];
-    int8_t dash[64];
-    int8_t dirt[64];
-    int8_t ice[64];
-    int8_t jump[64];
-    int8_t landmine[64];
-    int8_t gate[64];
-    int8_t building[64];
-    int8_t sign[64];
-} GdxImportCourseData;
-
-typedef char gdx_import_size_check_controlPoint[(sizeof(GdxImportControlPoint) == 0x14) ? 1 : -1];
-typedef char gdx_import_size_check_courseData[(sizeof(GdxImportCourseData) == 0x7E0) ? 1 : -1];
-typedef char gdx_import_size_check_bgmOffset[(offsetof(GdxImportCourseData, bgm) == 0x1F) ? 1 : -1];
-
-/* Game-side constants the load path validates against:
- * CREATOR_NINTENDO (fzx_course.h:103), BGM_NEW_04 (sfx.h:110), MACHINE_STAT_MAX_WEIGHTING
- * (machine_create.h:61). */
-#define GDX_IMPORT_CREATOR_NINTENDO 4
-#define GDX_IMPORT_BGM_MAX 13
+#define GDX_IMPORT_CREATOR_NINTENDO GDX_FOREIGN_CREATOR_NINTENDO
+#define GDX_IMPORT_BGM_MAX GDX_FOREIGN_BGM_MAX
+/* MACHINE_STAT_MAX_WEIGHTING (machine_create.h:61). */
 #define GDX_IMPORT_MACHINE_STAT_MAX_WEIGHTING 13
 
-/* TRACK_JOIN_MASK | TRACK_FORM_MASK | TRACK_FLAG_CONTINUOUS (fzx_course.h:327,344,350): the
- * bits Course_CalculateChecksum clears before summing. */
-#define GDX_IMPORT_CHECKSUM_MASK_CLEAR (0x600 | 0x38000 | 0x40000000)
+typedef char gdx_import_bits_size[(GDX_FOREIGN_TRACK_ERR_BAD_SIZE == GDX_IMPORT_ERR_BAD_SIZE) ? 1 : -1];
+typedef char gdx_import_bits_checksum[(GDX_FOREIGN_TRACK_ERR_CHECKSUM == GDX_IMPORT_ERR_TRACK_CHECKSUM) ? 1 : -1];
+typedef char gdx_import_bits_creator[(GDX_FOREIGN_TRACK_ERR_CREATOR == GDX_IMPORT_ERR_TRACK_CREATOR) ? 1 : -1];
+typedef char gdx_import_bits_bgm[(GDX_FOREIGN_TRACK_ERR_BGM == GDX_IMPORT_ERR_TRACK_BGM) ? 1 : -1];
+typedef char gdx_import_bits_geometry[(GDX_FOREIGN_TRACK_ERR_GEOMETRY == GDX_IMPORT_ERR_TRACK_GEOMETRY) ? 1 : -1];
+typedef char gdx_import_bits_encoding[(GDX_FOREIGN_TRACK_ERR_ENCODING == GDX_IMPORT_ERR_ENCODING) ? 1 : -1];
+typedef char gdx_import_bits_min_y[(GDX_FOREIGN_TRACK_MIN_Y == GDX_COURSE_VALIDATOR_MIN_Y) ? 1 : -1];
 
 /* ---------------------------------------------------------------------------------
  * Decomp externs. All are host-native on the port (see gdx_content_io.c for the same split).
@@ -171,103 +136,23 @@ static int32_t gdx_import_expected_payload_size(int32_t contentType) {
 }
 
 /* ---------------------------------------------------------------------------------
- * Game validators. Both are mirrors of the checks the game's own load path runs:
- * course_edit/19C470.c:160-167 (checksum + creatorId + BGM, checksum algorithm at the end of
- * game/course.c) and machine_create_update.c:877-879 (u16 checksum + stats validity). The
- * mirrors add bounds checks the game itself lacks (control point count, stat ranks) because the
- * payload here is untrusted (risk R2).
+ * Game validators: the track side runs gdx_foreign_track.c against the height limit the
+ * extended height setting picks (gdx_course_edit_max_y). The machine side mirrors
+ * machine_create_update.c:877-879 (u16 checksum + stats validity) below. Both add bounds checks
+ * the game itself lacks, because the payload here is untrusted (risk R2).
  * ------------------------------------------------------------------------------- */
 
-/* Mirror of func_i2_800BE9D4 (game/course.c): nonzero when the float bit pattern is NaN/Inf or
- * subnormal-nonzero. */
-static int gdx_import_float_invalid(const float* regValue) {
-    uint32_t regAsInt;
-    int32_t regExp;
-
-    memcpy(&regAsInt, regValue, sizeof(regAsInt));
-    regExp = (int32_t) ((regAsInt & 0x7F800000u) >> 0x17) - 0x7F;
-    if (((-0x7F < regExp) && (regExp < 0x80)) || (regAsInt == 0)) {
-        return 0;
-    }
-    return 1;
+static void gdx_import_log_pit(void* context, int index, int value) {
+    (void) context;
+    gdx_port_logf("[import] clamping out-of-range pit[%d]=%d to PIT_NONE\n", index, value);
 }
 
-/* Mirror of Course_CalculateChecksum's EXPANSION_KIT branch over an arbitrary payload buffer.
- * The float expression is verbatim so host float semantics produce the identical sum. Returns
- * the checksum; *geometryError is set (and the sum aborted, mirroring the game's -1 bail) when a
- * control point leaves the game's accepted float ranges. */
 static uint32_t gdx_import_course_checksum(const GdxImportCourseData* courseData, int* geometryError) {
-    int32_t i;
-    uint32_t checksum = (uint32_t) courseData->controlPointCount;
-
-    *geometryError = 0;
-    for (i = 0; i < courseData->controlPointCount; i++) {
-        const GdxImportControlPoint* controlPoint = &courseData->controlPoint[i];
-        int32_t trackSegmentInfo = controlPoint->trackSegmentInfo & ~GDX_IMPORT_CHECKSUM_MASK_CLEAR;
-
-        if (gdx_import_float_invalid(&controlPoint->pos.x) || controlPoint->pos.x < -15000.0f ||
-            controlPoint->pos.x > 15000.0f || gdx_import_float_invalid(&controlPoint->pos.y) ||
-            controlPoint->pos.y < GDX_COURSE_VALIDATOR_MIN_Y || controlPoint->pos.y > gdx_course_edit_max_y() ||
-            gdx_import_float_invalid(&controlPoint->pos.z) || controlPoint->pos.z < -15000.0f ||
-            controlPoint->pos.z > 15000.0f) {
-            *geometryError = 1;
-            return 0;
-        }
-
-        checksum += (uint32_t) (int32_t) ((controlPoint->pos.x + ((1.1f + (0.7f * i)) * controlPoint->pos.y)) +
-                                          ((2.2f + (1.2f * i)) * controlPoint->pos.z * (4.4f + (0.9f * i))) +
-                                          controlPoint->radiusLeft +
-                                          ((5.5f + (0.8f * i)) * controlPoint->radiusRight * 4.8f)) +
-                    (uint32_t) trackSegmentInfo * (uint32_t) (0xFE - i) +
-                    (uint32_t) (courseData->bankAngle[i] * (0x93DE - i * 2));
-    }
-
-    for (i = 0; i < courseData->controlPointCount; i++) {
-        checksum += (uint32_t) (courseData->pit[i] * i);
-        checksum += (uint32_t) (courseData->dash[i] * (i + 0x10));
-        checksum += (uint32_t) (courseData->dirt[i] * (i + 0x80));
-        checksum += (uint32_t) (courseData->ice[i] * (i + 0x100));
-        checksum += (uint32_t) (courseData->jump[i] * (i + 0x800));
-        checksum += (uint32_t) (courseData->landmine[i] * (i + 0x1000));
-        checksum += (uint32_t) (courseData->gate[i] * (i + 0x8000));
-        checksum += (uint32_t) (courseData->building[i] * (i + 0x10000));
-        checksum += (uint32_t) (courseData->sign[i] * (i + 0x80000));
-    }
-
-    return checksum;
+    return gdx_foreign_track_checksum(courseData, gdx_course_edit_max_y(), geometryError);
 }
 
-#define GDX_IMPORT_PIT_MIN -1
-#define GDX_IMPORT_PIT_MAX 10 /* PIT_MAX - 1; PIT_MAX == 11 in fzx_course.h */
-
-/* Sanitize out-of-range pit values in-place. The game's editor tables index by pit+1 with a
- * size-12 array, so values below -1 or above 10 can read past the end. Clamp to PIT_NONE (-1),
- * recompute the checksum over the sanitized data (mirrors Course_CalculateChecksum), and log. */
 static int gdx_import_sanitize_course_pit(uint8_t* payload) {
-    GdxImportCourseData courseData;
-    int clamped = 0;
-    int i;
-    int geometryError;
-    uint32_t checksum;
-
-    memcpy(&courseData, payload, sizeof(courseData));
-    for (i = 0; i < courseData.controlPointCount; i++) {
-        if (courseData.pit[i] < GDX_IMPORT_PIT_MIN || courseData.pit[i] > GDX_IMPORT_PIT_MAX) {
-            gdx_port_logf("[import] clamping out-of-range pit[%d]=%d to PIT_NONE\n", i, courseData.pit[i]);
-            courseData.pit[i] = -1;
-            clamped++;
-        }
-    }
-
-    if (clamped != 0) {
-        checksum = gdx_import_course_checksum(&courseData, &geometryError);
-        if (geometryError == 0) {
-            courseData.checksum = checksum;
-            memcpy(payload, &courseData, sizeof(courseData));
-        }
-    }
-
-    return clamped;
+    return gdx_foreign_track_sanitize_pits(payload, gdx_course_edit_max_y(), gdx_import_log_pit, NULL);
 }
 
 static void gdx_import_validate_track(uint8_t* payload, uint32_t* errors) {
@@ -304,102 +189,10 @@ static void gdx_import_validate_track(uint8_t* payload, uint32_t* errors) {
     }
 }
 
-static void gdx_foreign_field16(uint8_t* p) {
-    uint16_t value = (uint16_t) (((uint16_t) p[0] << 8) | p[1]);
-    memcpy(p, &value, sizeof(value));
-}
-
-static void gdx_foreign_field32(uint8_t* p) {
-    uint32_t value = ((uint32_t) p[0] << 24) | ((uint32_t) p[1] << 16) | ((uint32_t) p[2] << 8) | p[3];
-    memcpy(p, &value, sizeof(value));
-}
-
 uint32_t gdx_content_import_normalize_track(const uint8_t* raw, int32_t size, int encoding,
                                            uint8_t* host, GdxForeignCourseDiagnostic* diagnostic) {
-    GdxForeignCourseDiagnostic info = {0};
-    GdxImportCourseData course;
-    uint32_t errors = 0;
-    int invalid, i, j;
-
-    if (diagnostic != NULL) {
-        *diagnostic = info;
-    }
-    if (raw == NULL || host == NULL || size != GDX_CONTENT_TRACK_PAYLOAD_SIZE) {
-        return GDX_IMPORT_ERR_BAD_SIZE;
-    }
-    if (encoding != GDX_FOREIGN_HOST_ORDER && encoding != GDX_FOREIGN_BIG_ENDIAN) {
-        return GDX_IMPORT_ERR_ENCODING;
-    }
-    info.present = 1;
-    info.encoding = encoding;
-    info.rawCreator = raw[0];
-    info.rawCount = (int8_t) raw[1];
-    memmove(host, raw, (size_t) size);
-    if (encoding == GDX_FOREIGN_BIG_ENDIAN) {
-        gdx_foreign_field32(host + 4);
-        for (i = 0; i < 64; ++i) {
-            uint8_t* point = host + 32 + i * 20;
-            gdx_foreign_field32(point);
-            gdx_foreign_field32(point + 4);
-            gdx_foreign_field32(point + 8);
-            gdx_foreign_field16(point + 12);
-            gdx_foreign_field16(point + 14);
-            gdx_foreign_field32(point + 16);
-            gdx_foreign_field16(host + 0x520 + i * 2);
-        }
-        // Ghost/record numeric fields share the native disk layout; replay input and names are bytes.
-        for (i = 0; i < 3; ++i) {
-            uint8_t* ghost = host + 0x7E0 + i * 0x3FC0;
-            gdx_foreign_field16(ghost);
-            gdx_foreign_field16(ghost + 2);
-            for (j = 4; j < 16; j += 4) {
-                gdx_foreign_field32(ghost + j);
-            }
-            gdx_foreign_field16(ghost + 16);
-            gdx_foreign_field16(ghost + 0x40);
-            gdx_foreign_field16(ghost + 0x42);
-            for (j = 0x44; j < 0x60; j += 4) {
-                gdx_foreign_field32(ghost + j);
-            }
-        }
-        gdx_foreign_field16(host + 0xC720);
-        gdx_foreign_field16(host + 0xC722);
-        for (i = 0xC724; i < 0xC754; i += 4) {
-            gdx_foreign_field32(host + i);
-        }
-    }
-    memcpy(&course, host, sizeof(course));
-    info.creator = course.creatorId;
-    info.count = course.controlPointCount;
-    info.storedChecksum = course.checksum;
-    if (course.flag & 0x80) {
-        errors |= GDX_IMPORT_ERR_TRACK_CHECKSUM;
-    }
-    if (course.controlPointCount < 0 || course.controlPointCount > 64) {
-        errors |= GDX_IMPORT_ERR_TRACK_GEOMETRY;
-    } else {
-        info.computedChecksum = gdx_import_course_checksum(&course, &invalid);
-        info.checksumChecked = !invalid;
-        if (invalid) {
-            errors |= GDX_IMPORT_ERR_TRACK_GEOMETRY;
-        } else if (info.computedChecksum != course.checksum) {
-            errors |= GDX_IMPORT_ERR_TRACK_CHECKSUM;
-        }
-    }
-    if (course.creatorId != GDX_IMPORT_CREATOR_NINTENDO) {
-        errors |= GDX_IMPORT_ERR_TRACK_CREATOR;
-    }
-    if (course.bgm > GDX_IMPORT_BGM_MAX) {
-        errors |= GDX_IMPORT_ERR_TRACK_BGM;
-    }
-    // Legacy pit repair remains allowed only after the original foreign checksum has passed.
-    if (errors == 0) {
-        info.sanitizedPits = gdx_import_sanitize_course_pit(host);
-    }
-    if (diagnostic != NULL) {
-        *diagnostic = info;
-    }
-    return errors;
+    return gdx_foreign_track_normalize(raw, size, encoding, host, gdx_course_edit_max_y(), diagnostic,
+                                       gdx_import_log_pit, NULL);
 }
 
 #ifndef GDX_IMPORT_VALIDATION_TEST

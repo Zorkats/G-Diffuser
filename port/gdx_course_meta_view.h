@@ -25,8 +25,18 @@ int gdx_meta_view_clear_staff(const char* courseId);
 /* 1 when the finished run should be offered as the raced course's staff time (gdx_meta_staff_offer). */
 int gdx_meta_view_staff_offer(int raceLaps, int raceTime);
 
-/* Stores the run as the raced course's staff time and writes the state file. 1 when stored. */
+/* Stores the run as the raced course's staff time and writes the state file. 1 when stored. A three-lap run that
+ * was recorded to its end keeps its replay as the staff ghost (gdx_staff_ghost.h). */
 int gdx_meta_view_set_staff(int raceLaps, int raceTime);
+
+/* The staff time of the slot's NUL-terminated trackName when the track carries a staff ghost, else -1. The course
+ * select unlocks the STAFF ghost choice against it, like a stock course's staff time. */
+int gdx_meta_view_staff_ghost_time(const char* trackName);
+
+/* The staff ghost of trackName in Ghost's fields (decomp/include/unk_structs.h): lapTimes takes 3 values, machine
+ * 0x14 bytes, replay replayCap bytes. Returns 1 when filled, 0 when the track has none. */
+int gdx_meta_view_staff_ghost(const char* trackName, int* raceTime, int* lapTimes, int* replayEnd, int* replaySize,
+                              unsigned char* machine, unsigned char* replay, int replayCap);
 
 /* The lines the course select shows under an Edit Cup track's name, author first and staff time below it. */
 #define GDX_META_CAPTION_AUTHOR 0 /* "BY <author>" */

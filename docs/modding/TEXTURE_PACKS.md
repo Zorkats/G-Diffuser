@@ -120,6 +120,10 @@ To iterate: edit a PNG, rebuild the pack, copy it into `mods/` again, and click 
 For the full key scheme, metadata, load order, and the advanced direct-key mode, see the
 [modding reference](../MODDING_GUIDE.md#reference).
 
+To study a texture pack someone else made, open it in the Companion's
+[Inspect](../COMPANION.md#inspect) workspace. **Unpack** turns its textures back into PNG images in
+this same dump layout, with a `manifest.tsv`, so the folder builds into a pack again.
+
 ## If something goes wrong
 
 **My pack is not in the list.**

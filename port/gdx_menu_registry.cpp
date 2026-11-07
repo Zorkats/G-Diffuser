@@ -41,7 +41,9 @@
 #include "gdx_menu.h"
 #include "gdx_menu_internal.h"
 #include "gdx_machine_capture_runtime.h"
+#include "gdx_lan_lobby_page.h"
 #include "gdx_profile_page.h"
+#include "gdx_export_page.h"
 
 #include <imgui.h>
 
@@ -64,6 +66,7 @@
 #include "gdx_achievements.h" // F10 playtime tracker + local achievements
 #include "gdx_gp_resume.h"    // Save GP in progress: saved cup record + Continue Cup (extern "C" API)
 #include "gdx_draw_distance.h" // Draw distance slider range, Extended draw distance (issue #45)
+#include "gdx_workshop.h"      // Use alternate assets: GdxWorkshopApplyAltAssets
 
 #include <algorithm>
 #include <cctype>
@@ -1309,6 +1312,10 @@ void GdxMenu::RegisterMenu() {
                     "practice lap delta ghost photo mode free camera replay");
     AddSidebarEntry("Enhancements", "Single Race", 1,
                     "single race gp grand prix laps cpu racers rival finish results");
+    AddSidebarEntry("Enhancements", "Death Race", 1,
+                    "death race course select laps lap limit winner loser records");
+    AddSidebarEntry("Enhancements", "Multiplayer", 1,
+                    "multiplayer split screen splitscreen grand prix gp co-op coop players lives field drop in join");
     AddSidebarEntry("Enhancements", "Ghosts", 1,
                     "ghost browser replay library opponents import export staff player autosave boost trail");
     AddSidebarEntry("Enhancements", "Cosmetics", 1,
@@ -1328,6 +1335,8 @@ void GdxMenu::RegisterMenu() {
                     "online discord rich presence status privacy leaderboard ghost upload download netplay spectator");
     AddSidebarEntry("Online", "Profile", 1,
                     "online player profile name author edited by creator colour color machine identity");
+    AddSidebarEntry("Online", "LAN Lobby", 1,
+                    "online lan lobby local network room host join ip address port chat ready players netplay");
 
     AddSidebarEntry("Dev Tools", "General", 1,
                     "developer multi viewport tools gates logging diagnostics behavior overrides "
@@ -1755,6 +1764,16 @@ void GdxMenu::RegisterMenu() {
                       "Off = stock music only."))
                   .ModifiedMarker()
                   .SearchTerms("custom replacement stream streamed music bgm soundtrack file ogg flac wav"));
+    AddWidget("Settings", "Audio", SECTION_COLUMN_2,
+              WidgetInfo{ .name = "Match custom music loudness", .cVar = "gEnhancements.Audio.MatchMusicLoudness",
+                          .type = GdxUI::WIDGET_CVAR_CHECKBOX }
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(true).Tooltip(
+                      "Plays a replacement file at the stock music level when it carries a loudness tag: "
+                      "REPLAYGAIN_TRACK_GAIN in an Ogg or FLAC, or a version 2 bext chunk in a WAV. The "
+                      "Companion writes these on install. Never pushes a peak past full scale.\n"
+                      "Off = files play as decoded. Takes effect on the next song."))
+                  .ModifiedMarker()
+                  .SearchTerms("custom music loudness volume level replaygain normalize match quiet loud"));
 
     // Wired to the HLE reverb kill switch in n64_audio_hle.c (the A_MIXER wet->dry return), read
     // live there. It affects the HLE engine ONLY: under the default LLE engine reverb comes from
@@ -2337,7 +2356,9 @@ void GdxMenu::RegisterMenu() {
                                .LabelPosition(UIWidgets::LabelPositions::Near)
                                .Tooltip("How combative CPU racers are in every mode. 100% = stock.\n"
                                         "Above 100% they attack more often and no longer wait\n"
-                                        "for EXPERT difficulty to fight back."))
+                                        "for EXPERT difficulty to fight back. A course's CPU\n"
+                                        "aggression preset scales this value, and Normal\n"
+                                        "sets it to 100% on that course."))
                   .ModifiedMarker()
                   .SearchTerms("ai cpu opponent aggressive attack combat difficulty mutator"));
 
@@ -2416,10 +2437,11 @@ void GdxMenu::RegisterMenu() {
                           .type = GdxUI::WIDGET_CVAR_CHECKBOX }
                   .Options(UIWidgets::CheckboxOptions().DefaultValue(false).Tooltip(
                       "A course can set its own lava rule and magnet values in Course Edit, and they\n"
-                      "win over the three options above. On = always use the options above.\n"
-                      "Part widths are the course's shape and still apply."))
+                      "win over the three options above. On = always use the options above, no\n"
+                      "course wind and no course CPU aggression preset. Part widths are the course's\n"
+                      "shape and still apply."))
                   .ModifiedMarker()
-                  .SearchTerms("course track settings lava magnet override ignore menu"));
+                  .SearchTerms("course track settings lava magnet wind override ignore menu"));
 
     AddWidget("Enhancements", "Gameplay", SECTION_COLUMN_1,
               WidgetInfo{ .name = "CPU track-hazard avoidance", .cVar = "gEnhancements.Gameplay.CpuTrackHazards",
@@ -2828,6 +2850,37 @@ void GdxMenu::RegisterMenu() {
                   .ModifiedMarker()
                   .SearchTerms("course edit test drive engine slider percent speed"));
 
+    // port/gdx_test_drive.h: 0 keeps the stock solo test drive. With CPUs the test drive races like an Edit Cup
+    // race on the track, with the player on pole, no countdown and endless laps.
+    AddWidget("Enhancements", "Course Edit & Machine", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Course Edit: test-drive CPUs",
+                          .cVar = "gEnhancements.Gameplay.TestDriveCpus",
+                          .type = GdxUI::WIDGET_CVAR_SLIDER_INT }
+                  .Options(UIWidgets::IntSliderOptions()
+                               .Min(0)
+                               .Max(29)
+                               .DefaultValue(0)
+                               .ShowButtons(true)
+                               .LabelPosition(UIWidgets::LabelPositions::Near)
+                               .Tooltip("CPUs that race a Course Edit test drive with you. You start on pole\n"
+                                        "with the CPUs behind, and the laps never end. 0 is the stock solo\n"
+                                        "test drive. Takes effect at the next test drive."))
+                  .ModifiedMarker()
+                  .SearchTerms("course edit test drive cpu cpus opponents rivals race field"));
+
+    AddWidget("Enhancements", "Course Edit & Machine", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Course Edit: test-drive CPU difficulty",
+                          .cVar = "gEnhancements.Gameplay.TestDriveDifficulty",
+                          .type = GdxUI::WIDGET_CVAR_COMBOBOX }
+                  .ComboItems({ "Novice", "Standard", "Expert", "Master" })
+                  .Options(UIWidgets::ComboboxOptions()
+                               .DefaultIndex(2)
+                               .LabelPosition(UIWidgets::LabelPositions::Near)
+                               .Tooltip("Difficulty of the test-drive CPUs. On Expert and Master they follow\n"
+                                        "the track's staff run when it has one, as in an Edit Cup race."))
+                  .ModifiedMarker()
+                  .SearchTerms("course edit test drive cpu difficulty novice standard expert master"));
+
     // VENUE_ENDING is fully wired in the engine (own texture segment, Mute City floor/BGM) but
     // stock keeps it out of the editor. Default on: the ending scene is fully wired and is
     // expected in the port's Course Edit experience; the toggle remains for stock parity.
@@ -2994,6 +3047,73 @@ void GdxMenu::RegisterMenu() {
                   .SearchTerms("single race rival random rivals marker"));
 
     // ═════════════════════════════════════════════════════════════════════════════════════════
+    // ENHANCEMENTS -> Death Race
+    // ═════════════════════════════════════════════════════════════════════════════════════════
+    // port/gdx_death_race.h. Off and 0 laps is the stock endless loop with its stock record. Every other
+    // setup keeps its own best time per course and lap limit in death_race_records.bin, never the
+    // cartridge save.
+    AddWidget("Enhancements", "Death Race", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Death Race course select",
+                          .cVar = "gEnhancements.Gameplay.DeathRaceCourseSelect",
+                          .type = GdxUI::WIDGET_CVAR_CHECKBOX }
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(false).Tooltip(
+                      "Death Race opens the course screen, as Practice does, so any course\n"
+                      "can host it, X Cup and Edit courses included. Off is the stock loop."))
+                  .ModifiedMarker()
+                  .SearchTerms("death race course select pick track x cup edit cup"));
+
+    AddWidget("Enhancements", "Death Race", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Death Race laps",
+                          .cVar = "gEnhancements.Gameplay.DeathRaceLaps",
+                          .type = GdxUI::WIDGET_CVAR_SLIDER_INT }
+                  .Options(UIWidgets::IntSliderOptions()
+                               .Min(0)
+                               .Max(99)
+                               .DefaultValue(0)
+                               .ShowButtons(true)
+                               .LabelPosition(UIWidgets::LabelPositions::Near)
+                               .Tooltip("Laps you get to knock out all 29 machines. Clear them in time for\n"
+                                        "WINNER; run out of laps with machines left for LOSER. 0 is the\n"
+                                        "stock endless run. Takes effect at the next Death Race start."))
+                  .ModifiedMarker()
+                  .SearchTerms("death race laps lap limit winner loser endless"));
+
+    // ═════════════════════════════════════════════════════════════════════════════════════════
+    // ENHANCEMENTS -> Multiplayer
+    // ═════════════════════════════════════════════════════════════════════════════════════════
+
+    // Plan item MP2, port/gdx_split_gp.h. Read by gdx_drop_in_join in decomp/src/overlays/ovl_i4/machine.c;
+    // the cup itself only checks the player count, so a cup that started split stays split.
+    AddWidget("Enhancements", "Multiplayer", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Split-screen Grand Prix",
+                          .cVar = "gEnhancements.Multiplayer.SplitGrandPrix",
+                          .type = GdxUI::WIDGET_CVAR_CHECKBOX }
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(false).Tooltip(
+                      "At Grand Prix machine select, Start on another controller adds a player,\n"
+                      "up to four, and the cup runs split-screen. Each player has their own lives.\n"
+                      "A player out of lives keeps watching their machine on autopilot, and the\n"
+                      "cup ends when every player is out. Split cups are not saved for Continue Cup."))
+                  .ModifiedMarker()
+                  .SearchTerms("split screen splitscreen grand prix gp multiplayer co-op coop drop in join lives"));
+
+    // Read by Racer_Init in decomp/src/game/racer.c at the cup's first race only.
+    AddWidget("Enhancements", "Multiplayer", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Split-screen Grand Prix machines",
+                          .cVar = "gEnhancements.Multiplayer.SplitGrandPrixField",
+                          .type = GdxUI::WIDGET_CVAR_SLIDER_INT }
+                  .Options(UIWidgets::IntSliderOptions()
+                               .Min(2)
+                               .Max(30)
+                               .DefaultValue(30)
+                               .ShowButtons(true)
+                               .LabelPosition(UIWidgets::LabelPositions::Near)
+                               .Tooltip("Machines in a split-screen Grand Prix, players included. 30 is the\n"
+                                        "full field. Takes effect at the next cup start. Only a cup with\n"
+                                        "the full field counts toward the cup records."))
+                  .ModifiedMarker()
+                  .SearchTerms("split screen grand prix machines field cpu count racers opponents"));
+
+    // ═════════════════════════════════════════════════════════════════════════════════════════
     // ENHANCEMENTS -> Ghosts
     // ═════════════════════════════════════════════════════════════════════════════════════════
     AddWidget("Enhancements", "Ghosts", SECTION_COLUMN_1,
@@ -3071,6 +3191,15 @@ void GdxMenu::RegisterMenu() {
                       "Overrides game textures from mods/*.o2r packs.\nOff = stock rendering."))
                   .ModifiedMarker()
                   .SearchTerms("mods o2r hi-res retexture override"));
+    AddWidget("Workshop", "Mods", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Use alternate assets", .cVar = "gEnhancements.Workshop.AltAssets",
+                          .type = GdxUI::WIDGET_CVAR_CHECKBOX }
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(false).Tooltip(
+                      "Uses the alt/ entries of mounted packs in place of the assets they name.\n"
+                      "Needs Enable texture packs. Off = those entries are ignored."))
+                  .Callback([](WidgetInfo&) { GdxWorkshopApplyAltAssets(1); })
+                  .ModifiedMarker()
+                  .SearchTerms("alt alternate assets pack toggle hd"));
     AddWidget("Workshop", "Mods", SECTION_COLUMN_1,
               WidgetInfo{ .name = "Enable sequence packs", .cVar = "gEnhancements.Workshop.SequencePacks",
                           .type = GdxUI::WIDGET_CVAR_CHECKBOX }
@@ -3167,6 +3296,13 @@ void GdxMenu::RegisterMenu() {
                   .CustomFunction([this](WidgetInfo&) { DrawSaveImport(); })
                   .SearchTerms("import emulator save sra srm retroarch parallel-n64 mupen project64 cartridge "
                                "progress transfer"));
+    AddWidget("Workshop", "Tools", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Export Everything", .type = GdxUI::WIDGET_SEPARATOR_TEXT });
+    AddWidget("Workshop", "Tools", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Export Everything", .type = GdxUI::WIDGET_CUSTOM }
+                  .CustomFunction([](WidgetInfo&) { GdxExportPage_Draw(); })
+                  .SearchTerms("export everything backup zip move computer tracks snapshots profiles saves records "
+                               "ghosts settings mods texture packs music signing keys"));
 
     // ═════════════════════════════════════════════════════════════════════════════════════════
     // WORKSHOP -> Content Library
@@ -3210,6 +3346,12 @@ void GdxMenu::RegisterMenu() {
               WidgetInfo{ .name = "Player profiles", .type = GdxUI::WIDGET_CUSTOM }
                   .CustomFunction([](WidgetInfo&) { GdxProfilePage_Draw(); })
                   .SearchTerms("player profile name author edited by creator colour color machine"));
+
+    // ONLINE -> LAN Lobby (gdx_lan_lobby_page.cpp, O2). No socket opens until the player hosts, searches or joins.
+    AddWidget("Online", "LAN Lobby", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "LAN lobby", .type = GdxUI::WIDGET_CUSTOM }
+                  .CustomFunction([](WidgetInfo&) { GdxLanLobbyPage_Draw(); })
+                  .SearchTerms("lan lobby local network room host join ip address port chat ready netplay"));
 
     // A privacy setting, framed as one: master default OFF, and each field the presence may publish
     // has its own opt-out. Everything the toggles govern is built in port/gdx_discord.cpp.
@@ -3260,7 +3402,7 @@ void GdxMenu::RegisterMenu() {
     AddWidget("Online", "Overview", SECTION_COLUMN_1,
               WidgetInfo{ .name = "Ghost upload / download", .type = GdxUI::WIDGET_COMING_SOON });
     AddWidget("Online", "Overview", SECTION_COLUMN_1,
-              WidgetInfo{ .name = "Netplay lobbies (after decision gate)", .type = GdxUI::WIDGET_COMING_SOON });
+              WidgetInfo{ .name = "Online racing (after decision gate)", .type = GdxUI::WIDGET_COMING_SOON });
     AddWidget("Online", "Overview", SECTION_COLUMN_1,
               WidgetInfo{ .name = "Spectator / director cam", .type = GdxUI::WIDGET_COMING_SOON });
 

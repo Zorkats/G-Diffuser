@@ -9,6 +9,8 @@
 
 typedef char GdxSettingsViewLavaKillsMatches[(GDX_SETTINGS_VIEW_LAVA_KILLS == GDX_SETTINGS_LAVA_KILLS) ? 1 : -1];
 typedef char GdxSettingsViewLavaNeverMatches[(GDX_SETTINGS_VIEW_LAVA_NEVER_KILLS == GDX_SETTINGS_LAVA_NEVER_KILLS) ? 1 : -1];
+typedef char GdxSettingsViewPadSuperMatches[(GDX_SETTINGS_VIEW_PAD_SUPER == GDX_SETTINGS_PAD_SUPER) ? 1 : -1];
+typedef char GdxSettingsViewPadBrakeMatches[(GDX_SETTINGS_VIEW_PAD_BRAKE == GDX_SETTINGS_PAD_BRAKE) ? 1 : -1];
 
 static const GdxPointExtras* view_point(int point) {
     const GdxCourseSettings* settings = gdx_settings_active();
@@ -111,4 +113,75 @@ float gdx_settings_view_magnet_range(int point) {
         return (float) extras->magnetRange;
     }
     return settings != NULL ? (float) settings->magnetRange : 0.0f;
+}
+
+int gdx_settings_view_pad_kind(int point) {
+    const GdxPointExtras* extras = view_point(point);
+
+    return (extras != NULL) ? extras->padKind : GDX_SETTINGS_PAD_NORMAL;
+}
+
+int gdx_settings_view_pad_width(int point) {
+    const GdxPointExtras* extras = view_point(point);
+
+    return (extras != NULL) ? extras->padWidth : 0;
+}
+
+float gdx_settings_view_pad_boost(int point) {
+    const GdxPointExtras* extras = view_point(point);
+    int boost;
+
+    if ((extras == NULL) || (extras->padKind != GDX_SETTINGS_PAD_SUPER)) {
+        return 1.0f;
+    }
+    boost = (extras->padBoost != 0) ? extras->padBoost : GDX_SETTINGS_PAD_BOOST_DEFAULT;
+    return 1.0f + (float) boost / 100.0f;
+}
+
+int gdx_settings_view_wind_strength(int point) {
+    const GdxPointExtras* extras = view_point(point);
+
+    return (extras != NULL) ? extras->windStrength : 0;
+}
+
+int gdx_settings_view_wind_angle(int point) {
+    const GdxPointExtras* extras = view_point(point);
+
+    return (extras != NULL) ? extras->windAngle : 0;
+}
+
+float gdx_settings_view_ai_scale(void) {
+    const GdxCourseSettings* settings = gdx_settings_active();
+
+    return gdx_settings_ai_scale((settings != NULL) ? settings->aiAggression : GDX_SETTINGS_AI_TRACK);
+}
+
+float gdx_settings_view_ai_resolve(float optionScale) {
+    const GdxCourseSettings* settings = gdx_settings_active();
+
+    return gdx_settings_ai_resolve((settings != NULL) ? settings->aiAggression : GDX_SETTINGS_AI_TRACK,
+                                   optionScale);
+}
+
+int gdx_settings_view_wind_any(void) {
+    const GdxCourseSettings* settings = gdx_settings_active();
+    int i;
+    int j;
+
+    if (settings == NULL) {
+        return 0;
+    }
+    for (i = 0; i < settings->ringCount; i++) {
+        if (settings->ring[i].windStrength != 0) {
+            return 1;
+        }
+    }
+    for (i = 0; i < GDX_BRANCH_MAX_FORKS; i++) {
+        for (j = 0; j < GDX_BRANCH_MAX_NODES; j++) {
+            if (settings->nodes[i][j].windStrength != 0) {
+                return 1;
+            }
+        }
+    }
+    return 0;
 }

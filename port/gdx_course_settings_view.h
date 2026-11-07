@@ -40,6 +40,31 @@ int gdx_settings_view_lava_mode(void);
 float gdx_settings_view_magnet_strength(int point);
 float gdx_settings_view_magnet_range(int point);
 
+/* The dash pad at a point: GDX_SETTINGS_VIEW_PAD_*, its width percent (0 for the stock plate), and a Super pad's
+ * speed floor as a multiple of the stock dash (1.1 to 3.0; 1.0 for any other pad). */
+#define GDX_SETTINGS_VIEW_PAD_NORMAL 0
+#define GDX_SETTINGS_VIEW_PAD_SUPER 1
+#define GDX_SETTINGS_VIEW_PAD_BRAKE 2
+int gdx_settings_view_pad_kind(int point);
+int gdx_settings_view_pad_width(int point);
+float gdx_settings_view_pad_boost(int point);
+
+/* A point's wind, as stored (gdx_wind_resolve applies it): strength 0 (none) or 1..100, and the compass angle
+ * 0..359. Wind is per segment only. */
+int gdx_settings_view_wind_strength(int point);
+int gdx_settings_view_wind_angle(int point);
+/* 1 when any point has wind, so the race loads the streak art. */
+int gdx_settings_view_wind_any(void);
+
+/* The multiplier the track's CPU aggression preset puts on the AI aggression option: 1 with no preset. Normal gives 1
+ * here too, but it replaces the option, so the race uses gdx_settings_view_ai_resolve. */
+float gdx_settings_view_ai_scale(void);
+
+/* The AI aggression scale for the race: the track's preset applied to optionScale, the player's option as a scale
+ * (the option as a fraction of 100). Track keeps optionScale and Normal is 1 whatever it is. No preset, and no
+ * active settings, keep optionScale. */
+float gdx_settings_view_ai_resolve(float optionScale);
+
 #ifdef __cplusplus
 }
 #endif

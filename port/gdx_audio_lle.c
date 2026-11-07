@@ -63,6 +63,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "gdx_audio_lle_stage.h"
 #include "rsp/cxd4/gdx_rsp_driver.h"
 #include "n64_rdram.h"
 
@@ -624,11 +625,15 @@ static int gdx_stage(const void* host, uint32_t size, GdxXform xf,
     uint32_t rounded;
     int i;
 
-    /* Within-tick dedup: the same host buffer always maps to one scratch slot, so
-     * e.g. a reverb ring loaded then saved in one tick shares its DMA window (the
-     * save sees the load's data), and repeated state references copy in only once. */
+    /* Within-tick dedup: a host buffer the RSP writes maps to one scratch slot, so e.g. a
+     * reverb ring loaded then saved in one tick shares its DMA window (the save sees the
+     * load's data), and repeated state references copy in only once. A plain input only
+     * shares a window that is at least as large, with the same transform: see
+     * gdx_audio_lle_stage.h for the loop-wrap case that broke (issue #33). */
     for (i = 0; i < sMapCount; i++) {
-        if (sMap[i].host == host) {
+        if (sMap[i].host == host &&
+            gdx_lle_stage_can_reuse(sMap[i].size, (int) sMap[i].xf, sMap[i].isOutput, size, (int) xf,
+                                    isOutput || persistent)) {
             if (isOutput) {
                 sMap[i].isOutput = 1;
             }

@@ -1768,6 +1768,87 @@ const char* LookupHudGlyphOverride(uintptr_t source, size_t loadBytes, uint32_t 
     return nullptr;
 }
 
+// Every other texture a compiled symbol names inside a mode-owned segment (hud_gfx in segment 4,
+// machine_global_gfx in segment 7): the lap counter, the position labels under the portraits, the
+// CHECK marker. ResolveGeneratedAssetStub redirects such a symbol into the live carve, an RDRAM
+// pointer, so the o2r key probe never runs for it. Identity is the symbol's own AssetBindings row
+// (exact symbols only, no interior offsets). As with the race portraits, the pack is served only
+// while the carve still holds the stock bytes, so a texture the game rewrites keeps drawing live;
+// the zero-filled position digits fail that gate and stay with LookupHudGlyphOverride.
+const char* LookupCarveTextureOverride(uint32_t symbol, uintptr_t source, uint32_t epoch) {
+    struct Entry {
+        const char* key = nullptr;
+        AssetSegmentLookup binding{};
+        std::vector<uint8_t> original;
+        std::string path;
+        uintptr_t source = 0;
+        uint64_t dmaGeneration = 0;
+        uint32_t segmentEpoch = UINT32_MAX;
+        uint32_t packEpoch = UINT32_MAX;
+        bool unchanged = false;
+    };
+    static std::unordered_map<uint32_t, Entry> entries;
+    if (source == 0 || !GdxSegmentEpochStable(epoch)) {
+        return nullptr;
+    }
+    auto it = entries.find(symbol);
+    if (it == entries.end()) {
+        // Only exact asset symbols get an entry, so arbitrary pointers cannot grow the map.
+        AssetSegmentLookup binding{};
+        if (!LookupAssetSegment(symbol, binding, false) || binding.offset >= binding.imageSize) {
+            return nullptr;
+        }
+        Entry fresh;
+        fresh.key = gdx_lookup_asset_segment_o2r_key(symbol);
+        fresh.binding = binding;
+        it = entries.emplace(symbol, std::move(fresh)).first;
+    }
+    Entry& entry = it->second;
+    const auto& binding = entry.binding;
+    if (entry.key == nullptr || gdx_mode_owns_segment(binding.segment) == 0 ||
+        gdx_mode_segment_content_matches(binding.segment, binding.romBase) == 0 ||
+        source != gSegments[binding.segment] + binding.offset) {
+        return nullptr;
+    }
+    const uint32_t packEpoch = GdxWorkshopPackEpoch();
+    if (entry.packEpoch != packEpoch) {
+        entry.packEpoch = packEpoch;
+        entry.segmentEpoch = UINT32_MAX;
+        entry.path.clear();
+        entry.original.clear();
+        auto ctx = Ship::Context::GetInstance();
+        auto rm = (ctx != nullptr) ? ctx->GetResourceManager() : nullptr;
+        auto stock = (rm != nullptr) ? std::dynamic_pointer_cast<Fast::Texture>(rm->LoadResourceProcess(entry.key))
+                                     : nullptr;
+        if (stock != nullptr && stock->ImageData != nullptr && stock->ImageDataSize != 0 &&
+            binding.imageSize - binding.offset >= stock->ImageDataSize) {
+            const char* path = GdxWorkshopLookupOverridePathMinSize(entry.key, stock->ImageDataSize);
+            if (path != nullptr) {
+                entry.original.assign(stock->ImageData, stock->ImageData + stock->ImageDataSize);
+                entry.path = path;
+                gdx_port_logf("[carve-tex] %s -> %s\n", entry.key, path);
+            }
+        }
+    }
+    if (entry.path.empty()) {
+        return nullptr;
+    }
+    const size_t bytes = entry.original.size();
+    if (entry.source != source || entry.segmentEpoch != epoch ||
+        HostRangeChanged(source, bytes, entry.dmaGeneration)) {
+        entry.unchanged = ReadableByteLimit(source) >= bytes &&
+            std::memcmp(reinterpret_cast<const void*>(source), entry.original.data(), bytes) == 0;
+        if (!GdxSegmentEpochStable(epoch)) {
+            entry.segmentEpoch = UINT32_MAX;
+            return nullptr;
+        }
+        entry.source = source;
+        entry.segmentEpoch = epoch;
+        entry.dmaGeneration = gDmaGeneration;
+    }
+    return entry.unchanged ? entry.path.c_str() : nullptr;
+}
+
 /* Game-BUILT wide DLs carry the REAL host address of a generated 1-byte asset stub whenever a
    compile-time table stores asset symbols -- course.c:101-112 stores the venue banks
    D_A000000..D_A008000 directly. Taken verbatim by the wide host-pointer fast path (the EXE
@@ -6309,6 +6390,13 @@ class N64DisplayListAdapter {
                             // above never match; LookupHudGlyphOverride keys them by carve offset instead.
                             if (packPath == nullptr) {
                                 packPath = LookupHudGlyphOverride(translated, estimatedBytes, settimgEpoch);
+                                packViaRdram = packPath != nullptr;
+                            }
+                            // Other compiled symbols redirected into a mode-owned carve (lap counter,
+                            // position labels, CHECK marker).
+                            if (packPath == nullptr && !generatedPortrait) {
+                                packPath = LookupCarveTextureOverride(Low32(in.w1),
+                                    w1IsHostPointer ? stubResolved : translated, settimgEpoch);
                                 packViaRdram = packPath != nullptr;
                             }
                         }

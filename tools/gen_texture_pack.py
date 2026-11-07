@@ -258,15 +258,16 @@ ENCODERS = {
 }
 
 
-def build_otex_v1(tex_type, width, height, h_scale, v_scale, image_data):
-    """Return the full resource file bytes: 64-byte OTR header + V1 subheader + raw texel data."""
+def build_otex_v1(tex_type, width, height, h_scale, v_scale, image_data, flags=0):
+    """Return the full resource file bytes: 64-byte OTR header + V1 subheader + raw texel data.
+    flags is the V1 flags word (TEX_FLAG_LOAD_AS_RAW = 1); the default 0 keeps the old output."""
     header = bytearray(OTR_HEADER_SIZE)
     header[0] = OTR_BYTE_ORDER_LITTLE
     header[1] = OTR_IS_CUSTOM
     struct.pack_into("<I", header, 4, OTR_TYPE_TEXTURE)
     struct.pack_into("<I", header, 8, OTR_TEXTURE_VERSION_V1)
     struct.pack_into("<Q", header, 12, 0)  # Id (unused by the reader)
-    sub = struct.pack("<IIIIffI", tex_type, width, height, 0, h_scale, v_scale, len(image_data))
+    sub = struct.pack("<IIIIffI", tex_type, width, height, flags, h_scale, v_scale, len(image_data))
     return bytes(header) + sub + image_data
 
 

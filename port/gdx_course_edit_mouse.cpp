@@ -34,6 +34,7 @@
 #include "gdx_course_edit_undo.h"
 #include <imgui.h>
 #include "gdx_course_gadget_budget.h"
+#include "gdx_course_branch_edit.h" // GDX_BRANCH_EDIT_MAX_POINTS
 
 #include "libultraship/bridge/consolevariablebridge.h" // CVarGetInteger
 #include "port_log.h"                                    // gdx_port_logf
@@ -55,6 +56,7 @@ extern "C" int gWorksMachineMode;
 // Aggregate and selection reads go through the native C accessors.
 extern "C" int gCreateOption;
 extern "C" int gMoveOption;
+extern "C" int CourseEdit_KeySelectTool(int moveOption); // decomp expansion_kit/A3AE0.c
 extern "C" int32_t gCourseEditCursorXPos;
 extern "C" int32_t gCourseEditCursorYPos;
 extern "C" int32_t D_xk1_8003A550;
@@ -1567,9 +1569,12 @@ extern "C" void gdx_course_edit_mouse_keyboard_tick(int gameBoundary) {
                 // Map 1..7 to the seven MOVE_OPTION_* values in order. Every point tool is gated
                 // on CREATE_OPTION_POINT in the editor, so switch tabs as well. Otherwise the
                 // hotkey is a silent no-op whenever another tab (COURSE/PARTS/...) is active.
-                gCreateOption = 1 /* CREATE_OPTION_POINT */;
-                gMoveOption = i - 1;
-                gdx_port_logf("[ce-keys] tool key %d -> move option %d\n", i, i - 1);
+                // Pressing the active tool's key again goes back to COURSE to pick points.
+                if (CourseEdit_KeySelectTool(i - 1)) {
+                    gdx_port_logf("[ce-keys] tool key %d again -> course tab\n", i);
+                } else {
+                    gdx_port_logf("[ce-keys] tool key %d -> move option %d\n", i, i - 1);
+                }
                 break;
             }
         }

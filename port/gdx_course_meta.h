@@ -43,6 +43,10 @@
  *   6  signature  GDX_META_SIGNATURE_BYTES: an Ed25519 public key and signature (gdx_course_sign.h) over the author
  *                 and the digest of the course bytes. Needs an author. The codec checks its size only: checking the
  *                 signature needs the course bytes (gdx_course_meta_sign.h). A Course Edit save clears it.
+ *   7  ghost      the staff run's replay (gdx_staff_ghost.h), at most GDX_META_GHOST_MAX_BYTES. Needs a staff time
+ *                 over GDX_META_RECORD_LAPS laps with the same race time. A record that breaks this is dropped on read
+ *                 and the rest of the block still loads. Every Course Edit save clears it, even one that keeps the
+ *                 staff time: the replay holds positions on the old layout.
  *
  * The decoder skips tags it does not know. A later build can add records and this build still reads the author
  * and staff time. Unknown records are not kept, so a re-save drops them. GXE1 rejects
@@ -72,6 +76,7 @@
 
 #include "gdx_course_branch_format.h"
 #include "gdx_course_splits.h"
+#include "gdx_staff_ghost.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -93,15 +98,17 @@ extern "C" {
 #define GDX_META_SPLITS_MAX_BYTES GDX_SPLITS_VALUE_MAX_BYTES
 #define GDX_META_TAG_SIGNATURE 6
 #define GDX_META_SIGNATURE_BYTES 96
+#define GDX_META_TAG_GHOST 7
+#define GDX_META_GHOST_MAX_BYTES GDX_STAFF_GHOST_VALUE_MAX_BYTES
 
 #define GDX_META_BLOCK_HEADER_SIZE 12
 #define GDX_META_RECORD_HEADER_SIZE 3
-/* The largest block this build writes: all six known records. */
+/* The largest block this build writes: all seven known records. */
 #define GDX_META_BLOCK_MAX_BYTES                                                                           \
     (GDX_META_BLOCK_HEADER_SIZE + 2 * (GDX_META_RECORD_HEADER_SIZE + GDX_META_NAME_MAX) +                  \
      GDX_META_RECORD_HEADER_SIZE + GDX_META_STAFF_BYTES + GDX_META_RECORD_HEADER_SIZE +                    \
      GDX_META_RECORD_HEADER_SIZE + GDX_META_SPLITS_MAX_BYTES + GDX_META_RECORD_HEADER_SIZE +               \
-     GDX_META_SIGNATURE_BYTES + 4)
+     GDX_META_SIGNATURE_BYTES + GDX_META_RECORD_HEADER_SIZE + GDX_META_GHOST_MAX_BYTES + 4)
 /* The largest block this build reads, so a later build's extra records still fit. */
 #define GDX_META_BLOCK_READ_MAX_BYTES 32768
 
@@ -140,6 +147,8 @@ typedef struct GdxCourseMeta {
     unsigned char signature[GDX_META_SIGNATURE_BYTES];
     uint16_t splitsLength;                /* 0 when none, else the stored split record's length */
     unsigned char splits[GDX_META_SPLITS_MAX_BYTES];
+    uint16_t ghostLength;                 /* 0 when none, else the stored staff ghost's length */
+    unsigned char ghost[GDX_META_GHOST_MAX_BYTES];
 } GdxCourseMeta;
 
 /* 1 for a legal author or Edited by name: 1..GDX_META_NAME_MAX printable ASCII, no space at either end. */
@@ -156,12 +165,13 @@ int gdx_meta_encode(const GdxCourseMeta* meta, uint32_t bindCrc, unsigned char* 
 int gdx_meta_decode(const unsigned char* data, size_t length, uint32_t bindCrc, GdxCourseMeta* out);
 
 /* What a Course Edit save does to a track's metadata. localName is the creator name of this install, "" or NULL
- * when none is set. The signature is always cleared and the track is marked made here. keepStaff nonzero keeps the
- * staff time and its splits: a later run must beat it to replace it, and splits whose checkpoint count no longer
- * matches the course pace the CPUs per lap instead (gdx_splits_view_pace_begin). keepStaff 0 clears them. */
+ * when none is set. The signature and the staff ghost are always cleared and the track is marked made here.
+ * keepStaff nonzero keeps the staff time and its splits: a later run must beat it to replace it, and splits whose
+ * checkpoint count no longer matches the course pace the CPUs per lap instead (gdx_splits_view_pace_begin).
+ * keepStaff 0 clears them. */
 void gdx_meta_apply_editor_save(GdxCourseMeta* meta, const char* localName, int keepStaff);
 
-/* Clears the staff time and its splits, so the next finished run of GDX_META_RECORD_LAPS laps is offered as the
+/* Clears the staff time, its splits and its ghost, so the next finished run of GDX_META_RECORD_LAPS laps is offered as the
  * staff time even when it is slower. */
 void gdx_meta_clear_staff(GdxCourseMeta* meta);
 
@@ -169,7 +179,7 @@ void gdx_meta_clear_staff(GdxCourseMeta* meta);
  * the run has GDX_META_RECORD_LAPS laps, and the track has no staff time over that many laps or the run beats it. */
 int gdx_meta_staff_offer(const GdxCourseMeta* meta, int raceLaps, uint32_t raceTime);
 
-/* Sets the staff time and clears its splits, which belonged to the old run. GDX_META_ERR_VALUE when raceTime or
+/* Sets the staff time and clears its splits and ghost, which belonged to the old run. GDX_META_ERR_VALUE when raceTime or
  * raceLaps is out of range, meta untouched then. */
 int gdx_meta_set_staff(GdxCourseMeta* meta, int raceLaps, uint32_t raceTime);
 
@@ -179,6 +189,16 @@ int gdx_meta_set_splits(GdxCourseMeta* meta, const GdxCourseSplits* splits);
 
 /* 1 and the decoded splits when meta has them, else 0 and out is the empty model. */
 int gdx_meta_get_splits(const GdxCourseMeta* meta, GdxCourseSplits* out);
+
+/* Sets the staff run's ghost, or clears it for NULL. GDX_META_ERR_VALUE when it does not encode or does not match
+ * the staff time (GDX_META_RECORD_LAPS laps, same race time), meta untouched then. */
+int gdx_meta_set_ghost(GdxCourseMeta* meta, const GdxStaffGhost* ghost);
+
+/* 1 when meta holds a staff ghost that matches its staff time. */
+int gdx_meta_has_ghost(const GdxCourseMeta* meta);
+
+/* 1 and the decoded ghost when meta has one, else 0 and out is zeroed. */
+int gdx_meta_get_ghost(const GdxCourseMeta* meta, GdxStaffGhost* out);
 
 /* Writes a race time the way the game shows it, 1'23"456, NUL-terminated. Returns the length, or -1 when out is
  * NULL, cap is too small or the time is past GDX_META_STAFF_TIME_MAX. */

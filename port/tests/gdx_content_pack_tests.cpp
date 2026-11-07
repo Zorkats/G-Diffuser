@@ -57,17 +57,24 @@ bool make_zip(const fs::path& path, const std::vector<std::pair<std::string, std
     zip_t* archive = zip_open(path.string().c_str(), ZIP_CREATE | ZIP_TRUNCATE, &error);
 
     if (archive == nullptr) {
+        std::fprintf(stderr, "  make_zip: zip_open failed, libzip error %d\n", error);
         return false;
     }
     for (const auto& member : members) {
         zip_source_t* data = zip_source_buffer(archive, member.second.data(), member.second.size(), 0);
         if (data == nullptr || zip_file_add(archive, member.first.c_str(), data, ZIP_FL_ENC_UTF_8) < 0) {
+            std::fprintf(stderr, "  make_zip: adding %s failed: %s\n", member.first.c_str(), zip_strerror(archive));
             zip_source_free(data);
             zip_discard(archive);
             return false;
         }
     }
-    return zip_close(archive) == 0;
+    if (zip_close(archive) != 0) {
+        std::fprintf(stderr, "  make_zip: zip_close failed: %s\n", zip_strerror(archive));
+        zip_discard(archive);
+        return false;
+    }
+    return true;
 }
 
 int extract(const fs::path& pack, const fs::path& dest, int withAudio, std::string* container = nullptr) {
@@ -172,7 +179,6 @@ void test_write_rules(const fs::path& root) {
 }
 
 void test_hostile(const fs::path& root) {
-    const fs::path pack = root / "h.gdxp";
     const fs::path out = root / "hostile-out";
     const std::string c = kContainer;
 
@@ -214,7 +220,11 @@ void test_hostile(const fs::path& root) {
           GDX_CONTENT_PACK_ERR_TOO_LARGE, "extract refuses a data member over its cap" },
     };
 
+    int index = 0;
     for (const Case& test : cases) {
+        // One package per case: zip_close renames over an existing file, which fails on Windows while a
+        // scanner still holds the previous case's package, and the extract would then read that stale one.
+        const fs::path pack = root / ("h" + std::to_string(index++) + ".gdxp");
         fs::create_directories(out);
         write_file(out / "keep.gdxc", "earlier");
         const bool built = make_zip(pack, test.members);

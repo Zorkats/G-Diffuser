@@ -51,7 +51,8 @@ static int meta_equal(const GdxCourseMeta* a, const GdxCourseMeta* b) {
     return (strcmp(a->author, b->author) == 0) && (strcmp(a->editedBy, b->editedBy) == 0) &&
            (a->staffTime == b->staffTime) && (a->staffLaps == b->staffLaps) && (a->madeHere == b->madeHere) &&
            (a->hasSignature == b->hasSignature) && (memcmp(a->signature, b->signature, sizeof(a->signature)) == 0) &&
-           (a->splitsLength == b->splitsLength) && (memcmp(a->splits, b->splits, a->splitsLength) == 0);
+           (a->splitsLength == b->splitsLength) && (memcmp(a->splits, b->splits, a->splitsLength) == 0) &&
+           (a->ghostLength == b->ghostLength) && (memcmp(a->ghost, b->ghost, a->ghostLength) == 0);
 }
 
 static GdxCourseSplits sSplits;
@@ -536,9 +537,11 @@ static void test_made_here(void) {
     in.staffTime = sSplits.lapEnd[GDX_SPLITS_LAPS_MAX - 1];
     CHECK((gdx_meta_set_splits(&in, &sSplits) == GDX_META_OK) && (in.splitsLength == GDX_META_SPLITS_MAX_BYTES),
           "the largest split record fills the splits field");
-    CHECK(gdx_meta_encode(&in, bind, sBlock, sizeof(sBlock)) == GDX_META_BLOCK_MAX_BYTES - 2 * GDX_META_NAME_MAX +
-                                                                   (int) (strlen(in.author) + strlen(in.editedBy)),
-          "a block with every record fits the write maximum exactly");
+    /* A ghost needs a 3-lap staff run, so it never sits beside the largest splits: the write maximum counts both. */
+    CHECK(gdx_meta_encode(&in, bind, sBlock, sizeof(sBlock)) ==
+              GDX_META_BLOCK_MAX_BYTES - 2 * GDX_META_NAME_MAX + (int) (strlen(in.author) + strlen(in.editedBy)) -
+                  (GDX_META_RECORD_HEADER_SIZE + GDX_META_GHOST_MAX_BYTES),
+          "a block with every record but the ghost fits the write maximum less the ghost exactly");
     in.madeHere = 2;
     CHECK(gdx_meta_validate(&in) == GDX_META_ERR_VALUE, "a made-here value other than 0 or 1 is refused");
     {
@@ -870,6 +873,227 @@ static void test_splits(void) {
     gdx_meta_store_clear();
 }
 
+static GdxStaffGhost sGhost;
+static GdxStaffGhost sGhostOut;
+
+/* The replay of make_meta's staff run. */
+static void make_ghost(GdxStaffGhost* g, uint16_t replaySize) {
+    int i;
+
+    memset(g, 0, sizeof(*g));
+    g->raceTime = 61234;
+    g->lapTimes[0] = 20000;
+    g->lapTimes[1] = 20000;
+    g->lapTimes[2] = 21234;
+    g->replaySize = replaySize;
+    g->replayEnd = replaySize;
+    g->machine[0] = 3;
+    for (i = 0; i < replaySize; i++) {
+        g->replay[i] = (unsigned char) (i * 13 + 1);
+    }
+}
+
+static void add_ghost(GdxCourseMeta* m, uint16_t replaySize) {
+    make_ghost(&sGhost, replaySize);
+    if (gdx_meta_set_ghost(m, &sGhost) != GDX_META_OK) {
+        printf("FAIL: test setup could not add a ghost\n");
+        sFailures++;
+    }
+}
+
+static void test_ghost(void) {
+    const uint32_t bind = 0xC0FFEEu;
+    GdxCourseMeta m;
+    GdxCourseMeta out;
+    GdxCourseMeta before;
+    int len;
+
+    make_meta(&m);
+    make_ghost(&sGhost, 500);
+    CHECK((gdx_meta_set_ghost(&m, &sGhost) == GDX_META_OK) && (m.ghostLength == GDX_STAFF_GHOST_HEADER_BYTES + 500),
+          "the staff run's ghost is stored with its staff time");
+    CHECK(gdx_meta_has_ghost(&m), "the meta has a ghost");
+    CHECK(gdx_meta_get_ghost(&m, &sGhostOut) && (sGhostOut.raceTime == 61234) && (sGhostOut.replaySize == 500) &&
+              (memcmp(sGhostOut.replay, sGhost.replay, 500) == 0),
+          "the stored ghost reads back");
+    CHECK(gdx_meta_validate(&m) == GDX_META_OK, "a meta with a matching ghost validates");
+    CHECK(!gdx_meta_is_empty(&m), "a meta with a ghost is not empty");
+
+    len = gdx_meta_encode(&m, bind, sBlock, sizeof(sBlock));
+    CHECK((len > 0) && (gdx_meta_decode(sBlock, (size_t) len, bind, &out) == GDX_META_OK) && meta_equal(&m, &out),
+          "the ghost survives the GXM1 block");
+
+    /* Wrong pairings are refused, meta untouched. */
+    before = m;
+    make_ghost(&sGhost, 500);
+    sGhost.raceTime = 61235;
+    sGhost.lapTimes[2] = 21235;
+    CHECK((gdx_meta_set_ghost(&m, &sGhost) == GDX_META_ERR_VALUE) && meta_equal(&m, &before),
+          "a ghost of another race time is refused");
+    make_ghost(&sGhost, 500);
+    sGhost.machine[0] = 40;
+    CHECK((gdx_meta_set_ghost(&m, &sGhost) == GDX_META_ERR_VALUE) && meta_equal(&m, &before),
+          "a ghost that breaks its own rules is refused");
+    {
+        GdxCourseMeta fiveLaps;
+
+        make_meta(&fiveLaps);
+        fiveLaps.staffLaps = 5;
+        make_ghost(&sGhost, 500);
+        CHECK(gdx_meta_set_ghost(&fiveLaps, &sGhost) == GDX_META_ERR_VALUE,
+              "a staff time over 5 laps takes no ghost: Time Attack ghosts are 3-lap runs");
+        memset(&fiveLaps, 0, sizeof(fiveLaps));
+        CHECK(gdx_meta_set_ghost(&fiveLaps, &sGhost) == GDX_META_ERR_VALUE, "no staff time, no ghost");
+    }
+    CHECK((gdx_meta_set_ghost(&m, NULL) == GDX_META_OK) && (m.ghostLength == 0) && !gdx_meta_has_ghost(&m),
+          "NULL clears the ghost");
+    memset(&sGhostOut, 0x55, sizeof(sGhostOut));
+    CHECK(!gdx_meta_get_ghost(&m, &sGhostOut) && (sGhostOut.replaySize == 0) && (sGhostOut.raceTime == 0),
+          "get without a ghost gives 0 and a zeroed ghost");
+
+    /* What clears it. */
+    make_meta(&m);
+    add_ghost(&m, 500);
+    CHECK((gdx_meta_set_staff(&m, 3, 60000) == GDX_META_OK) && (m.ghostLength == 0),
+          "a new staff time clears the old run's ghost");
+    make_meta(&m);
+    add_ghost(&m, 500);
+    gdx_meta_clear_staff(&m);
+    CHECK(m.ghostLength == 0, "clearing the staff time clears the ghost");
+    make_meta(&m);
+    add_splits(&m);
+    add_ghost(&m, 500);
+    gdx_meta_apply_editor_save(&m, "Stephe", 1);
+    CHECK((m.staffTime == 61234) && (m.splitsLength != 0) && (m.ghostLength == 0),
+          "a Course Edit save that keeps the staff time and splits still drops the ghost");
+    make_meta(&m);
+    add_ghost(&m, 500);
+    gdx_meta_apply_editor_save(&m, "Stephe", 0);
+    CHECK((m.staffTime == 0) && (m.ghostLength == 0), "a Course Edit save that clears the staff time drops the ghost");
+
+    /* Validation of a hand-set ghost. */
+    make_meta(&m);
+    add_ghost(&m, 500);
+    m.staffTime = 61000;
+    CHECK(gdx_meta_validate(&m) == GDX_META_ERR_VALUE, "a ghost that no longer matches the staff time fails validation");
+
+    /* On read, a ghost that does not fit is dropped and the rest loads. */
+    {
+        unsigned char value[GDX_STAFF_GHOST_HEADER_BYTES + 64];
+        const char staff[5] = { (char) 0x32, (char) 0xEF, 0, 0, 3 }; /* 61234 ms over 3 laps */
+        int valueLen;
+
+        make_ghost(&sGhost, 64);
+        valueLen = gdx_staff_ghost_encode(&sGhost, value, sizeof(value));
+        {
+            const int tags[] = { 1, 3, 7 };
+            const char* const values[] = { "Aaron", staff, (const char*) value };
+            const size_t lengths[] = { 5, 5, (size_t) valueLen };
+            size_t blockLen = build_block(sBlock, bind, tags, values, lengths, 3);
+
+            CHECK((gdx_meta_decode(sBlock, blockLen, bind, &out) == GDX_META_OK) && (out.ghostLength == valueLen) &&
+                      gdx_meta_has_ghost(&out),
+                  "a hand-built ghost record reads");
+        }
+        {
+            const char staff2[5] = { (char) 0x33, (char) 0xEF, 0, 0, 3 }; /* 61235 ms */
+            const int tags[] = { 1, 3, 7 };
+            const char* const values[] = { "Aaron", staff2, (const char*) value };
+            const size_t lengths[] = { 5, 5, (size_t) valueLen };
+            size_t blockLen = build_block(sBlock, bind, tags, values, lengths, 3);
+
+            CHECK((gdx_meta_decode(sBlock, blockLen, bind, &out) == GDX_META_OK) && (out.ghostLength == 0) &&
+                      (strcmp(out.author, "Aaron") == 0) && (out.staffTime == 61235),
+                  "a ghost of another race time is dropped and the rest still reads");
+        }
+        {
+            const int tags[] = { 1, 7 };
+            const char* const values[] = { "Aaron", (const char*) value };
+            const size_t lengths[] = { 5, (size_t) valueLen };
+            size_t blockLen = build_block(sBlock, bind, tags, values, lengths, 2);
+
+            CHECK((gdx_meta_decode(sBlock, blockLen, bind, &out) == GDX_META_OK) && (out.ghostLength == 0) &&
+                      (strcmp(out.author, "Aaron") == 0),
+                  "a ghost without a staff time is dropped");
+        }
+        {
+            const int tags[] = { 1, 3, 7 };
+            const char* const values[] = { "Aaron", staff, (const char*) value };
+            const size_t lengths[] = { 5, 5, (size_t) valueLen - 1 };
+            size_t blockLen = build_block(sBlock, bind, tags, values, lengths, 3);
+
+            CHECK((gdx_meta_decode(sBlock, blockLen, bind, &out) == GDX_META_OK) && (out.ghostLength == 0) &&
+                      (out.staffTime == 61234),
+                  "a truncated ghost is dropped and the staff time still reads");
+        }
+    }
+}
+
+static int sGhostVisits;
+
+static void count_ghosts(const char* courseId, uint32_t bindCrc, const GdxCourseMeta* meta, void* ctx) {
+    (void) courseId;
+    (void) bindCrc;
+    (void) ctx;
+    if (gdx_meta_has_ghost(meta) && (meta->ghostLength == GDX_STAFF_GHOST_VALUE_MAX_BYTES)) {
+        sGhostVisits++;
+    }
+}
+
+static void test_ghost_store_and_sidecar(void) {
+    static GdxCourseMeta metas[GDX_META_SIDECAR_MAX_ENTRIES];
+    static GdxCourseMeta out;
+    GdxMetaSidecarEntry entries[GDX_META_SIDECAR_MAX_ENTRIES];
+    char ids[GDX_META_SIDECAR_MAX_ENTRIES][16];
+    int len;
+    int i;
+
+    CHECK(GDX_META_BLOCK_MAX_BYTES <= GDX_META_BLOCK_READ_MAX_BYTES, "the largest block this build writes it also reads");
+    CHECK(GDX_META_BLOCK_MAX_BYTES <= 0xFFFF, "the largest block fits the u16 block length of GMS1 and GMX1");
+
+    /* Every slot with the largest record a 3-lap staff run can have: splits, signature and a full ghost. */
+    gdx_meta_store_clear();
+    for (i = 0; i < GDX_BRANCH_STORE_SLOTS; i++) {
+        char id[32];
+        GdxCourseMeta m;
+
+        sprintf(id, "TRACK%03d.CRSD", i);
+        make_meta(&m);
+        add_splits(&m);
+        add_ghost(&m, GDX_STAFF_GHOST_REPLAY_MAX);
+        m.hasSignature = 1;
+        memset(m.signature, 0xA5, sizeof(m.signature));
+        gdx_meta_store_set(id, &m);
+    }
+    len = gdx_meta_store_encode_file(sFile, sizeof(sFile));
+    CHECK(len > 0, "128 tracks with full ghosts fit the GMS1 file");
+    gdx_meta_store_clear();
+    CHECK((len > 0) && (gdx_meta_store_restore_file(sFile, (size_t) len) == GDX_META_OK), "and read back");
+    CHECK(gdx_meta_store_get("TRACK127.CRSD", &out) && gdx_meta_has_ghost(&out) &&
+              gdx_meta_get_ghost(&out, &sGhostOut) && (sGhostOut.replaySize == GDX_STAFF_GHOST_REPLAY_MAX) &&
+              (sGhostOut.replay[GDX_STAFF_GHOST_REPLAY_MAX - 1] == (unsigned char) ((GDX_STAFF_GHOST_REPLAY_MAX - 1) * 13 + 1)),
+          "the last track's full ghost survives the state file");
+    gdx_meta_store_clear();
+
+    /* Six tracks with full ghosts in one .gdxm. */
+    for (i = 0; i < GDX_META_SIDECAR_MAX_ENTRIES; i++) {
+        sprintf(ids[i], "SIDE%d.CRSD", i);
+        make_meta(&metas[i]);
+        add_splits(&metas[i]);
+        add_ghost(&metas[i], GDX_STAFF_GHOST_REPLAY_MAX);
+        metas[i].madeHere = 1;
+        entries[i].courseId = ids[i];
+        entries[i].bindCrc = 1000u + (uint32_t) i;
+        entries[i].meta = &metas[i];
+    }
+    len = gdx_meta_sidecar_encode(entries, GDX_META_SIDECAR_MAX_ENTRIES, sSidecar, GDX_META_SIDECAR_WRITE_MAX_BYTES);
+    CHECK(len > 0, "six tracks with full ghosts fit the largest .gdxm this build writes");
+    sGhostVisits = 0;
+    CHECK((len > 0) && (gdx_meta_sidecar_decode(sSidecar, (size_t) len, count_ghosts, NULL) == GDX_META_OK) &&
+              (sGhostVisits == GDX_META_SIDECAR_MAX_ENTRIES),
+          "and every ghost in the .gdxm reads back");
+}
+
 int main(void) {
     test_names();
     test_validate();
@@ -884,6 +1108,8 @@ int main(void) {
     test_staff_offer();
     test_signature();
     test_splits();
+    test_ghost();
+    test_ghost_store_and_sidecar();
     if (sFailures != 0) {
         printf("%d check(s) failed\n", sFailures);
         return 1;

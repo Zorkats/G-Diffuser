@@ -137,6 +137,16 @@ typedef struct GdxPointExtras {
     uint8_t iceWidth;
     uint8_t magnetStrength;
     uint8_t magnetRange;
+    /* The dash pad at this point: GDX_SETTINGS_PAD_* kind, width percent, and a Super pad's boost. GXK1 version 2
+     * stores them. GXB1 does not, so a fork's first segment always has a normal pad. */
+    uint8_t padKind;
+    uint8_t padWidth;
+    uint8_t padBoost;
+    /* The wind on the segment that starts here: 0 none, 1..100 percent. windAngle is the compass angle 0..359 the
+     * wind blows toward, 0 unless windStrength is 1..100. GXK1 version 3 stores them; GXB1 does not, so a fork's
+     * first segment never has wind. */
+    uint8_t windStrength;
+    uint16_t windAngle;
 } GdxPointExtras;
 
 /* One path B control point. Fixed size, no pointers. Not a file overlay. */

@@ -43,6 +43,11 @@ extern "C" void gdx_music_decoder_close(GdxMusicDecoder*) {
     ++sCloses;
 }
 
+// The stub files carry no level tag, so they play as decoded.
+extern "C" float gdx_music_level_gain(const GdxMusicInfo*) {
+    return 1.0f;
+}
+
 extern "C" int CVarGetInteger(const char*, int fallback) {
     return fallback;
 }

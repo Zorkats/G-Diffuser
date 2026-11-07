@@ -7,6 +7,10 @@
 //
 // Every decoder yields interleaved float frames with 1 or 2 channels. Loop points are in source
 // frames. loopEnd is exclusive. When a file carries no usable loop tags the loop is the whole file.
+//
+// Level: Ogg Vorbis and FLAC carry REPLAYGAIN_TRACK_GAIN ("-12.34 dB") and REPLAYGAIN_TRACK_PEAK
+// ("0.987654") comments; a WAV carries a version 2 bext chunk with its integrated loudness and peak.
+// gdx_music_level_gain turns them into the gain that plays the recording at the stock music level.
 
 #include <stddef.h>
 #include <stdint.h>
@@ -24,7 +28,20 @@ typedef struct GdxMusicInfo {
     uint64_t loopStart;  // first frame of the loop, inclusive
     uint64_t loopEnd;    // one past the last frame of the loop
     int hasLoopTags;     // 1 when LOOPSTART/LOOPLENGTH or RIFF smpl supplied the loop
+    int hasGain;         // 1 when gainDb came from the file
+    float gainDb;        // ReplayGain 2 track gain: the change that brings the recording to -18 LUFS
+    int hasPeak;         // 1 when peak came from the file
+    float peak;          // the largest sample, 1.0 at full scale
 } GdxMusicInfo;
+
+// The ReplayGain 2 reference level, and the integrated loudness of the stock music (the title screen
+// BGM captured at the audio interface tap measures -17.1 LUFS).
+#define GDX_MUSIC_REPLAYGAIN_REFERENCE_LUFS (-18.0f)
+#define GDX_MUSIC_STOCK_LUFS (-17.0f)
+
+// The linear gain that plays info's recording at the stock music level: 1.0 without a gain. Never
+// raises the peak past full scale; without a known peak it only lowers.
+float gdx_music_level_gain(const GdxMusicInfo* info);
 
 // Opens path by extension (.ogg, .flac, .wav, case-insensitive) and fills info. Returns NULL when
 // the extension is unknown, the file cannot be opened, or the channel count is not 1 or 2.

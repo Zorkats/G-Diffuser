@@ -49,6 +49,15 @@ const char* GdxWorkshopLookupOverridePathMinSize(const char* key, size_t minByte
 const char* GdxWorkshopLookupAtlasTileOverride(const char* baseKey, size_t byteOffset, int n64Fmt, int n64Siz,
                                                int width, int height);
 
+// Palette variants (HT, gdx_palette_crc.h): non-zero when a mounted pack has any
+// textures/pack/<key>.pal/<CC>-<XXXXXXXX> image. The index is rebuilt once per pack epoch.
+int GdxWorkshopPaletteVariantsPresent(void);
+
+// The variant of baseKey whose palette CRC matches palette (N64 byte order: 32 bytes for CI4, the
+// 512-byte CI8 palette), or NULL. The palette is hashed over the variant's cimax + 1 entries. The
+// path stays valid until the next pack epoch. Callers gate on gdx_workshop_texture_packs_enabled().
+const char* GdxWorkshopLookupPaletteVariant(const char* baseKey, const uint8_t* palette, size_t paletteSize);
+
 // ── Texture dump (called from the interpreter's decoded-RGBA32 points) ────────────────────────────
 // Returns non-zero when gEnhancements.Workshop.TextureDump is on.
 int gdx_workshop_texture_dump_enabled(void);
@@ -83,6 +92,17 @@ void gdx_workshop_dump_texture(const void* origSrcAddr, size_t origSrcLen, const
 // pack epoch (invalidating the override cache). Writes a human-readable one-line result into
 // outStatus (a caller-owned buffer of outStatusLen bytes); safe to pass NULL/0.
 void GdxWorkshopReload(char* outStatus, size_t outStatusLen);
+
+// ── alt/ assets ───────────────────────────────────────────────────────────────────────────────────
+// A pack entry at "alt/<path>" replaces <path> while gEnhancements.Workshop.AltAssets is on, so a
+// player can switch between a pack's art and stock without removing the pack. Packs mount only
+// while the texture-pack switch is on, so this needs both.
+int gdx_workshop_alt_assets_wanted(void);
+
+// Hands the switch to the resource manager. With refreshCaches, a change also makes cached base
+// resources that have an alt/ entry load again and clears the texture caches; at startup, before
+// any asset is loaded, pass 0.
+void GdxWorkshopApplyAltAssets(int refreshCaches);
 
 #ifdef __cplusplus
 } // extern "C"

@@ -304,6 +304,20 @@ void UdpSocket::Close() {
     ReleaseWinsock();
 }
 
+bool UdpSocket::SetBroadcast(bool on) {
+    if (!IsOpen()) {
+        return false;
+    }
+    const NativeSocket sock = static_cast<NativeSocket>(handle_);
+#ifdef _WIN32
+    const BOOL value = on ? TRUE : FALSE;
+    return setsockopt(sock, SOL_SOCKET, SO_BROADCAST, reinterpret_cast<const char*>(&value), sizeof(value)) == 0;
+#else
+    const int value = on ? 1 : 0;
+    return setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &value, sizeof(value)) == 0;
+#endif
+}
+
 SendResult UdpSocket::SendTo(const NetAddress& to, const void* data, std::size_t len) {
     if (!IsOpen() || data == nullptr || len > kMaxPayload) {
         return SendResult::Error;

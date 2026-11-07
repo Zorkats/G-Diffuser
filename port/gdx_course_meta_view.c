@@ -13,6 +13,10 @@
 
 /* decomp/src/game/racer.c: the course file id of the course about to start, 1 when out holds one. */
 extern int gdx_racer_course_file_id(char* out, int outCap);
+/* decomp/src/game/racer.c: the ghost of the race that just finished, 1 when it was recorded to its end. */
+extern int gdx_racer_last_ghost(unsigned int* raceTime, unsigned int* lapTimes, unsigned int* replayEnd,
+                                unsigned int* replaySize, unsigned char* machine, unsigned char* replay,
+                                int replayCap);
 extern int CVarGetInteger(const char* name, int defaultValue); // libultraship consolevariablebridge.h
 
 /* The meta of the raced course, empty when it has none. 0 when no course file is raced. */
@@ -93,10 +97,36 @@ int gdx_meta_view_staff_offer(int raceLaps, int raceTime) {
     return gdx_meta_staff_offer(&meta, raceLaps, (uint32_t) raceTime);
 }
 
+/* The finished run's replay as a staff ghost, 1 when it was recorded to its end and is the run of raceTime. */
+static int last_run_ghost(int raceTime, GdxStaffGhost* ghost) {
+    unsigned int lapTimes[GDX_STAFF_GHOST_LAPS];
+    unsigned int time = 0;
+    unsigned int replayEnd = 0;
+    unsigned int replaySize = 0;
+    int i;
+
+    memset(ghost, 0, sizeof(*ghost));
+    if (!gdx_racer_last_ghost(&time, lapTimes, &replayEnd, &replaySize, ghost->machine, ghost->replay,
+                              (int) sizeof(ghost->replay)) ||
+        (time != (unsigned int) raceTime) || (replaySize > GDX_STAFF_GHOST_REPLAY_MAX)) {
+        return 0;
+    }
+    ghost->raceTime = time;
+    for (i = 0; i < GDX_STAFF_GHOST_LAPS; i++) {
+        ghost->lapTimes[i] = lapTimes[i];
+    }
+    ghost->replayEnd = replayEnd;
+    ghost->replaySize = (uint16_t) replaySize;
+    return gdx_staff_ghost_validate(ghost) == GDX_STAFF_GHOST_OK;
+}
+
 int gdx_meta_view_set_staff(int raceLaps, int raceTime) {
+    /* Static: a ghost is about 16 KB and a meta about 19 KB. */
+    static GdxStaffGhost sGhost;
     char courseId[GDX_BRANCH_COURSE_ID_MAX + 1];
     GdxCourseMeta meta;
     GdxCourseSplits splits;
+    int haveGhost = 0;
     int rc;
 
     if ((raceTime <= 0) || !raced_meta(courseId, sizeof(courseId), &meta) ||
@@ -110,6 +140,8 @@ int gdx_meta_view_set_staff(int raceLaps, int raceTime) {
             (gdx_meta_set_splits(&meta, &splits) != GDX_META_OK)) {
             memset(&splits, 0, sizeof(splits));
         }
+        /* And its replay, raced as the STAFF ghost in Time Attack. */
+        haveGhost = last_run_ghost(raceTime, &sGhost) && (gdx_meta_set_ghost(&meta, &sGhost) == GDX_META_OK);
         rc = gdx_meta_store_set(courseId, &meta);
     }
     if (rc != GDX_META_OK) {
@@ -119,8 +151,48 @@ int gdx_meta_view_set_staff(int raceLaps, int raceTime) {
     if (gdx_course_state_flush() < 0) {
         gdx_port_logf("[meta] %s: state file not written, kept for the next flush\n", courseId);
     }
-    gdx_port_logf("[meta] %s: staff time %d over %d laps, splits: %d laps, %d checkpoints\n", courseId, raceTime,
-                  raceLaps, splits.laps, splits.nodes);
+    gdx_port_logf("[meta] %s: staff time %d over %d laps, splits: %d laps, %d checkpoints, ghost: %s\n", courseId,
+                  raceTime, raceLaps, splits.laps, splits.nodes, haveGhost ? "kept" : "none");
+    return 1;
+}
+
+/* The meta of an Edit Cup slot's track, 0 when it has none. */
+static int slot_meta(const char* trackName, GdxCourseMeta* meta) {
+    char courseId[GDX_BRANCH_COURSE_ID_MAX + 1];
+
+    return (trackName != NULL) && (trackName[0] != '\0') &&
+           gdx_course_music_course_id(trackName, "CRSD", courseId, sizeof(courseId)) &&
+           gdx_meta_store_get(courseId, meta);
+}
+
+int gdx_meta_view_staff_ghost_time(const char* trackName) {
+    GdxCourseMeta meta;
+
+    if (!slot_meta(trackName, &meta) || !gdx_meta_has_ghost(&meta)) {
+        return -1;
+    }
+    return (int) meta.staffTime;
+}
+
+int gdx_meta_view_staff_ghost(const char* trackName, int* raceTime, int* lapTimes, int* replayEnd, int* replaySize,
+                              unsigned char* machine, unsigned char* replay, int replayCap) {
+    static GdxStaffGhost sGhost;
+    GdxCourseMeta meta;
+    int i;
+
+    if ((raceTime == NULL) || (lapTimes == NULL) || (replayEnd == NULL) || (replaySize == NULL) ||
+        (machine == NULL) || (replay == NULL) || !slot_meta(trackName, &meta) || !gdx_meta_get_ghost(&meta, &sGhost) ||
+        ((int) sGhost.replaySize > replayCap)) {
+        return 0;
+    }
+    *raceTime = (int) sGhost.raceTime;
+    for (i = 0; i < GDX_STAFF_GHOST_LAPS; i++) {
+        lapTimes[i] = (int) sGhost.lapTimes[i];
+    }
+    *replayEnd = (int) sGhost.replayEnd;
+    *replaySize = (int) sGhost.replaySize;
+    memcpy(machine, sGhost.machine, GDX_STAFF_GHOST_MACHINE_BYTES);
+    memcpy(replay, sGhost.replay, sGhost.replaySize);
     return 1;
 }
 

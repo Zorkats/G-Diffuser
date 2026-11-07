@@ -193,7 +193,7 @@ static const char* const kDesignLabelName[] = {
     "Road", "High rails", "No rails", "Tunnel", "Pipe", "Half pipe", "Cylinder", "Gap", "Loop", "Insert", "Split", "Link",
 };
 static const char* const kPartsLabelName[] = {
-    "Energy patch", "Dash plate", "Dirt patch", "Ice patch", "Jump plate", "Trap", "Gate", "Building", "Sign",
+    "Energy patch", "Dash plate", "Dirt patch", "Ice patch", "Jump plate", "Trap", "Gate", "Building", "Sign", "Wind",
 };
 
 // Derives a History label from the state at push time. The backup holds the state before the edit, and the option

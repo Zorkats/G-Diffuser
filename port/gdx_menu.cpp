@@ -52,6 +52,7 @@
 extern "C" const char* SDL_GetCurrentAudioDriver(void);
 
 #include <algorithm>
+#include <atomic> // the main menu G-NET card's page request, taken in UpdateElement
 #include <cctype>
 #include <cmath>  // std::sin (the search-navigation highlight pulse in MenuDrawItem)
 #include <cstdio> // snprintf (Practice-tab ghost import/export status line)
@@ -476,6 +477,7 @@ GdxMenu::GdxMenu() : Ship::GuiWindow("gOpenMenuBar", false, "G-Diffuser Menu") {
     CVarRegisterInteger("gEnhancements.Audio.SfxVolume", 100);
     CVarRegisterInteger("gEnhancements.Audio.Reverb", 1);
     CVarRegisterInteger("gEnhancements.Audio.StreamedMusic", 1);
+    CVarRegisterInteger("gEnhancements.Audio.MatchMusicLoudness", 1);
     CVarRegisterInteger("gEnhancements.Audio.BufferFrames", 4096);
     // Save cup progress (decomp/src/game/game.c gdx_gp_resume_enabled): on, as Continue Cup shipped.
     CVarRegisterInteger("gEnhancements.Gameplay.SaveCupProgress", 1);
@@ -614,6 +616,12 @@ GdxMenu::GdxMenu() : Ship::GuiWindow("gOpenMenuBar", false, "G-Diffuser Menu") {
     CVarRegisterInteger("gEnhancements.Gameplay.CourseEditOfficialBack", 1);
     CVarRegisterInteger("gEnhancements.Gameplay.TestDriveMachine", 0);
     CVarRegisterInteger("gEnhancements.Gameplay.TestDriveEngine", 50);
+    CVarRegisterInteger("gEnhancements.Gameplay.TestDriveCpus", 0);
+    CVarRegisterInteger("gEnhancements.Gameplay.TestDriveDifficulty", 2);
+    // DEATH RACE (port/gdx_death_race.h). CourseSelect is read by MainMenu_Update (main_menu.c), Laps by
+    // Racer_Init (racer.c) at each Death Race start.
+    CVarRegisterInteger("gEnhancements.Gameplay.DeathRaceCourseSelect", 0);
+    CVarRegisterInteger("gEnhancements.Gameplay.DeathRaceLaps", 0);
     // EndingVenue gates the 11th Course Edit scene option (VENUE_ENDING): the menu item count in
     // A3AE0.c func_xk1_80028250 and the preview-loader range in segment.c func_80077AD8.
     CVarRegisterInteger("gEnhancements.Gameplay.CourseEditEndingVenue", 1);
@@ -704,6 +712,9 @@ GdxMenu::GdxMenu() : Ship::GuiWindow("gOpenMenuBar", false, "G-Diffuser Menu") {
     // WORKSHOP. TexturePacks on lets the Tier-B shim (n64_gfx_bridge.cpp) rewrite a common-asset
     // load to a mounted pack's "textures/pack/<key>" resource.
     CVarRegisterInteger("gEnhancements.Workshop.TexturePacks", 0);
+    // AltAssets on lets a mounted pack's "alt/<path>" entry replace <path> (LUS ResourceManager).
+    // Applied by GdxWorkshopApplyAltAssets at startup, on change and on Reload packs.
+    CVarRegisterInteger("gEnhancements.Workshop.AltAssets", 0);
     // SequencePacks on lets the load hooks in decomp/src/audio/{disk,rom}/lib/load.c serve a
     // mounted pack's "audio/seq/<name>" bytes instead of DMA-ing the stock sequence.
     CVarRegisterInteger("gEnhancements.Workshop.SequencePacks", 0);
@@ -760,10 +771,34 @@ void GdxMenu::InitElement() {
     }
 }
 
+// The main menu's G-NET card (O2-9, decomp/src/overlays/ovl_i6/main_menu.c) asks for Online > LAN Lobby. It
+// runs on the game side, so it only raises a flag; UpdateElement takes it, which runs every frame with the menu
+// open or closed.
+static std::atomic<bool> sLanLobbyRequested{ false };
+
+extern "C" void gdx_menu_request_lan_lobby(void) {
+    sLanLobbyRequested.store(true);
+}
+
 void GdxMenu::UpdateElement() {
     // Gui::DrawMenu calls this before it draws the registered windows, and always on the ImGui
     // thread — the one place the queued log lines can safely reach the Console window.
     GdxConsoleLogDrain();
+
+    if (sLanLobbyRequested.exchange(false)) {
+        auto section = mMenuEntries.find("Online");
+        if (section != mMenuEntries.end() && section->second.sidebars.count("LAN Lobby") != 0) {
+            mSearch[0] = '\0';
+            mActiveSection = section->first;
+            CVarSetString("gSettings.Menu.ActiveSection", mActiveSection.c_str());
+            CVarSetString(section->second.sidebarCvar, "LAN Lobby");
+            GdxSaveCvars();
+            mFocusSidebar = true;
+            if (!IsVisible()) {
+                ToggleVisibility();
+            }
+        }
+    }
 }
 
 void GdxMenu::Draw() {

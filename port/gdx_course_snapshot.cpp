@@ -172,14 +172,11 @@ bool bindIdentity(Generation& g, uint64_t disk, uint16_t directory, const std::s
                 length = gdx_branch_encode(&value, newBinding, encoded.data(), encoded.size());
                 break;
             }
-            case Metadata::Settings: {
-                GdxCourseSettings value{};
-                if (gdx_settings_decode(bytes.data(), bytes.size(), oldBinding, &value) != 0) {
-                    return false;
-                }
-                length = gdx_settings_encode(&value, newBinding, encoded.data(), encoded.size());
+            case Metadata::Settings:
+                // Byte for byte, so a seal over a block an older build wrote still matches.
+                length = gdx_settings_rebind(bytes.data(), bytes.size(), oldBinding, newBinding, encoded.data(),
+                                             encoded.size());
                 break;
-            }
             default:
                 return false;
         }

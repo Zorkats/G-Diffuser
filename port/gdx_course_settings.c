@@ -4,6 +4,7 @@
 
 #include "gdx_course_registry.h"
 
+#include <limits.h>
 #include <string.h>
 
 #define KIND_RING 0
@@ -45,9 +46,40 @@ static int bytes_fit(size_t pos, size_t end, size_t need) {
     return (pos <= end) && (need <= end - pos);
 }
 
+static int extras_has_pad(const GdxPointExtras* extras) {
+    return (extras->padKind != 0) || (extras->padWidth != 0) || (extras->padBoost != 0);
+}
+
+static int extras_has_wind(const GdxPointExtras* extras) {
+    return (extras->windStrength != 0) || (extras->windAngle != 0);
+}
+
 static int extras_empty(const GdxPointExtras* extras) {
     return (extras->pitWidth == 0) && (extras->dirtWidth == 0) && (extras->iceWidth == 0) &&
-           (extras->magnetStrength == 0) && (extras->magnetRange == 0);
+           (extras->magnetStrength == 0) && (extras->magnetRange == 0) && !extras_has_pad(extras) &&
+           !extras_has_wind(extras);
+}
+
+/* strength 1..100 carries an angle; 0 has angle 0, so one set of values has one encoding. */
+static int wind_ok(int strength, int angle) {
+    if ((strength >= 1) && (strength <= GDX_SETTINGS_WIND_MAX)) {
+        return angle <= GDX_SETTINGS_WIND_ANGLE_MAX;
+    }
+    return (strength == 0) && (angle == 0);
+}
+
+/* What test builds stored as a calm point: no wind on its segment. */
+#define WIND_OLD_CALM 255
+
+static int pad_ok(const GdxPointExtras* extras) {
+    if ((extras->padKind > GDX_SETTINGS_PAD_BRAKE) || (extras->padWidth > GDX_SETTINGS_WIDTH_MAX)) {
+        return 0;
+    }
+    if (extras->padBoost == 0) {
+        return 1;
+    }
+    return (extras->padKind == GDX_SETTINGS_PAD_SUPER) && (extras->padBoost >= GDX_SETTINGS_PAD_BOOST_MIN) &&
+           (extras->padBoost <= GDX_SETTINGS_PAD_BOOST_MAX);
 }
 
 static int extras_ok(const GdxPointExtras* extras) {
@@ -56,14 +88,16 @@ static int extras_ok(const GdxPointExtras* extras) {
            ((extras->magnetStrength == 0) || ((extras->magnetStrength >= GDX_SETTINGS_STRENGTH_MIN) &&
                                               (extras->magnetStrength <= GDX_SETTINGS_STRENGTH_MAX))) &&
            ((extras->magnetRange == 0) ||
-            ((extras->magnetRange >= GDX_SETTINGS_RANGE_MIN) && (extras->magnetRange <= GDX_SETTINGS_RANGE_MAX)));
+            ((extras->magnetRange >= GDX_SETTINGS_RANGE_MIN) && (extras->magnetRange <= GDX_SETTINGS_RANGE_MAX))) &&
+           pad_ok(extras) && wind_ok(extras->windStrength, extras->windAngle);
 }
 
 int gdx_settings_is_empty(const GdxCourseSettings* settings) {
     int i;
     int j;
 
-    if ((settings->lavaMode != 0) || (settings->magnetStrength != 0) || (settings->magnetRange != 0)) {
+    if ((settings->lavaMode != 0) || (settings->magnetStrength != 0) || (settings->magnetRange != 0) ||
+        (settings->aiAggression != 0)) {
         return 0;
     }
     for (i = 0; i < GDX_SETTINGS_MAX_POINTS; i++) {
@@ -88,7 +122,8 @@ int gdx_settings_validate(const GdxCourseSettings* settings) {
     if (settings == NULL) {
         return GDX_SETTINGS_ERR_ARGS;
     }
-    if ((settings->lavaMode > GDX_SETTINGS_LAVA_NEVER_KILLS) || (settings->ringCount > GDX_SETTINGS_MAX_POINTS)) {
+    if ((settings->lavaMode > GDX_SETTINGS_LAVA_NEVER_KILLS) || (settings->ringCount > GDX_SETTINGS_MAX_POINTS) ||
+        (settings->aiAggression > GDX_SETTINGS_AI_BRUTAL)) {
         return GDX_SETTINGS_ERR_VALUE;
     }
     if ((settings->magnetStrength != 0) && ((settings->magnetStrength < GDX_SETTINGS_STRENGTH_MIN) ||
@@ -114,7 +149,7 @@ int gdx_settings_validate(const GdxCourseSettings* settings) {
     return GDX_SETTINGS_OK;
 }
 
-static size_t put_entry(unsigned char* out, int kind, int index, const GdxPointExtras* extras) {
+static size_t put_entry(unsigned char* out, int kind, int index, const GdxPointExtras* extras, size_t entryBytes) {
     out[0] = (unsigned char) kind;
     out[1] = (unsigned char) index;
     out[2] = extras->pitWidth;
@@ -122,11 +157,90 @@ static size_t put_entry(unsigned char* out, int kind, int index, const GdxPointE
     out[4] = extras->iceWidth;
     out[5] = extras->magnetStrength;
     out[6] = extras->magnetRange;
-    return GDX_SETTINGS_ENTRY_BYTES;
+    if (entryBytes >= GDX_SETTINGS_ENTRY_BYTES_V2) {
+        out[7] = extras->padKind;
+        out[8] = extras->padWidth;
+        out[9] = extras->padBoost;
+    }
+    if (entryBytes == GDX_SETTINGS_ENTRY_BYTES_V3) {
+        out[10] = extras->windStrength;
+        put_u16le(out + 11, extras->windAngle);
+    }
+    return entryBytes;
+}
+
+float gdx_settings_ai_scale(int aiAggression) {
+    switch (aiAggression) {
+        case GDX_SETTINGS_AI_CALM:
+            return 0.5f;
+        case GDX_SETTINGS_AI_FIERCE:
+            return 1.5f;
+        case GDX_SETTINGS_AI_BRUTAL:
+            return 2.0f;
+        default:
+            return 1.0f;
+    }
+}
+
+float gdx_settings_ai_resolve(int aiAggression, float optionScale) {
+    switch (aiAggression) {
+        case GDX_SETTINGS_AI_CALM:
+            return optionScale * 0.5f;
+        case GDX_SETTINGS_AI_NORMAL:
+            return 1.0f;
+        case GDX_SETTINGS_AI_FIERCE:
+            return optionScale * 1.5f;
+        case GDX_SETTINGS_AI_BRUTAL:
+            return optionScale * 2.0f;
+        default:
+            return optionScale; /* Track, and any value out of range */
+    }
+}
+
+/* The lowest version that holds the values: 4 with a CPU aggression preset, 3 with any wind, 2 with any dash pad
+ * value, else 1. A course that does not use them stays readable by older builds. */
+static int settings_version(const GdxCourseSettings* settings) {
+    int version = 1;
+    int i;
+    int j;
+
+    if (settings->aiAggression != 0) {
+        return 4;
+    }
+    for (i = 0; i < settings->ringCount; i++) {
+        if (extras_has_wind(&settings->ring[i])) {
+            return 3;
+        }
+        if (extras_has_pad(&settings->ring[i])) {
+            version = (version < 2) ? 2 : version;
+        }
+    }
+    for (i = 0; i < GDX_BRANCH_MAX_FORKS; i++) {
+        for (j = 0; j < GDX_BRANCH_MAX_NODES; j++) {
+            if (extras_has_wind(&settings->nodes[i][j])) {
+                return 3;
+            }
+            if (extras_has_pad(&settings->nodes[i][j])) {
+                version = (version < 2) ? 2 : version;
+            }
+        }
+    }
+    return version;
+}
+
+static size_t entry_bytes(uint32_t version) {
+    return (version >= 3) ? GDX_SETTINGS_ENTRY_BYTES_V3
+                          : (version == 2) ? GDX_SETTINGS_ENTRY_BYTES_V2 : GDX_SETTINGS_ENTRY_BYTES;
+}
+
+static size_t header_bytes(uint32_t version) {
+    return (version >= 3) ? GDX_SETTINGS_BLOCK_HEADER_SIZE_V3 : GDX_SETTINGS_BLOCK_HEADER_SIZE;
 }
 
 int gdx_settings_encode(const GdxCourseSettings* settings, uint32_t bindCrc, unsigned char* out, size_t cap) {
-    size_t pos = GDX_SETTINGS_BLOCK_HEADER_SIZE;
+    size_t pos;
+    size_t entryBytes;
+    int version;
     int entries = 0;
     int rc;
     int i;
@@ -142,16 +256,19 @@ int gdx_settings_encode(const GdxCourseSettings* settings, uint32_t bindCrc, uns
     if (cap < GDX_SETTINGS_BLOCK_MAX_BYTES) {
         return GDX_SETTINGS_ERR_FULL;
     }
+    version = settings_version(settings);
+    entryBytes = entry_bytes((uint32_t) version);
+    pos = header_bytes((uint32_t) version);
     for (i = 0; i < settings->ringCount; i++) {
         if (!extras_empty(&settings->ring[i])) {
-            pos += put_entry(out + pos, KIND_RING, i, &settings->ring[i]);
+            pos += put_entry(out + pos, KIND_RING, i, &settings->ring[i], entryBytes);
             entries++;
         }
     }
     for (i = 0; i < GDX_BRANCH_MAX_FORKS; i++) {
         for (j = 0; j < GDX_BRANCH_MAX_NODES; j++) {
             if (!extras_empty(&settings->nodes[i][j])) {
-                pos += put_entry(out + pos, KIND_FORK_FIRST + i, j, &settings->nodes[i][j]);
+                pos += put_entry(out + pos, KIND_FORK_FIRST + i, j, &settings->nodes[i][j], entryBytes);
                 entries++;
             }
         }
@@ -160,13 +277,19 @@ int gdx_settings_encode(const GdxCourseSettings* settings, uint32_t bindCrc, uns
     out[1] = 'X';
     out[2] = 'K';
     out[3] = '1';
-    put_u16le(out + 4, 1);
+    put_u16le(out + 4, (uint32_t) version);
     out[6] = settings->ringCount;
     out[7] = settings->lavaMode;
     out[8] = settings->magnetStrength;
     out[9] = settings->magnetRange;
     put_u16le(out + 10, (uint32_t) entries);
     put_u32le(out + 12, bindCrc);
+    if (version >= 3) {
+        memset(out + 16, 0, 4);
+    }
+    if (version == 4) {
+        out[16] = settings->aiAggression;
+    }
     put_u32le(out + pos, gdx_course_registry_crc32(out, pos));
     return (int) (pos + 4);
 }
@@ -174,6 +297,9 @@ int gdx_settings_encode(const GdxCourseSettings* settings, uint32_t bindCrc, uns
 static int decode_block(const unsigned char* data, size_t length, uint32_t bindCrc, GdxCourseSettings* out) {
     size_t end;
     size_t pos;
+    size_t entryBytes;
+    size_t headerBytes;
+    uint32_t version;
     uint32_t entries;
     uint32_t i;
     int lastKey = -1;
@@ -187,8 +313,14 @@ static int decode_block(const unsigned char* data, size_t length, uint32_t bindC
     if ((data[0] != 'G') || (data[1] != 'X') || (data[2] != 'K') || (data[3] != '1')) {
         return GDX_SETTINGS_ERR_MAGIC;
     }
-    if (get_u16le(data + 4) != 1) {
+    version = get_u16le(data + 4);
+    if ((version < 1) || (version > 4)) {
         return GDX_SETTINGS_ERR_VERSION;
+    }
+    entryBytes = entry_bytes(version);
+    headerBytes = header_bytes(version);
+    if (length < headerBytes + 4) {
+        return GDX_SETTINGS_ERR_TRUNCATED;
     }
     end = length - 4;
     if (get_u32le(data + end) != gdx_course_registry_crc32(data, end)) {
@@ -198,28 +330,51 @@ static int decode_block(const unsigned char* data, size_t length, uint32_t bindC
         return GDX_SETTINGS_ERR_BINDING;
     }
     entries = get_u16le(data + 10);
-    if ((size_t) GDX_SETTINGS_BLOCK_HEADER_SIZE + (size_t) entries * GDX_SETTINGS_ENTRY_BYTES != end) {
+    if (headerBytes + (size_t) entries * entryBytes != end) {
         return GDX_SETTINGS_ERR_LAYOUT;
     }
     out->ringCount = data[6];
     out->lavaMode = data[7];
     out->magnetStrength = data[8];
     out->magnetRange = data[9];
+    if (version == 4) {
+        out->aiAggression = data[16];
+        if (out->aiAggression == 0) {
+            return GDX_SETTINGS_ERR_LAYOUT; /* version 4 is only written for a preset */
+        }
+    }
     if (out->ringCount > GDX_SETTINGS_MAX_POINTS) {
         return GDX_SETTINGS_ERR_VALUE;
     }
-    pos = GDX_SETTINGS_BLOCK_HEADER_SIZE;
-    for (i = 0; i < entries; i++, pos += GDX_SETTINGS_ENTRY_BYTES) {
+    pos = headerBytes;
+    for (i = 0; i < entries; i++, pos += entryBytes) {
         const int kind = data[pos];
         const int index = data[pos + 1];
         const int key = (kind * 256) + index;
         GdxPointExtras extras;
 
+        memset(&extras, 0, sizeof(extras));
         extras.pitWidth = data[pos + 2];
         extras.dirtWidth = data[pos + 3];
         extras.iceWidth = data[pos + 4];
         extras.magnetStrength = data[pos + 5];
         extras.magnetRange = data[pos + 6];
+        if (version >= 2) {
+            extras.padKind = data[pos + 7];
+            extras.padWidth = data[pos + 8];
+            extras.padBoost = data[pos + 9];
+        }
+        if (version >= 3) {
+            extras.windStrength = data[pos + 10];
+            extras.windAngle = (uint16_t) get_u16le(data + pos + 11);
+            if ((extras.windStrength == WIND_OLD_CALM) && (extras.windAngle == 0)) {
+                extras.windStrength = 0;
+                if (key > lastKey && extras_empty(&extras)) {
+                    lastKey = key;
+                    continue;
+                }
+            }
+        }
         if ((key <= lastKey) || extras_empty(&extras)) {
             return GDX_SETTINGS_ERR_LAYOUT;
         }
@@ -250,6 +405,27 @@ int gdx_settings_decode(const unsigned char* data, size_t length, uint32_t bindC
         memset(out, 0, sizeof(*out));
     }
     return rc;
+}
+
+int gdx_settings_rebind(const unsigned char* data, size_t length, uint32_t oldBindCrc, uint32_t newBindCrc,
+                        unsigned char* out, size_t cap) {
+    static GdxCourseSettings scratch;
+    int rc;
+
+    if (out == NULL) {
+        return GDX_SETTINGS_ERR_ARGS;
+    }
+    rc = gdx_settings_decode(data, length, oldBindCrc, &scratch);
+    if (rc != GDX_SETTINGS_OK) {
+        return rc;
+    }
+    if ((cap < length) || (length > (size_t) INT_MAX)) {
+        return GDX_SETTINGS_ERR_FULL;
+    }
+    memmove(out, data, length);
+    put_u32le(out + 12, newBindCrc);
+    put_u32le(out + length - 4, gdx_course_registry_crc32(out, length - 4));
+    return (int) length;
 }
 
 static int id_ok(const char* courseId) {

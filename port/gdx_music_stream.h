@@ -8,7 +8,9 @@
 // live (gdx_audio_seq_player_stream_mute), so the stream is the only music.
 //
 // Native replacement gain is the Music slider times the seq player 1 fade (fadeVolume x fadeVolumeScale),
-// so the stock fade-out on Audio_DDBgmStop and the pause ducking carry over. Implemented in
+// so the stock fade-out on Audio_DDBgmStop and the pause ducking carry over. A file with a loudness tag
+// (ReplayGain or bext, see decoders.h) is also scaled to the stock music level while
+// gEnhancements.Audio.MatchMusicLoudness is on; the gain is read once per stream. Implemented in
 // port/gdx_music_stream.cpp; the decoders are in port/third_party/music_decoders.
 //
 // Threading: gdx_music_stream_bgm_start, gdx_music_stream_bgm_stop and gdx_music_stream_play_file run on

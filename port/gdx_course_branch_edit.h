@@ -34,13 +34,20 @@ extern "C" {
 #define GDX_BRANCH_EDIT_EXTRA_ICE_WIDTH 2
 #define GDX_BRANCH_EDIT_EXTRA_MAGNET_STRENGTH 3
 #define GDX_BRANCH_EDIT_EXTRA_MAGNET_RANGE 4
-#define GDX_BRANCH_EDIT_EXTRA_COUNT 5
+#define GDX_BRANCH_EDIT_EXTRA_PAD_KIND 5  /* GDX_SETTINGS_PAD_*; any kind but Super clears the boost */
+#define GDX_BRANCH_EDIT_EXTRA_PAD_WIDTH 6
+#define GDX_BRANCH_EDIT_EXTRA_PAD_BOOST 7 /* Super pads only */
+/* 0 (no wind) or 1..100, capped; 0 clears the angle. Wind is per segment only. */
+#define GDX_BRANCH_EDIT_EXTRA_WIND_STRENGTH 8
+#define GDX_BRANCH_EDIT_EXTRA_WIND_ANGLE 9 /* 0..359, wraps; only on a point with a strength of 1..100 */
+#define GDX_BRANCH_EDIT_EXTRA_COUNT 10
 
 /* The values of the whole track. */
 #define GDX_BRANCH_EDIT_TRACK_LAVA 0
 #define GDX_BRANCH_EDIT_TRACK_STRENGTH 1
 #define GDX_BRANCH_EDIT_TRACK_RANGE 2
-#define GDX_BRANCH_EDIT_TRACK_COUNT 3
+#define GDX_BRANCH_EDIT_TRACK_AI 3 /* GDX_SETTINGS_AI_*, capped */
+#define GDX_BRANCH_EDIT_TRACK_COUNT 4
 
 typedef struct GdxBranchEditPoint {
     float pos[3];

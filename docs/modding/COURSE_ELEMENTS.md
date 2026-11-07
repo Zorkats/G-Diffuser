@@ -214,22 +214,63 @@ editor, `(radiusLeft + radiusRight) / 10`; Center is the lateral offset in the s
 The editor clamps the radii to its native bounds and rounds them to its 10-unit grid. Bank wraps
 and rounds to the nearest 3 degrees. Controls Help shows your rebound tool keys.
 
-### Set coverage and magnet values
+### Set coverage, magnet, dash pad and wind values
 
-The panel shows controls for parts present on the active point:
+The panel shows controls for parts present on the active point, and the wind for any point:
 
 | Control | Value |
 | --- | --- |
 | Pit or lava, dirt, and ice width | 1-100 percent coverage; 0 (**Stock**) keeps the stock strip. The **Both** placement divides coverage between both sides. |
 | Magnet strength | 0.25-3.00; 0 (**Track**) inherits the track value. |
 | Magnet range | 10-200; 0 (**Track**) inherits the track value. Physical reach still has road-width limits. |
+| Dash pad | **Normal**, **Super** (blue, boosts harder and a little longer) or **Brake** (red, points backward, cuts your speed for a moment). CPUs do not aim for Brake pads. |
+| Pad width | 1-100 percent of the road on flat road; 0 (**Stock**) keeps the stock plate. Pipes, cylinders and half-pipes keep the stock plate. |
+| Super boost | 110-300 percent of a normal dash; the left end (**Default**) is 150 percent. Shown on Super pads only. |
+| Wind | A dropdown of **None**, **Weak**, **Mid**, **Strong** or **Gale** (0, 25, 50, 75 or 100 percent; **Custom** for any other strength) for the segment after the point, then an exact strength (1-100 percent) and angle. A segment that gets wind here starts blowing the way the camera looks. |
 | Whole track: lava | **Follow the menu**, **Always kills**, or **Never kills**. Test runs never kill from lava. |
 | Whole track: strength and range | The track default for magnets; 0 (**Menu**) uses the Gameplay option. |
+| Whole track: CPU aggression | **Track** (stock) keeps the player's **AI aggression** option. **Calm** halves it, **Fierce** makes it 1.5 times and **Brutal** doubles it. **Normal** sets it to 100 percent on this track, in place of the option. The result sets how often CPUs side attack, spin attack and swerve into a machine behind them, on top of the difficulty. Past **Normal**, CPUs below Expert also spin attack. |
 
 Ctrl+click a numeric value to type it. Part settings follow points through insert, delete, reverse,
 and path swaps. A part belongs to the segment after its point. **Ignore track settings** in the
-Gameplay options bypasses saved lava and magnet values when racing; it does not erase them.
-Part widths remain part of the course geometry and still apply.
+Gameplay options bypasses saved lava, magnet, Super boost, wind and CPU aggression values when racing; it does not
+erase them. Part widths and dash pad kinds remain part of the course geometry and still apply.
+
+Wind blows toward a fixed compass angle: 0 is north, the top of the race map, and 90 is east.
+Click or drag the compass beside the angle slider to aim it. Your heading decides whether it is a
+tailwind, a headwind or a crosswind.
+
+Wind is also a part. Pick **Parts**, then **WIND**, then a row:
+
+| Row | Places |
+| --- | --- |
+| 1 Weak, 2 Mid, 3 Strong, 4 Gale | Wind on the segment at 25, 50, 75 or 100 percent. |
+| CLEAR | Takes the segment's wind away. |
+
+Wind belongs to one segment at a time; there is no wind for the whole track. Click the track, or
+press A on a controller, to put the row's wind on that segment. New wind blows the way the camera
+looks. Picking another strength for a segment that already has wind keeps its angle. Set the exact
+angle and strength in the settings panel.
+
+Every segment with wind has a plate painted on its road, in the editor and in races: one to four
+chevrons, more for a stronger wind, pointing the way it blows. The plate lies on the road and banks
+with it. Wind still blows on pipes, cylinders, half-pipes and in the air, but only flat roads get a
+plate. Wind pushes every machine, CPUs too, twice as hard in the air and harder while sliding.
+Stronger wind gains more than its percent: compared with a straight ramp, Weak pushes 1.25 times
+as hard, Mid 1.5, Strong 1.75 and Gale twice as hard, and a gale can drift a machine sideways
+twice as fast.
+Tunnels block it. A new point keeps the wind of the segment it splits.
+Squashed cloud streaks drift across the screen on windy segments, in the stock cloud art from your
+own ROM.
+
+A track with wind saves a version 3 settings block. Older builds cannot read it: they refuse the
+whole `course-settings.gks` store and that track's snapshot. Keep a complete backup before
+adding wind if you may return to an older build. Tracks saved by test builds that had a
+whole-track wind or **Calm** segments load without them.
+
+The course file keeps a stock dash plate. Super and Brake live in the settings store, so an older
+build or the stock Expansion Kit races the pad as a normal dash. A Path B first segment always has
+a normal pad. The Super and Brake art is made at load time from the dash texture in your own ROM.
 
 ### Include alternate roads in maps
 

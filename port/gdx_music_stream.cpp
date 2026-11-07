@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
@@ -56,6 +57,7 @@ constexpr double kDrainTimeoutSeconds = 4.0;
 using gdx::music::kBgmNone;
 using gdx::music::kBgmNamedCount;
 constexpr const char* kStreamedMusicCVar = "gEnhancements.Audio.StreamedMusic";
+constexpr const char* kMatchLoudnessCVar = "gEnhancements.Audio.MatchMusicLoudness";
 
 using gdx::music::kBgmNames;
 
@@ -73,7 +75,8 @@ struct Shared {
 
     std::atomic<int> state{ kIdle };
     std::atomic<uint32_t> sourceRate{ 0 };
-    std::vector<float> ring;               // interleaved stereo frames, kRingFrames long
+    std::atomic<float> levelGain{ 1.0f };  // worker, stored before the epoch bump
+    std::vector<float> ring;              // interleaved stereo frames, kRingFrames long
     std::atomic<uint64_t> written{ 0 };    // worker only
     std::atomic<uint64_t> consumed{ 0 };   // audio thread only
     std::atomic<uint64_t> sessionBase{ 0 }; // worker, stored before the epoch bump
@@ -115,6 +118,7 @@ Session& session() {
 // Audio-thread-only mixer state.
 struct MixState {
     uint32_t epoch = 0;
+    float level = 1.0f; // the session's level gain, latched with its epoch
     double phase = 0.0;
     uint64_t drainFrames = 0;
     int lastState = kIdle;
@@ -193,7 +197,18 @@ void openSession(const std::string& path, const std::string& label, uint64_t req
     ss.label = label;
     ss.raw.assign(kChunkFrames * 2, 0.0f);
 
+    // The file's ReplayGain or bext loudness brings it to the stock music level. Files without one play
+    // as decoded.
+    const bool match = CVarGetInteger(kMatchLoudnessCVar, 1) != 0;
+    const float level = match ? gdx_music_level_gain(&info) : 1.0f;
+    if (info.hasGain != 0) {
+        gdx_port_logf("[music] %s: level %+.2f dB (track gain %+.2f dB, peak %.3f)%s\n", label.c_str(),
+                      20.0f * std::log10(gdx_music_level_gain(&info)), info.gainDb,
+                      info.hasPeak != 0 ? info.peak : 0.0f, match ? "" : ", matching off");
+    }
+
     s.sourceRate.store(info.sampleRate, std::memory_order_release);
+    s.levelGain.store(level, std::memory_order_release);
     s.sessionBase.store(s.written.load(std::memory_order_relaxed), std::memory_order_release);
     s.preview.store(preview, std::memory_order_release);
     s.epoch.fetch_add(1, std::memory_order_release);
@@ -512,6 +527,7 @@ extern "C" int gdx_music_stream_mix_s16(int16_t* stereo, size_t frames, uint32_t
     const uint32_t epoch = s.epoch.load(std::memory_order_acquire);
     if (epoch != m.epoch) {
         m.epoch = epoch;
+        m.level = s.levelGain.load(std::memory_order_acquire);
         m.phase = 0.0;
         s.consumed.store(s.sessionBase.load(std::memory_order_acquire), std::memory_order_release);
     }
@@ -529,7 +545,7 @@ extern "C" int gdx_music_stream_mix_s16(int16_t* stereo, size_t frames, uint32_t
         }
     }
 
-    const float gain = fade * gdx_audio_music_slider_scale() * 32767.0f;
+    const float gain = fade * m.level * gdx_audio_music_slider_scale() * 32767.0f;
     const double step = static_cast<double>(rate) / static_cast<double>(deviceRate);
     const float* ring = s.ring.data();
     uint64_t c = s.consumed.load(std::memory_order_relaxed);

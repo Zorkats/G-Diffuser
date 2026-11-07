@@ -9,14 +9,24 @@
     check_windows_deps.py confirms the executables need no DLL beside them, which is what tells
     the static build tree apart from the dynamic one.
 
+    With -Companion, the G-Diffuser Companion is staged into G-Diffuser/companion/: its executable,
+    music_targets.json, and the frozen worker folder (tools/build_companion_worker.py must have run,
+    then a build of G-Diffuser-Companion-worker). The staged copy must pass its own --selftest. User
+    themes in the build tree are test data and are not shipped. Without -Companion the package is
+    unchanged, so the release workflow, which does not freeze the worker, keeps working.
+
 .EXAMPLE
     pwsh tools/package_windows.ps1 -BuildDir build/x64 -Version 1.0.1
+
+.EXAMPLE
+    pwsh tools/package_windows.ps1 -BuildDir build/x64 -Version 1.0.1 -Companion
 #>
 
 param(
     [Parameter(Mandatory = $true)][string] $BuildDir,
     [Parameter(Mandatory = $true)][string] $Version,
-    [string] $OutDir = "dist"
+    [string] $OutDir = "dist",
+    [switch] $Companion
 )
 
 $ErrorActionPreference = "Stop"
@@ -65,6 +75,40 @@ python (Join-Path $repoRoot "tools\check_windows_deps.py") `
     (Join-Path $stage "G-Diffuser.exe") (Join-Path $stage "gdx-extract.exe") (Join-Path $stage "gdx-update.exe")
 if ($LASTEXITCODE -ne 0) {
     Write-Error "packaging refused: the executables are not self-contained"
+}
+
+if ($Companion) {
+    # The Companion finds the game in the folder above its own, so it lives in a companion subfolder.
+    $companionBin = Join-Path $BuildDir "companion\Release"
+    $companionStage = Join-Path $stage "companion"
+    New-Item -ItemType Directory -Force -Path $companionStage | Out-Null
+    $companionPayload = @(
+        "G-Diffuser-Companion.exe",
+        "music_targets.json",
+        "worker"
+    )
+    foreach ($item in $companionPayload) {
+        $source = Join-Path $companionBin $item
+        if (-not (Test-Path $source)) {
+            Write-Error "companion build is missing $item`nfreeze the worker: python -I tools/build_companion_worker.py, then cmake --build $BuildDir --config Release --target G-Diffuser-Companion-worker"
+        }
+        Copy-Item -Recurse -Force $source (Join-Path $companionStage $item)
+    }
+    foreach ($license in @("MIT-CMU-Pillow.txt", "PSF-2.0-Python.txt")) {
+        if (-not (Test-Path (Join-Path $companionStage "worker\_internal\LICENSES\$license"))) {
+            Write-Error "packaging refused: the frozen worker has no $license; freeze it again"
+        }
+    }
+
+    python (Join-Path $repoRoot "tools\check_windows_deps.py") (Join-Path $companionStage "G-Diffuser-Companion.exe")
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "packaging refused: G-Diffuser-Companion.exe is not self-contained"
+    }
+    # The staged copy runs its worker handshake, which also proves the worker folder is complete.
+    $selftest = & (Join-Path $companionStage "G-Diffuser-Companion.exe") --selftest | Out-String
+    if ($LASTEXITCODE -ne 0 -or $selftest -notmatch "selftest: PASS") {
+        Write-Error "packaging refused: the staged Companion failed its selftest`n$selftest"
+    }
 }
 
 $zip = Join-Path $OutDir "G-Diffuser-v$Version-windows-x64.zip"

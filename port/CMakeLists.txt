@@ -166,6 +166,10 @@ add_library(gdiffuser_game OBJECT ${GAME_SOURCES}
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_snapshot_mfs.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_branch_editor.c" # Course Edit forks: editor hooks and tools
     "${CMAKE_CURRENT_SOURCE_DIR}/gdx_det_layout.c"         # GDX_DET_LOG probe fields; needs the decomp Racer layout
+    "${CMAKE_CURRENT_SOURCE_DIR}/gdx_split_gp.c"           # MP2 split-screen Grand Prix rules
+    "${CMAKE_CURRENT_SOURCE_DIR}/gdx_main_menu_grid.c"     # O2-9 main menu 3x3 card grid
+    "${CMAKE_CURRENT_SOURCE_DIR}/gdx_gnet_sign.c"          # O2-9 G-NET card composer
+    "${CMAKE_CURRENT_SOURCE_DIR}/gdx_gnet_sign_map.c"      # O2-9 G-NET card map (tools/gen_gnet_sign.py)
     "${CMAKE_CURRENT_SOURCE_DIR}/n64_sched.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/n64_vi.c"
     "${DECOMP}/src/libultra/io/devmgr.c"                  # outside the glob: PORT PI manager, host-backed DMA completion
@@ -193,6 +197,10 @@ if(GDX_EXPANSION_KIT)
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_link_tex.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_bank_tex.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_lap_digits.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/gdx_dash_pad.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/gdx_wind.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/gdx_test_drive.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/gdx_death_race.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/n64_leo.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gen/EkAssetBindings.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gen/EkLinkStubs.c"
@@ -407,6 +415,7 @@ gdx_add_main_target(G-Diffuser
                                    # mirrors the ghost structs, walking gMfsRamArea directly
     gdx_content_import.c           # E2 .gdxc import; validation chain + disk-thread install
                                    # staging (op slot 30 in decomp/src/sys/disk/75000.c)
+    gdx_foreign_track.c            # F3 foreign track normalize + checksum (pure C, shared with the Companion)
     gdx_content_pack.cpp           # .gdxp share packages: zip of a .gdxc, its sidecars and songs
     gdx_course_registry.c          # Course Edit element registry + GXE1 sidecar codec (pure C)
     gdx_course_branch_format.c     # Course forks: GdxBranchSet model, GXB1 block and GBS1 file (pure C)
@@ -421,14 +430,25 @@ gdx_add_main_target(G-Diffuser
     gdx_course_meta.c              # Creator metadata: author, Edited by, staff time; GXM1, GMS1, .gdxm (pure C)
     gdx_course_meta_view.c         # The raced track's staff time CPU target in plain types for cpu.c
     gdx_course_splits.c            # CM4 staff run splits: GXM1 tag 5 codec, run recorder, pacing curve (pure C)
+    gdx_staff_ghost.c              # CM3 staff ghost: the staff run's replay, GXM1 tag 7 codec (pure C)
+    gdx_export_all.c               # EX export everything: which files go in the zip, by group (pure C)
+    gdx_export_archive.cpp         # EX export everything: walks the install and writes the zip (libzip)
+    gdx_export_page.cpp            # EX export everything: the Workshop > Tools section
     gdx_course_splits_view.c       # CM4 splits recording for racer.c and Expert and Master pacing for cpu.c
     gdx_draw_distance.c            # Draw distance and Extended draw distance scales (issue #45)
     gdx_course_sign.c              # CM5 Ed25519 track signatures over Monocypher (pure C)
+    gdx_palette_crc.c              # HT palette CRC and .pal/ variant names for palette-aware HD textures (pure C)
     gdx_course_meta_sign.c         # CM5 signature rules: keep, drop or sign on export, check on import
     gdx_profile_keys.c             # CM5 signing seeds: GPK1 profile-keys.gpk codec (pure C)
     gdx_profile.c                  # Player profiles: GPF1 profile and GPS1 store codecs (pure C)
     gdx_profile_state.cpp          # The live profile store, its revision and random profile ids
     gdx_profile_page.cpp           # Online > Profile menu page
+    net/gdx_net_socket.cpp         # O2 non-blocking UDP socket (Winsock / POSIX)
+    net/gdx_net_channel.cpp        # O2 reliable and unreliable messages over one UDP peer
+    net/gdx_net_lobby.cpp          # O2 lobby messages, LAN discovery packets and the chat filter
+    net/gdx_net_lobby_session.cpp  # O2 lobby host, joining client and LAN room browser
+    gdx_lan_lobby.cpp              # O2 lobby worker thread that owns the socket
+    gdx_lan_lobby_page.cpp         # Online > LAN Lobby menu page
     gdx_menu_words.c               # Menu row labels composed at runtime from words of the stock menu textures
     gdx_save_import.c              # Emulator cartridge save to native fzerox.sav image (pure C)
     gdx_save_import_stage.cpp      # Stages that image beside the save; sram_buffer applies it next launch
@@ -460,6 +480,7 @@ gdx_add_main_target(G-Diffuser
                                 # from main.cpp, so the standalone test targets compile it unchanged
     gdx_imgui_nav.cpp
     gdx_workshop.cpp
+    gdx_alt_assets.cpp
     gdx_audio_seq_packs.cpp      # stage-2 audio modding; hooks live in decomp/src/audio/*/lib/load.c
     gdx_audio_sample_packs.cpp   # stage-3 audio modding; hook lives in decomp/src/audio/disk/lib/load.c
     gdx_audio_soundfont_packs.cpp # stage-4 audio modding; hooks live in decomp/src/audio/disk/lib/load.c
@@ -755,8 +776,8 @@ target_link_libraries(G-Diffuser PRIVATE monocypher)
 
 if(WIN32)
     # user32: MessageBox; Comdlg32: ROM picker; Comctl32: extraction progress marquee;
-    # winhttp: the update check and download.
-    target_link_libraries(G-Diffuser PRIVATE user32 Comdlg32 Comctl32 winhttp)
+    # winhttp: the update check and download; ws2_32: the O2 LAN lobby socket.
+    target_link_libraries(G-Diffuser PRIVATE user32 Comdlg32 Comctl32 winhttp ws2_32)
 elseif(ANDROID)
     include(FetchContent)
     # Ogg/Vorbis resolve to the copies fetched in cmake/dependencies/android.cmake; the rest are
@@ -972,6 +993,7 @@ add_executable(gdx_course_meta_tests
     tests/gdx_course_meta_tests.c
     gdx_course_meta.c
     gdx_course_splits.c
+    gdx_staff_ghost.c
     gdx_course_registry.c)
 if(MSVC)
     target_compile_options(gdx_course_meta_tests PRIVATE /W3)
@@ -1313,6 +1335,88 @@ if(MSVC)
 elseif(GDX_PORT_WARN_FLAGS)
     target_compile_options(gdx_lap_digits_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
 endif()
+# Dash pad test: compiles gdx_dash_pad.c UNMODIFIED against a stub archive reader, with a synthesized texture.
+add_executable(gdx_dash_pad_tests
+    tests/gdx_dash_pad_tests.c
+    gdx_dash_pad.c)
+target_include_directories(gdx_dash_pad_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_dash_pad_tests PRIVATE /W3)
+    target_compile_definitions(gdx_dash_pad_tests PRIVATE _CRT_SECURE_NO_WARNINGS=1)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_dash_pad_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+if(NOT MSVC)
+    target_link_libraries(gdx_dash_pad_tests PRIVATE m)
+endif()
+# LLE staging window reuse rule (issue #33), header-only.
+add_executable(gdx_audio_lle_stage_tests
+    tests/gdx_audio_lle_stage_tests.c)
+target_include_directories(gdx_audio_lle_stage_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_audio_lle_stage_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_audio_lle_stage_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# Wind test: compiles gdx_wind.c UNMODIFIED.
+add_executable(gdx_wind_tests
+    tests/gdx_wind_tests.c
+    gdx_wind.c)
+target_include_directories(gdx_wind_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_wind_tests PRIVATE /W3)
+    target_compile_definitions(gdx_wind_tests PRIVATE _CRT_SECURE_NO_WARNINGS=1)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_wind_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+if(NOT MSVC)
+    target_link_libraries(gdx_wind_tests PRIVATE m)
+endif()
+# Test drive test: compiles gdx_test_drive.c UNMODIFIED.
+add_executable(gdx_test_drive_tests
+    tests/gdx_test_drive_tests.c
+    gdx_test_drive.c)
+target_include_directories(gdx_test_drive_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_test_drive_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_test_drive_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# Death Race test: rules, course keys and the records codec and file layer, compiled UNMODIFIED
+# (reuses the CRC-32 in gdx_course_registry.c, as gdx_gp_resume_tests does).
+add_executable(gdx_death_race_tests
+    tests/gdx_death_race_tests.c
+    gdx_death_race.c
+    gdx_course_registry.c)
+target_include_directories(gdx_death_race_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_death_race_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_death_race_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# Split-screen Grand Prix rules test: compiles gdx_split_gp.c UNMODIFIED, no game state.
+add_executable(gdx_split_gp_tests
+    tests/gdx_split_gp_tests.c
+    gdx_split_gp.c)
+target_include_directories(gdx_split_gp_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_split_gp_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_split_gp_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# Main menu grid and G-NET card test: compiles the grid, the composer and the generated map UNMODIFIED, with
+# synthesized sign textures only.
+add_executable(gdx_main_menu_grid_tests
+    tests/gdx_main_menu_grid_tests.c
+    gdx_main_menu_grid.c
+    gdx_gnet_sign.c
+    gdx_gnet_sign_map.c)
+target_include_directories(gdx_main_menu_grid_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_main_menu_grid_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_main_menu_grid_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
 # Menu-words test: compiles gdx_menu_words.c UNMODIFIED with synthesized textures only.
 add_executable(gdx_menu_words_tests
     tests/gdx_menu_words_tests.c
@@ -1334,6 +1438,16 @@ if(MSVC)
 elseif(GDX_PORT_WARN_FLAGS)
     target_compile_options(gdx_draw_distance_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
 endif()
+# Palette-aware HD textures (HT): palette CRC known answers, shared with tools/gen_htc_pack.py.
+add_executable(gdx_palette_crc_tests
+    tests/gdx_palette_crc_tests.c
+    gdx_palette_crc.c)
+target_include_directories(gdx_palette_crc_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_palette_crc_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_palette_crc_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
 # Course signing test (CM5): gdx_course_sign.c over libultraship's Monocypher, RFC 8032 vectors.
 add_executable(gdx_course_sign_tests
     tests/gdx_course_sign_tests.c
@@ -1352,6 +1466,7 @@ add_executable(gdx_course_meta_sign_tests
     gdx_course_sign.c
     gdx_course_meta.c
     gdx_course_splits.c
+    gdx_staff_ghost.c
     gdx_course_registry.c)
 target_include_directories(gdx_course_meta_sign_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(gdx_course_meta_sign_tests PRIVATE monocypher)
@@ -1370,6 +1485,26 @@ if(MSVC)
     target_compile_options(gdx_profile_keys_tests PRIVATE /W3)
 elseif(GDX_PORT_WARN_FLAGS)
     target_compile_options(gdx_profile_keys_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# CM3 staff ghost: the staff run's replay codec, GXM1 tag 7.
+add_executable(gdx_staff_ghost_tests
+    tests/gdx_staff_ghost_tests.c
+    gdx_staff_ghost.c)
+target_include_directories(gdx_staff_ghost_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_staff_ghost_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_staff_ghost_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# EX export everything: which files of an install go in the zip, by group, and which never leave it.
+add_executable(gdx_export_all_tests
+    tests/gdx_export_all_tests.c
+    gdx_export_all.c)
+target_include_directories(gdx_export_all_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_export_all_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_export_all_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
 endif()
 # CM4 per-node splits: the split record codec, the run recorder and the pacing curve.
 add_executable(gdx_course_splits_tests
@@ -1424,6 +1559,7 @@ add_executable(gdx_profile_tests
     gdx_profile.c
     gdx_course_meta.c
     gdx_course_splits.c
+    gdx_staff_ghost.c
     gdx_course_registry.c)
 target_include_directories(gdx_profile_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 if(MSVC)
@@ -1440,6 +1576,7 @@ add_executable(gdx_profile_state_tests
     gdx_profile.c
     gdx_course_meta.c
     gdx_course_splits.c
+    gdx_staff_ghost.c
     gdx_course_registry.c)
 target_include_directories(gdx_profile_state_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_compile_features(gdx_profile_state_tests PRIVATE cxx_std_17)
@@ -1458,6 +1595,23 @@ if(MSVC)
     target_compile_options(gdx_net_channel_tests PRIVATE /W3)
 elseif(GDX_PORT_WARN_FLAGS)
     target_compile_options(gdx_net_channel_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# Online O2 LAN lobby: wire format, chat filter, host, client and room browser on a fake network. The
+# socket file is linked only for FormatAddress; no socket is opened.
+add_executable(gdx_net_lobby_tests
+    tests/gdx_net_lobby_tests.cpp
+    net/gdx_net_lobby.cpp
+    net/gdx_net_lobby_session.cpp
+    net/gdx_net_channel.cpp
+    net/gdx_net_socket.cpp)
+target_compile_features(gdx_net_lobby_tests PRIVATE cxx_std_17)
+if(WIN32)
+    target_link_libraries(gdx_net_lobby_tests PRIVATE ws2_32)
+endif()
+if(MSVC)
+    target_compile_options(gdx_net_lobby_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_net_lobby_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
 endif()
 # Online O2 loopback test: the channel over two real UDP sockets on 127.0.0.1.
 add_executable(gdx_net_loopback_tests
@@ -1521,9 +1675,17 @@ if(TARGET libultraship)
     add_executable(gdx_hd_texture_tests tests/gdx_hd_texture_tests.cpp)
     target_link_libraries(gdx_hd_texture_tests PRIVATE libultraship)
     target_compile_features(gdx_hd_texture_tests PRIVATE cxx_std_20)
+    add_executable(gdx_alt_assets_tests tests/gdx_alt_assets_tests.cpp gdx_alt_assets.cpp)
+    target_link_libraries(gdx_alt_assets_tests PRIVATE libultraship)
+    target_compile_features(gdx_alt_assets_tests PRIVATE cxx_std_20)
     add_executable(gdx_content_pack_tests tests/gdx_content_pack_tests.cpp gdx_content_pack.cpp)
     target_link_libraries(gdx_content_pack_tests PRIVATE libultraship)
     target_compile_features(gdx_content_pack_tests PRIVATE cxx_std_20)
+    # EX export everything: walks a made-up install and checks the zip it writes.
+    add_executable(gdx_export_archive_tests tests/gdx_export_archive_tests.cpp gdx_export_archive.cpp
+        gdx_export_all.c)
+    target_link_libraries(gdx_export_archive_tests PRIVATE libultraship)
+    target_compile_features(gdx_export_archive_tests PRIVATE cxx_std_20)
     add_executable(resource_smoketest resource_smoketest.cpp resource/ResourceFactories.cpp)
     target_include_directories(resource_smoketest PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
@@ -1588,6 +1750,10 @@ if(GDX_BUILD_JP AND NOT ANDROID)
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_snapshot_mfs.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_branch_editor.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_det_layout.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/gdx_split_gp.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/gdx_main_menu_grid.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/gdx_gnet_sign.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/gdx_gnet_sign_map.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/n64_sched.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/n64_vi.c"
         "${DECOMP}/src/libultra/io/devmgr.c"
@@ -1604,6 +1770,10 @@ if(GDX_BUILD_JP AND NOT ANDROID)
             "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_link_tex.c"
             "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_edit_bank_tex.c"
             "${CMAKE_CURRENT_SOURCE_DIR}/gdx_lap_digits.c"
+            "${CMAKE_CURRENT_SOURCE_DIR}/gdx_dash_pad.c"
+            "${CMAKE_CURRENT_SOURCE_DIR}/gdx_wind.c"
+            "${CMAKE_CURRENT_SOURCE_DIR}/gdx_test_drive.c"
+            "${CMAKE_CURRENT_SOURCE_DIR}/gdx_death_race.c"
             "${CMAKE_CURRENT_SOURCE_DIR}/n64_leo.c"
             "${CMAKE_CURRENT_SOURCE_DIR}/gen/EkAssetBindings.c"   # US-EK bindings reused; jp/ek TODO
             "${CMAKE_CURRENT_SOURCE_DIR}/gen/EkLinkStubs.c"
@@ -1715,6 +1885,7 @@ if(GDX_BUILD_JP AND NOT ANDROID)
         gdx_course_bounds.c
         gdx_content_io.c
         gdx_content_import.c
+        gdx_foreign_track.c
         gdx_content_pack.cpp
         gdx_course_registry.c
         gdx_course_branch_format.c
@@ -1729,14 +1900,25 @@ if(GDX_BUILD_JP AND NOT ANDROID)
         gdx_course_meta.c
         gdx_course_meta_view.c
         gdx_course_splits.c
+        gdx_staff_ghost.c
+        gdx_export_all.c
+        gdx_export_archive.cpp
+        gdx_export_page.cpp
         gdx_course_splits_view.c
         gdx_draw_distance.c
         gdx_course_sign.c
+        gdx_palette_crc.c
         gdx_course_meta_sign.c
         gdx_profile_keys.c
         gdx_profile.c
         gdx_profile_state.cpp
         gdx_profile_page.cpp
+        net/gdx_net_socket.cpp
+        net/gdx_net_channel.cpp
+        net/gdx_net_lobby.cpp
+        net/gdx_net_lobby_session.cpp
+        gdx_lan_lobby.cpp
+        gdx_lan_lobby_page.cpp
         gdx_menu_words.c
         gdx_save_import.c
         gdx_save_import_stage.cpp
@@ -1760,6 +1942,7 @@ if(GDX_BUILD_JP AND NOT ANDROID)
         gdx_dev_gates.c
         gdx_imgui_nav.cpp
         gdx_workshop.cpp
+        gdx_alt_assets.cpp
         gdx_audio_seq_packs.cpp
         gdx_audio_sample_packs.cpp
         gdx_audio_soundfont_packs.cpp
@@ -1820,7 +2003,7 @@ if(GDX_BUILD_JP AND NOT ANDROID)
     target_link_libraries(G-Diffuser-JP PRIVATE monocypher)
 
     if(WIN32)
-        target_link_libraries(G-Diffuser-JP PRIVATE user32 Comdlg32 Comctl32 winhttp)
+        target_link_libraries(G-Diffuser-JP PRIVATE user32 Comdlg32 Comctl32 winhttp ws2_32)
     else()
         find_package(Threads REQUIRED)
         target_link_libraries(G-Diffuser-JP PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
@@ -1966,7 +2149,7 @@ else()
     target_compile_options(gdx_course_disk_tests PRIVATE -UNDEBUG)
 endif()
 
-add_executable(gdx_content_validation_tests tests/gdx_content_validation_tests.c)
+add_executable(gdx_content_validation_tests tests/gdx_content_validation_tests.c gdx_foreign_track.c)
 target_include_directories(gdx_content_validation_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 if(MSVC)
     target_compile_options(gdx_content_validation_tests PRIVATE /UNDEBUG)
@@ -1974,7 +2157,14 @@ else()
     target_compile_options(gdx_content_validation_tests PRIVATE -UNDEBUG)
 endif()
 
-add_executable(gdx_foreign_import_tests tests/gdx_foreign_import_tests.c)
+add_executable(gdx_foreign_track_tests tests/gdx_foreign_track_tests.c gdx_foreign_track.c)
+if(MSVC)
+    target_compile_options(gdx_foreign_track_tests PRIVATE /W3 /UNDEBUG)
+else()
+    target_compile_options(gdx_foreign_track_tests PRIVATE ${GDX_PORT_WARN_FLAGS} -UNDEBUG)
+endif()
+
+add_executable(gdx_foreign_import_tests tests/gdx_foreign_import_tests.c gdx_foreign_track.c)
 target_include_directories(gdx_foreign_import_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 if(MSVC)
     target_compile_options(gdx_foreign_import_tests PRIVATE /W3 /UNDEBUG)

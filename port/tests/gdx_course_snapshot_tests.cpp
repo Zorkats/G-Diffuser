@@ -384,7 +384,56 @@ static void signedContentTests() {
     std::puts("Signed content: identity, seal and ghosts ignored; course and title covered.");
 }
 
+// A settings block from a test build that had wind for the whole track: version 3, 90 percent at 353 degrees in
+// header bytes 16..19, and one point entry. The current decoder drops that wind, so this block no longer encodes
+// back to itself. An owner's track saved like this was sealed by that build and must still load.
+static Bytes legacyWindSettings(const Generation& g) {
+    Bytes b = {'G', 'X', 'K', '1', 3, 0, g.pointCount, 0, 0, 0, 1, 0, 0, 0, 0, 0, 90, 0, 0x61, 0x01,
+               0, 0, 0, 0, 0, 0, 0, 1, 100, 200, 0, 0, 0, 0, 0, 0, 0};
+    const uint32_t bind = binding(g);
+    for (int i = 0; i < 4; ++i) {
+        b[12 + i] = static_cast<unsigned char>(bind >> (8 * i));
+    }
+    const uint32_t check = gdx_course_registry_crc32(b.data(), b.size() - 4);
+    for (int i = 0; i < 4; ++i) {
+        b[b.size() - 4 + i] = static_cast<unsigned char>(check >> (8 * i));
+    }
+    return b;
+}
+
+// A seal covers the settings bytes as written, not what the current decoder would write for them.
+static void legacySettingsSealTests() {
+    using namespace gdx::snapshot;
+    for (int count : {10, 100}) {
+        auto legacy = fixture(count);
+        legacy.metadata[size_t(Metadata::Settings)] = legacyWindSettings(legacy);
+        GdxCourseSettings decoded{};
+        const auto& block = legacy.metadata[size_t(Metadata::Settings)];
+        assert(gdx_settings_decode(block.data(), block.size(), binding(legacy), &decoded) == GDX_SETTINGS_OK);
+        auto normalized = legacy;
+        Bytes buffer(GDX_SETTINGS_BLOCK_MAX_BYTES);
+        const int n = gdx_settings_encode(&decoded, binding(normalized), buffer.data(), buffer.size());
+        assert(n > 0 && size_t(n) < block.size());
+        normalized.metadata[size_t(Metadata::Settings)].assign(buffer.begin(), buffer.begin() + n);
+
+        assert(seal(legacy) && seal(normalized));
+        assert(legacy.base != normalized.base);  // the older build's seal is over its own bytes
+        auto moved = legacy;
+        assert(rebind(moved, 0x88776655, 7, "RENAMED.CRSE"));
+        assert(moved.base == legacy.base);
+        const auto& kept = moved.metadata[size_t(Metadata::Settings)];
+        assert(kept.size() == block.size() && std::memcmp(kept.data() + 16, block.data() + 16, 17) == 0);
+        Bytes encoded;
+        Generation reloaded;
+        assert(encode(moved, encoded) && decode(encoded, reloaded));
+        auto shipped = legacy;
+        assert(portable(shipped, false) && shipped.base == legacy.base);
+    }
+    std::puts("Legacy settings: a block the decoder reads differently keeps its seal.");
+}
+
 int main() {
+    legacySettingsSealTests();
     contentBindingTests();
     packageTests();
     signedContentTests();

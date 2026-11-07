@@ -62,6 +62,10 @@ public:
     // The bound port in host byte order, or 0 while closed.
     uint16_t LocalPort() const { return localPort_; }
 
+    // Lets SendTo reach a broadcast address such as 255.255.255.255 (LAN room discovery). Off by
+    // default, as the OS has it. Returns false while closed or when the OS refuses the option.
+    bool SetBroadcast(bool on);
+
     SendResult SendTo(const NetAddress& to, const void* data, std::size_t len);
     RecvResult RecvFrom(void* buf, std::size_t cap, std::size_t& outLen, NetAddress& from);
 

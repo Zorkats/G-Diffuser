@@ -107,6 +107,277 @@ static void test_block(void) {
     CHECK(gdx_settings_validate(&in) == GDX_SETTINGS_ERR_VALUE, "a value past the ring is refused");
 }
 
+static void test_pad_block(void) {
+    GdxCourseSettings in;
+    GdxCourseSettings out;
+    const uint32_t bind = 0x0BAD5EEDu;
+    int len;
+
+    make_settings(&in);
+    len = gdx_settings_encode(&in, bind, sBlock, sizeof(sBlock));
+    CHECK((len > 0) && (sBlock[4] == 1) && (sBlock[5] == 0), "a block without pads stays version 1");
+
+    in.ring[5].padKind = GDX_SETTINGS_PAD_SUPER;
+    in.ring[5].padWidth = 100;
+    in.ring[5].padBoost = 150;
+    in.nodes[1][4].padKind = GDX_SETTINGS_PAD_BRAKE;
+    len = gdx_settings_encode(&in, bind, sBlock, sizeof(sBlock));
+    CHECK((len == GDX_SETTINGS_BLOCK_HEADER_SIZE + 4 * GDX_SETTINGS_ENTRY_BYTES_V2 + 4) && (sBlock[4] == 2),
+          "a pad value writes version 2 with longer entries");
+    CHECK((gdx_settings_decode(sBlock, (size_t) len, bind, &out) == GDX_SETTINGS_OK) &&
+              (memcmp(&in, &out, sizeof(in)) == 0),
+          "a version 2 block round trips");
+
+    /* Entry 1 is ring point 5, the Super pad. */
+    sBlock[GDX_SETTINGS_BLOCK_HEADER_SIZE + GDX_SETTINGS_ENTRY_BYTES_V2 + 7] = 3;
+    reseal(sBlock, (size_t) len);
+    CHECK(gdx_settings_decode(sBlock, (size_t) len, bind, &out) == GDX_SETTINGS_ERR_VALUE, "an unknown pad kind is refused");
+    sBlock[GDX_SETTINGS_BLOCK_HEADER_SIZE + GDX_SETTINGS_ENTRY_BYTES_V2 + 7] = GDX_SETTINGS_PAD_BRAKE;
+    reseal(sBlock, (size_t) len);
+    CHECK(gdx_settings_decode(sBlock, (size_t) len, bind, &out) == GDX_SETTINGS_ERR_VALUE,
+          "a boost on a pad that is not Super is refused");
+
+    make_settings(&in);
+    in.ring[5].padKind = GDX_SETTINGS_PAD_SUPER;
+    in.ring[5].padBoost = GDX_SETTINGS_PAD_BOOST_MAX + 1;
+    CHECK(gdx_settings_validate(&in) == GDX_SETTINGS_ERR_VALUE, "a boost over the maximum is refused");
+    in.ring[5].padBoost = GDX_SETTINGS_PAD_BOOST_MIN - 1;
+    CHECK(gdx_settings_validate(&in) == GDX_SETTINGS_ERR_VALUE, "a boost under the minimum is refused");
+    in.ring[5].padBoost = 0;
+    in.ring[5].padWidth = GDX_SETTINGS_WIDTH_MAX + 1;
+    CHECK(gdx_settings_validate(&in) == GDX_SETTINGS_ERR_VALUE, "a pad wider than the road is refused");
+    in.ring[5].padWidth = 0;
+    CHECK(gdx_settings_validate(&in) == GDX_SETTINGS_OK, "a Super pad with the default boost is valid");
+
+    in.ring[5].padKind = 0;
+    len = gdx_settings_encode(&in, bind, sBlock, sizeof(sBlock));
+    sBlock[4] = 9;
+    reseal(sBlock, (size_t) len);
+    CHECK(gdx_settings_decode(sBlock, (size_t) len, bind, &out) == GDX_SETTINGS_ERR_VERSION, "an unknown version is refused");
+    sBlock[4] = 2;
+    reseal(sBlock, (size_t) len);
+    CHECK(gdx_settings_decode(sBlock, (size_t) len, bind, &out) == GDX_SETTINGS_ERR_LAYOUT,
+          "version 1 entries under a version 2 header are refused");
+}
+
+static void test_wind_block(void) {
+    GdxCourseSettings in;
+    GdxCourseSettings out;
+    GdxCourseSettings expected;
+    const uint32_t bind = 0x51DE3A11u;
+    const size_t ring7 = GDX_SETTINGS_BLOCK_HEADER_SIZE_V3 + GDX_SETTINGS_ENTRY_BYTES_V3; /* entry 1 */
+    int len;
+
+    make_settings(&in);
+    in.ring[5].padKind = GDX_SETTINGS_PAD_BRAKE;
+    len = gdx_settings_encode(&in, bind, sBlock, sizeof(sBlock));
+    CHECK((len > 0) && (sBlock[4] == 2), "a block with pads and no wind stays version 2");
+
+    make_settings(&in);
+    in.ring[7].windStrength = 100;
+    in.ring[7].windAngle = 359;
+    in.nodes[2][0].windStrength = 1;
+    in.nodes[2][0].windAngle = 0;
+    len = gdx_settings_encode(&in, bind, sBlock, sizeof(sBlock));
+    CHECK((len == GDX_SETTINGS_BLOCK_HEADER_SIZE_V3 + 5 * GDX_SETTINGS_ENTRY_BYTES_V3 + 4) && (sBlock[4] == 3) &&
+              (sBlock[16] == 0) && (sBlock[17] == 0) && (sBlock[18] == 0) && (sBlock[19] == 0),
+          "point winds write version 3, a wind is a value of its own, and the header's spare bytes stay 0");
+    CHECK((gdx_settings_decode(sBlock, (size_t) len, bind, &out) == GDX_SETTINGS_OK) &&
+              (memcmp(&in, &out, sizeof(in)) == 0),
+          "point winds and a path B wind round trip");
+
+    /* Entry order: ring 3, 7, 9, then the forks. Entry 1 is ring point 7. */
+    sBlock[ring7 + 11] = (unsigned char) (360 & 0xFF);
+    sBlock[ring7 + 12] = (unsigned char) (360 >> 8);
+    reseal(sBlock, (size_t) len);
+    CHECK(gdx_settings_decode(sBlock, (size_t) len, bind, &out) == GDX_SETTINGS_ERR_VALUE, "an angle of 360 is refused");
+
+    /* Earlier test builds kept a wind for the whole track in the header. It is dropped, the rest still loads. */
+    len = gdx_settings_encode(&in, bind, sBlock, sizeof(sBlock));
+    sBlock[16] = 60;
+    sBlock[18] = (unsigned char) (270 & 0xFF);
+    sBlock[19] = (unsigned char) (270 >> 8);
+    reseal(sBlock, (size_t) len);
+    CHECK((gdx_settings_decode(sBlock, (size_t) len, bind, &out) == GDX_SETTINGS_OK) &&
+              (memcmp(&in, &out, sizeof(in)) == 0),
+          "an old whole-track wind is dropped and the points load");
+
+    /* They also had calm points, strength 255. A calm point is no wind; one with nothing else set is dropped. */
+    make_settings(&in);
+    in.ring[7].windStrength = 50;
+    in.ring[7].windAngle = 90;
+    in.nodes[2][0].windStrength = 30;
+    len = gdx_settings_encode(&in, bind, sBlock, sizeof(sBlock));
+    sBlock[ring7 + 10] = 255;
+    sBlock[ring7 + 11] = 0;
+    sBlock[ring7 + 12] = 0;
+    reseal(sBlock, (size_t) len);
+    expected = in;
+    expected.ring[7].windStrength = 0;
+    expected.ring[7].windAngle = 0;
+    CHECK((gdx_settings_decode(sBlock, (size_t) len, bind, &out) == GDX_SETTINGS_OK) &&
+              (memcmp(&expected, &out, sizeof(out)) == 0),
+          "an old calm point loads as no wind");
+
+    len = gdx_settings_encode(&in, bind, sBlock, sizeof(sBlock));
+    sBlock[4] = 2;
+    reseal(sBlock, (size_t) len);
+    CHECK(gdx_settings_decode(sBlock, (size_t) len, bind, &out) != GDX_SETTINGS_OK,
+          "version 3 entries under a version 2 header are refused");
+
+    make_settings(&in);
+    in.ring[2].windStrength = 255;
+    CHECK(gdx_settings_validate(&in) == GDX_SETTINGS_ERR_VALUE, "a calm point is no longer a value");
+    in.ring[2].windStrength = 0;
+    in.ring[2].windAngle = 10;
+    CHECK(gdx_settings_validate(&in) == GDX_SETTINGS_ERR_VALUE, "an angle without a strength is refused");
+    in.ring[2].windStrength = 50;
+    in.ring[2].windAngle = GDX_SETTINGS_WIND_ANGLE_MAX + 1;
+    CHECK(gdx_settings_validate(&in) == GDX_SETTINGS_ERR_VALUE, "a point angle over 359 is refused");
+    in.ring[2].windStrength = GDX_SETTINGS_WIND_MAX + 1;
+    in.ring[2].windAngle = 0;
+    CHECK(gdx_settings_validate(&in) == GDX_SETTINGS_ERR_VALUE, "a point wind over 100 is refused");
+    in.ring[2].windStrength = 0;
+    CHECK(gdx_settings_validate(&in) == GDX_SETTINGS_OK, "no wind is valid");
+
+    memset(&in, 0, sizeof(in));
+    in.ringCount = 4;
+    in.ring[1].windStrength = 10;
+    CHECK(!gdx_settings_is_empty(&in), "a point wind alone is a value");
+}
+
+static void test_ai_block(void) {
+    GdxCourseSettings in;
+    GdxCourseSettings out;
+    const uint32_t bind = 0xA66E5510u;
+    int len;
+    int preset;
+
+    CHECK((gdx_settings_ai_scale(GDX_SETTINGS_AI_TRACK) == 1.0f) && (gdx_settings_ai_scale(GDX_SETTINGS_AI_CALM) == 0.5f) &&
+              (gdx_settings_ai_scale(GDX_SETTINGS_AI_NORMAL) == 1.0f) &&
+              (gdx_settings_ai_scale(GDX_SETTINGS_AI_FIERCE) == 1.5f) &&
+              (gdx_settings_ai_scale(GDX_SETTINGS_AI_BRUTAL) == 2.0f) && (gdx_settings_ai_scale(9) == 1.0f),
+          "each preset has its multiplier, and an unknown value is stock");
+
+    make_settings(&in);
+    len = gdx_settings_encode(&in, bind, sBlock, sizeof(sBlock));
+    CHECK((len > 0) && (sBlock[4] == 1), "a track without a preset stays version 1");
+
+    for (preset = GDX_SETTINGS_AI_CALM; preset <= GDX_SETTINGS_AI_BRUTAL; preset++) {
+        make_settings(&in);
+        in.aiAggression = (uint8_t) preset;
+        len = gdx_settings_encode(&in, bind, sBlock, sizeof(sBlock));
+        CHECK((len == GDX_SETTINGS_BLOCK_HEADER_SIZE_V3 + 3 * GDX_SETTINGS_ENTRY_BYTES_V3 + 4) && (sBlock[4] == 4) &&
+                  (sBlock[16] == preset) && (sBlock[17] == 0) && (sBlock[18] == 0) && (sBlock[19] == 0),
+              "a preset writes version 4 with the preset at 0x10 and version 3 entries");
+        CHECK((gdx_settings_decode(sBlock, (size_t) len, bind, &out) == GDX_SETTINGS_OK) &&
+                  (memcmp(&in, &out, sizeof(in)) == 0),
+              "a preset round trips");
+    }
+
+    make_settings(&in);
+    in.aiAggression = GDX_SETTINGS_AI_FIERCE;
+    in.ring[7].windStrength = 40;
+    in.ring[7].windAngle = 180;
+    in.ring[5].padKind = GDX_SETTINGS_PAD_SUPER;
+    in.ring[5].padBoost = 120;
+    len = gdx_settings_encode(&in, bind, sBlock, sizeof(sBlock));
+    CHECK((len > 0) && (sBlock[4] == 4) && (gdx_settings_decode(sBlock, (size_t) len, bind, &out) == GDX_SETTINGS_OK) &&
+              (memcmp(&in, &out, sizeof(in)) == 0),
+          "a preset with wind and pads round trips in version 4");
+
+    sBlock[17] = 7;
+    reseal(sBlock, (size_t) len);
+    CHECK((gdx_settings_decode(sBlock, (size_t) len, bind, &out) == GDX_SETTINGS_OK) && (memcmp(&in, &out, sizeof(in)) == 0),
+          "the spare bytes after the preset are ignored");
+    sBlock[17] = 0;
+    sBlock[16] = GDX_SETTINGS_AI_BRUTAL + 1;
+    reseal(sBlock, (size_t) len);
+    CHECK(gdx_settings_decode(sBlock, (size_t) len, bind, &out) == GDX_SETTINGS_ERR_VALUE, "an unknown preset is refused");
+    sBlock[16] = 0;
+    reseal(sBlock, (size_t) len);
+    CHECK(gdx_settings_decode(sBlock, (size_t) len, bind, &out) == GDX_SETTINGS_ERR_LAYOUT,
+          "version 4 without a preset is refused: it is only written for one");
+    sBlock[16] = GDX_SETTINGS_AI_FIERCE;
+    sBlock[4] = 5;
+    reseal(sBlock, (size_t) len);
+    CHECK(gdx_settings_decode(sBlock, (size_t) len, bind, &out) == GDX_SETTINGS_ERR_VERSION, "version 5 is unknown");
+
+    /* A version 3 block keeps reading its header bytes as spare: test builds kept a whole-track wind there. */
+    make_settings(&in);
+    in.ring[7].windStrength = 40;
+    len = gdx_settings_encode(&in, bind, sBlock, sizeof(sBlock));
+    sBlock[16] = GDX_SETTINGS_AI_BRUTAL;
+    reseal(sBlock, (size_t) len);
+    CHECK((sBlock[4] == 3) && (gdx_settings_decode(sBlock, (size_t) len, bind, &out) == GDX_SETTINGS_OK) &&
+              (out.aiAggression == GDX_SETTINGS_AI_TRACK),
+          "a version 3 header byte is never read as a preset");
+
+    make_settings(&in);
+    in.aiAggression = GDX_SETTINGS_AI_BRUTAL + 1;
+    CHECK(gdx_settings_validate(&in) == GDX_SETTINGS_ERR_VALUE, "validate refuses an unknown preset");
+    CHECK(gdx_settings_encode(&in, bind, sBlock, sizeof(sBlock)) == GDX_SETTINGS_ERR_VALUE, "and encode does too");
+    memset(&in, 0, sizeof(in));
+    in.aiAggression = GDX_SETTINGS_AI_CALM;
+    CHECK(!gdx_settings_is_empty(&in), "a preset alone is a value");
+}
+
+/* The race's scale: the preset applied to the player's option. Normal is 100% whatever the option is. */
+static void test_ai_resolve(void) {
+    static const float options[] = { 0.0f, 0.5f, 1.0f, 2.0f };
+    size_t i;
+
+    for (i = 0; i < sizeof(options) / sizeof(options[0]); i++) {
+        const float option = options[i];
+
+        CHECK(gdx_settings_ai_resolve(GDX_SETTINGS_AI_NORMAL, option) == 1.0f,
+              "Normal is exactly 100% whatever the player's option is, 0% included");
+        CHECK(gdx_settings_ai_resolve(GDX_SETTINGS_AI_TRACK, option) == option, "Track keeps the player's option");
+        CHECK(gdx_settings_ai_resolve(GDX_SETTINGS_AI_CALM, option) == option * 0.5f,
+              "Calm halves the player's option");
+        CHECK(gdx_settings_ai_resolve(GDX_SETTINGS_AI_FIERCE, option) == option * 1.5f,
+              "Fierce multiplies the player's option by 1.5");
+        CHECK(gdx_settings_ai_resolve(GDX_SETTINGS_AI_BRUTAL, option) == option * 2.0f,
+              "Brutal doubles the player's option");
+        CHECK((gdx_settings_ai_resolve(7, option) == option) && (gdx_settings_ai_resolve(-1, option) == option),
+              "an out-of-range preset keeps the player's option");
+    }
+}
+
+/* Snapshots move a block to another course id with rebind. It must keep every byte but the binding and the CRC:
+ * a seal covered them, and a block with an old whole-track wind would encode differently. */
+static void test_rebind(void) {
+    static unsigned char moved[GDX_SETTINGS_BLOCK_MAX_BYTES];
+    GdxCourseSettings in;
+    GdxCourseSettings out;
+    const uint32_t bind = 0x51DE3A11u;
+    const uint32_t other = 0x0BADF00Du;
+    int len;
+    int n;
+
+    make_settings(&in);
+    in.ring[7].windStrength = 50;
+    in.ring[7].windAngle = 90;
+    len = gdx_settings_encode(&in, bind, sBlock, sizeof(sBlock));
+    sBlock[16] = 90;
+    sBlock[18] = (unsigned char) (353 & 0xFF);
+    sBlock[19] = (unsigned char) (353 >> 8);
+    reseal(sBlock, (size_t) len);
+    n = gdx_settings_rebind(sBlock, (size_t) len, bind, other, moved, sizeof(moved));
+    CHECK((n == len) && (memcmp(moved, sBlock, 12) == 0) && (memcmp(moved + 16, sBlock + 16, (size_t) len - 20) == 0),
+          "rebind keeps an old whole-track wind byte for byte");
+    CHECK((gdx_settings_decode(moved, (size_t) n, other, &out) == GDX_SETTINGS_OK) &&
+              (gdx_settings_decode(moved, (size_t) n, bind, &out) == GDX_SETTINGS_ERR_BINDING),
+          "a rebound block belongs to the new binding only");
+    CHECK(gdx_settings_rebind(sBlock, (size_t) len, other, bind, moved, sizeof(moved)) == GDX_SETTINGS_ERR_BINDING,
+          "rebind refuses a block bound elsewhere");
+    CHECK(gdx_settings_rebind(sBlock, (size_t) len, bind, other, moved, (size_t) len - 1) == GDX_SETTINGS_ERR_FULL,
+          "rebind refuses a buffer too small for the block");
+    sBlock[len - 1] ^= 1;
+    CHECK(gdx_settings_rebind(sBlock, (size_t) len, bind, other, moved, sizeof(moved)) == GDX_SETTINGS_ERR_CRC,
+          "rebind refuses a damaged block");
+}
+
 static void test_store(void) {
     GdxCourseSettings in;
     GdxCourseSettings out;
@@ -308,8 +579,57 @@ static void test_view(void) {
               (fabsf(gdx_settings_view_magnet_range(9) - 150.0f) < 0.001f),
           "another ring length keeps only the track's values");
 
+    in.ring[2].padKind = GDX_SETTINGS_PAD_SUPER;
+    in.ring[2].padWidth = 60;
+    in.ring[4].padKind = GDX_SETTINGS_PAD_SUPER;
+    in.ring[4].padBoost = 200;
+    in.ring[6].padKind = GDX_SETTINGS_PAD_BRAKE;
+    gdx_settings_store_set("V.CRSD", &in);
+    gdx_settings_view_select_course("V.CRSD", 10);
+    CHECK((gdx_settings_view_pad_kind(2) == GDX_SETTINGS_VIEW_PAD_SUPER) && (gdx_settings_view_pad_width(2) == 60) &&
+              (fabsf(gdx_settings_view_pad_boost(2) - 1.5f) < 0.001f),
+          "a Super pad without a boost reads 150%");
+    CHECK(fabsf(gdx_settings_view_pad_boost(4) - 3.0f) < 0.001f, "a Super pad reads its own boost");
+    CHECK((gdx_settings_view_pad_kind(6) == GDX_SETTINGS_VIEW_PAD_BRAKE) &&
+              (fabsf(gdx_settings_view_pad_boost(6) - 1.0f) < 0.001f),
+          "a Brake pad has no boost");
+    CHECK((gdx_settings_view_pad_kind(0) == GDX_SETTINGS_VIEW_PAD_NORMAL) && (gdx_settings_view_pad_width(0) == 0) &&
+              (fabsf(gdx_settings_view_pad_boost(0) - 1.0f) < 0.001f),
+          "a point without a pad value reads as a stock dash");
+
+    CHECK((gdx_settings_view_wind_any() == 0) && (gdx_settings_view_wind_strength(2) == 0),
+          "a course without wind reads none");
+    in.ring[5].windStrength = 90;
+    in.ring[5].windAngle = 45;
+    gdx_settings_store_set("V.CRSD", &in);
+    gdx_settings_view_select_course("V.CRSD", 10);
+    CHECK(gdx_settings_view_wind_any() && (gdx_settings_view_wind_strength(5) == 90) &&
+              (gdx_settings_view_wind_angle(5) == 45) && (gdx_settings_view_wind_strength(4) == 0) &&
+              (gdx_settings_view_wind_strength(-1) == 0),
+          "a point reads its own wind and others read none");
+    gdx_settings_view_select_course("V.CRSD", 11);
+    CHECK((gdx_settings_view_wind_strength(5) == 0) && (gdx_settings_view_wind_any() == 0),
+          "another ring length drops the points' wind");
+
+    CHECK(gdx_settings_view_ai_scale() == 1.0f, "a track without a preset reads stock aggression");
+    CHECK(gdx_settings_view_ai_resolve(0.5f) == 0.5f, "a track without a preset keeps the player's option");
+    in.aiAggression = GDX_SETTINGS_AI_BRUTAL;
+    gdx_settings_store_set("V.CRSD", &in);
+    gdx_settings_view_select_course("V.CRSD", 10);
+    CHECK(gdx_settings_view_ai_scale() == 2.0f, "a Brutal track doubles the aggression");
+    CHECK(gdx_settings_view_ai_resolve(0.5f) == 1.0f, "a Brutal track doubles the player's option for the race");
+    gdx_settings_view_select_course("V.CRSD", 11);
+    CHECK(gdx_settings_view_ai_scale() == 2.0f, "the preset is a track value, so another ring length keeps it");
+    in.aiAggression = GDX_SETTINGS_AI_NORMAL;
+    gdx_settings_store_set("V.CRSD", &in);
+    gdx_settings_view_select_course("V.CRSD", 10);
+    CHECK((gdx_settings_view_ai_resolve(0.0f) == 1.0f) && (gdx_settings_view_ai_resolve(2.0f) == 1.0f),
+          "a Normal track forces 100% for the race whatever the player's option is");
+
     gdx_settings_view_select_course(NULL, 10);
     CHECK(gdx_settings_active() == NULL, "NULL clears the active settings");
+    CHECK(gdx_settings_view_ai_scale() == 1.0f, "no active settings reads stock aggression");
+    CHECK(gdx_settings_view_ai_resolve(0.5f) == 0.5f, "no active settings keeps the player's option");
     gdx_settings_view_select_course("MISSING.CRSD", 10);
     CHECK(gdx_settings_active() == NULL, "a course with no values clears them too");
     gdx_settings_store_clear();
@@ -348,6 +668,11 @@ static void test_branch_view(void) {
 int main(void) {
     test_branch_view();
     test_block();
+    test_pad_block();
+    test_wind_block();
+    test_ai_block();
+    test_ai_resolve();
+    test_rebind();
     test_store();
     test_sidecar();
     test_part_edge();

@@ -8,11 +8,13 @@
 #include "global.h"
 #include "fzx_expansion_kit.h"
 #include "fzx_course.h"
+#include "fzx_camera.h"
 #include "gdx_course_branch.h"
 #include "gdx_course_branch_edit.h"
 #include "gdx_course_branch_editor.h"
 #include "gdx_course_edit_input.h"
 #include "gdx_course_edit_undo.h"
+#include "gdx_wind.h"
 
 extern unk_807B3C20 D_802CB6D0;
 extern unk_80128690 D_80128690[GDX_COURSE_POINT_CAPACITY];
@@ -36,6 +38,9 @@ extern void gdx_course_edit_flash_message(const char* text);
 extern int gdx_course_state_edit_file_id(char* out, int outCap);
 extern int gdx_course_state_flush(void);
 extern void gdx_course_branch_build_editor(void);
+extern s32 gPartsStyleOption;
+extern s32 gWindTypeOption;
+extern Camera gCameras[];
 
 #define EDITOR_LABEL_CAP 96
 /* Squared game pixels, the mouse pick radius of ring points (gdx_course_edit_mouse.cpp). */
@@ -233,7 +238,45 @@ int gdx_course_branch_editor_point_parts(int point) {
     if (courseData->ice[point] != ICE_NONE) {
         parts |= GDX_BRANCH_EDITOR_PART_ICE;
     }
+    if (courseData->dash[point] != DASH_NONE) {
+        parts |= GDX_BRANCH_EDITOR_PART_DASH;
+    }
     return parts;
+}
+
+/* The WIND part (Parts tab). A click places the picked row's wind on the point's segment. New wind blows the
+ * camera's way; a segment that already has wind keeps its angle. The settings panel sets the exact angle. */
+static s32 editor_camera_wind_angle(void) {
+    s32 angle = gdx_wind_angle_of(gCameras[0].at.x - gCameras[0].eye.x, gCameras[0].at.z - gCameras[0].eye.z, 1.0f);
+
+    return (angle < 0) ? 0 : angle;
+}
+
+void gdx_course_branch_editor_wind_place(void) {
+    s32 point = D_800D6CA0.unk_0C;
+    s32 strength;
+    s32 current;
+    s32 own;
+
+    if (gPartsStyleOption != TRACK_PART_STYLE_WIND) {
+        return;
+    }
+    if ((point < 0) || (point >= D_802CB6D0.controlPointCount) || gInCourseEditTestRun) {
+        Audio_TriggerSystemSE(NA_SE_32);
+        return;
+    }
+    strength = gdx_wind_part_strength(gWindTypeOption);
+    current = gdx_branch_edit_point_extra(point, GDX_BRANCH_EDIT_EXTRA_WIND_STRENGTH);
+    if (current == strength) {
+        return;
+    }
+    own = (strength >= 1) && (strength <= GDX_WIND_STRENGTH_MAX);
+    func_xk2_800EF78C();
+    gdx_branch_edit_set_point_extra(point, GDX_BRANCH_EDIT_EXTRA_WIND_STRENGTH, strength);
+    if (own && ((current < 1) || (current > GDX_WIND_STRENGTH_MAX))) {
+        gdx_branch_edit_set_point_extra(point, GDX_BRANCH_EDIT_EXTRA_WIND_ANGLE, editor_camera_wind_angle());
+    }
+    Audio_TriggerSystemSE(NA_SE_39);
 }
 
 void gdx_course_branch_editor_apply_extra(void) {
@@ -274,10 +317,19 @@ void gdx_course_branch_editor_apply_extra(void) {
     if (request.is_track) {
         gdx_branch_edit_set_track_setting(request.which, request.value);
     } else {
+        /* A segment the panel gives wind to starts blowing the camera's way. */
+        s32 newWind = (request.which == GDX_BRANCH_EDIT_EXTRA_WIND_STRENGTH) && (request.value > 0) &&
+                      (gdx_branch_edit_point_extra(request.point, GDX_BRANCH_EDIT_EXTRA_WIND_STRENGTH) == 0);
+
         gdx_branch_edit_set_point_extra(request.point, request.which, request.value);
-        /* A width changes the strips the effects were built with. */
+        if (newWind) {
+            gdx_branch_edit_set_point_extra(request.point, GDX_BRANCH_EDIT_EXTRA_WIND_ANGLE,
+                                            editor_camera_wind_angle());
+        }
+        /* A width or a pad kind changes the strips and plates the effects were built with. */
         if ((request.which == GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH) || (request.which == GDX_BRANCH_EDIT_EXTRA_DIRT_WIDTH) ||
-            (request.which == GDX_BRANCH_EDIT_EXTRA_ICE_WIDTH)) {
+            (request.which == GDX_BRANCH_EDIT_EXTRA_ICE_WIDTH) || (request.which == GDX_BRANCH_EDIT_EXTRA_PAD_KIND) ||
+            (request.which == GDX_BRANCH_EDIT_EXTRA_PAD_WIDTH)) {
             D_xk2_800F7040 = 3;
         }
     }

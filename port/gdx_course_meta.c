@@ -73,7 +73,7 @@ int gdx_meta_is_empty(const GdxCourseMeta* meta) {
     return (meta == NULL) ||
            ((meta->author[0] == '\0') && (meta->editedBy[0] == '\0') && (meta->staffTime == 0) &&
             (meta->staffLaps == 0) && (meta->madeHere == 0) && (meta->hasSignature == 0) &&
-            (meta->splitsLength == 0));
+            (meta->splitsLength == 0) && (meta->ghostLength == 0));
 }
 
 /* 1 when a decoded split record belongs to the staff time: same lap count, last lap end equal to it. */
@@ -93,6 +93,21 @@ static int splits_match(const GdxCourseMeta* meta) {
 static void clear_splits(GdxCourseMeta* meta) {
     meta->splitsLength = 0;
     memset(meta->splits, 0, sizeof(meta->splits));
+}
+
+/* 1 when the stored ghost reads and belongs to the staff time: a Time Attack run with the same race time. */
+static int ghost_match(const GdxCourseMeta* meta) {
+    uint32_t raceTime = 0;
+
+    return (meta->ghostLength <= GDX_META_GHOST_MAX_BYTES) && (meta->staffTime != 0) &&
+           (meta->staffLaps == GDX_META_RECORD_LAPS) &&
+           (gdx_staff_ghost_check(meta->ghost, meta->ghostLength, &raceTime) == GDX_STAFF_GHOST_OK) &&
+           (raceTime == meta->staffTime);
+}
+
+static void clear_ghost(GdxCourseMeta* meta) {
+    meta->ghostLength = 0;
+    memset(meta->ghost, 0, sizeof(meta->ghost));
 }
 
 int gdx_meta_validate(const GdxCourseMeta* meta) {
@@ -120,6 +135,9 @@ int gdx_meta_validate(const GdxCourseMeta* meta) {
         return GDX_META_ERR_VALUE;
     }
     if ((meta->splitsLength != 0) && !splits_match(meta)) {
+        return GDX_META_ERR_VALUE;
+    }
+    if ((meta->ghostLength != 0) && !ghost_match(meta)) {
         return GDX_META_ERR_VALUE;
     }
     return GDX_META_OK;
@@ -180,6 +198,10 @@ int gdx_meta_encode(const GdxCourseMeta* meta, uint32_t bindCrc, unsigned char* 
         pos += put_record(out + pos, GDX_META_TAG_SIGNATURE, meta->signature, GDX_META_SIGNATURE_BYTES);
         count++;
     }
+    if (meta->ghostLength != 0) {
+        pos += put_record(out + pos, GDX_META_TAG_GHOST, meta->ghost, meta->ghostLength);
+        count++;
+    }
     out[0] = 'G';
     out[1] = 'X';
     out[2] = 'M';
@@ -233,6 +255,13 @@ static int decode_record(int tag, const unsigned char* value, size_t length, Gdx
             }
             memcpy(out->signature, value, GDX_META_SIGNATURE_BYTES);
             out->hasSignature = 1;
+            return GDX_META_OK;
+        case GDX_META_TAG_GHOST:
+            /* Checked against the staff time once the whole block is read. Too long for this build: skipped. */
+            if ((length >= 1) && (length <= GDX_META_GHOST_MAX_BYTES)) {
+                memcpy(out->ghost, value, length);
+                out->ghostLength = (uint16_t) length;
+            }
             return GDX_META_OK;
         default:
             /* A later build's record. Skipped, not kept. */
@@ -299,6 +328,10 @@ static int decode_block(const unsigned char* data, size_t length, uint32_t bindC
     if ((out->splitsLength != 0) && !splits_match(out)) {
         clear_splits(out);
     }
+    /* The same for the ghost: it only adds a Time Attack opponent. */
+    if ((out->ghostLength != 0) && !ghost_match(out)) {
+        clear_ghost(out);
+    }
     return gdx_meta_validate(out);
 }
 
@@ -327,6 +360,7 @@ void gdx_meta_clear_staff(GdxCourseMeta* meta) {
     meta->staffTime = 0;
     meta->staffLaps = 0;
     clear_splits(meta);
+    clear_ghost(meta);
 }
 
 void gdx_meta_apply_editor_save(GdxCourseMeta* meta, const char* localName, int keepStaff) {
@@ -336,6 +370,8 @@ void gdx_meta_apply_editor_save(GdxCourseMeta* meta, const char* localName, int 
     if (!keepStaff) {
         gdx_meta_clear_staff(meta);
     }
+    /* The replay drives positions on the layout it was recorded on, which this save replaces. */
+    clear_ghost(meta);
     meta->madeHere = 1;
     /* The signed course bytes are about to change. */
     meta->hasSignature = 0;
@@ -374,6 +410,7 @@ int gdx_meta_set_staff(GdxCourseMeta* meta, int raceLaps, uint32_t raceTime) {
     meta->staffTime = raceTime;
     meta->staffLaps = (uint8_t) raceLaps;
     clear_splits(meta);
+    clear_ghost(meta);
     return GDX_META_OK;
 }
 
@@ -407,6 +444,44 @@ int gdx_meta_get_splits(const GdxCourseMeta* meta, GdxCourseSplits* out) {
         return 0;
     }
     return gdx_splits_decode(meta->splits, meta->splitsLength, out) == 0;
+}
+
+int gdx_meta_set_ghost(GdxCourseMeta* meta, const GdxStaffGhost* ghost) {
+    /* Static: the encoded ghost is up to 16 KB. */
+    static unsigned char sBytes[GDX_META_GHOST_MAX_BYTES];
+    int length;
+
+    if (meta == NULL) {
+        return GDX_META_ERR_ARGS;
+    }
+    if (ghost == NULL) {
+        clear_ghost(meta);
+        return GDX_META_OK;
+    }
+    length = gdx_staff_ghost_encode(ghost, sBytes, sizeof(sBytes));
+    if ((length <= 0) || (meta->staffTime == 0) || (meta->staffLaps != GDX_META_RECORD_LAPS) ||
+        (ghost->raceTime != meta->staffTime)) {
+        return GDX_META_ERR_VALUE;
+    }
+    clear_ghost(meta);
+    memcpy(meta->ghost, sBytes, (size_t) length);
+    meta->ghostLength = (uint16_t) length;
+    return GDX_META_OK;
+}
+
+int gdx_meta_has_ghost(const GdxCourseMeta* meta) {
+    return (meta != NULL) && (meta->ghostLength != 0) && ghost_match(meta);
+}
+
+int gdx_meta_get_ghost(const GdxCourseMeta* meta, GdxStaffGhost* out) {
+    if (out == NULL) {
+        return 0;
+    }
+    if (!gdx_meta_has_ghost(meta)) {
+        memset(out, 0, sizeof(*out));
+        return 0;
+    }
+    return gdx_staff_ghost_decode(meta->ghost, meta->ghostLength, out) == GDX_STAFF_GHOST_OK;
 }
 
 int gdx_meta_format_time(uint32_t raceTime, char* out, size_t cap) {
@@ -605,7 +680,8 @@ unsigned long gdx_meta_store_revision(void) {
 }
 
 int gdx_meta_store_encode_file(unsigned char* out, size_t cap) {
-    unsigned char block[GDX_META_BLOCK_MAX_BYTES];
+    /* Static: with a staff ghost a block is about 19 KB. */
+    static unsigned char block[GDX_META_BLOCK_MAX_BYTES];
     size_t pos = GDX_META_FILE_HEADER_SIZE;
     int count = 0;
     int i;
@@ -737,7 +813,9 @@ int gdx_meta_store_restore_file(const unsigned char* data, size_t length) {
  * ------------------------------------------------------------------------------- */
 
 int gdx_meta_sidecar_encode(const GdxMetaSidecarEntry* entries, int count, unsigned char* out, size_t cap) {
-    unsigned char block[GDX_META_BLOCK_MAX_BYTES];
+    /* Static, like shared: with a staff ghost each is about 19 KB. */
+    static unsigned char block[GDX_META_BLOCK_MAX_BYTES];
+    static GdxCourseMeta shared;
     size_t pos = GDX_META_SIDECAR_HEADER_SIZE;
     int written = 0;
     int i;
@@ -747,7 +825,6 @@ int gdx_meta_sidecar_encode(const GdxMetaSidecarEntry* entries, int count, unsig
     }
     for (i = 0; i < count; i++) {
         const GdxMetaSidecarEntry* entry = &entries[i];
-        GdxCourseMeta shared;
         size_t idLen;
         int blockLen;
 

@@ -160,6 +160,9 @@ Options live in the enhancement menu, which opens with **F1**. Editing tools are
   [sharing guide](docs/modding/SHARING_TRACKS_AND_MACHINES.md).
 - **Import from a disk image (experimental):** read tracks and machines straight out of a 64DD disk
   dump from an emulator or a console.
+- **G-Diffuser Companion (Windows):** a separate desktop program that installs replacement music
+  and builds texture, model and audio packs, with checks before every build. See the
+  [Companion guide](docs/COMPANION.md).
 - **ROM hacks (experimental):** play a hack packaged as an `.o2r` archive from `mods/~romhacks/`,
   or build one from a patched US rev0 ROM. Each hack has its own save and its own Continue Cup,
   and brings its courses, music, skylines, buildings and text. Only assets and courses come
@@ -185,6 +188,8 @@ Options live in the enhancement menu, which opens with **F1**. Editing tools are
 - **Discord Rich Presence:** off by default; when enabled it shows your mode, course, lap and
   position on your Discord profile, with per-field privacy toggles so you choose exactly what is
   visible (`gEnhancements.Online.DiscordPresence`).
+- **G-NET card:** the main menu shows its modes in a 3x3 grid with a ninth card, G-NET, that opens
+  **Online > LAN Lobby**. Card art by Heebeejeebees.
 - **Developer tools:** live Stats, an optional top-right FPS/frame-time overlay, a command
   Console, and the Fast3D graphics debugger under **Dev Tools**.
 

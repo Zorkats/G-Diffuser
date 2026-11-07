@@ -14,6 +14,7 @@ typedef struct EditState {
     uint8_t lavaMode;
     uint8_t magnetStrength;
     uint8_t magnetRange;
+    uint8_t aiAggression;
 } EditState;
 
 /* Fails to compile when the undo snapshot size is too small for the state. */
@@ -33,6 +34,7 @@ static void edit_build_settings(GdxCourseSettings* out, int ringCount, int skipN
     out->lavaMode = sLive.lavaMode;
     out->magnetStrength = sLive.magnetStrength;
     out->magnetRange = sLive.magnetRange;
+    out->aiAggression = sLive.aiAggression;
     for (i = 0; (i < ringCount) && (i < GDX_BRANCH_EDIT_MAX_POINTS); i++) {
         out->ring[i] = sLive.ringExtras[i];
     }
@@ -186,6 +188,7 @@ int gdx_branch_edit_select(const char* courseId, int ringCount) {
         sLive.lavaMode = sLoaded.lavaMode;
         sLive.magnetStrength = sLoaded.magnetStrength;
         sLive.magnetRange = sLoaded.magnetRange;
+        sLive.aiAggression = sLoaded.aiAggression;
         if ((sLoaded.ringCount == ringCount) && (ringCount <= GDX_BRANCH_EDIT_MAX_POINTS)) {
             int f;
             int i;
@@ -294,6 +297,11 @@ static int extra_clamp(int which, int value) {
     } else if (which == GDX_BRANCH_EDIT_EXTRA_MAGNET_RANGE) {
         min = GDX_SETTINGS_RANGE_MIN;
         max = GDX_SETTINGS_RANGE_MAX;
+    } else if (which == GDX_BRANCH_EDIT_EXTRA_PAD_KIND) {
+        max = GDX_SETTINGS_PAD_BRAKE;
+    } else if (which == GDX_BRANCH_EDIT_EXTRA_PAD_BOOST) {
+        min = GDX_SETTINGS_PAD_BOOST_MIN;
+        max = GDX_SETTINGS_PAD_BOOST_MAX;
     }
     if (value <= 0) {
         return 0;
@@ -313,9 +321,32 @@ static uint8_t* extra_field(GdxPointExtras* extras, int which) {
             return &extras->magnetStrength;
         case GDX_BRANCH_EDIT_EXTRA_MAGNET_RANGE:
             return &extras->magnetRange;
+        case GDX_BRANCH_EDIT_EXTRA_PAD_KIND:
+            return &extras->padKind;
+        case GDX_BRANCH_EDIT_EXTRA_PAD_WIDTH:
+            return &extras->padWidth;
+        case GDX_BRANCH_EDIT_EXTRA_PAD_BOOST:
+            return &extras->padBoost;
         default:
             return NULL;
     }
+}
+
+static int wind_angle_wrap(int value) {
+    value %= 360;
+    return (value < 0) ? (value + 360) : value;
+}
+
+/* 0 or 1..100; a value past 100 is capped. */
+static uint8_t wind_strength_clamp(int value) {
+    if (value <= 0) {
+        return 0;
+    }
+    return (uint8_t) ((value > GDX_SETTINGS_WIND_MAX) ? GDX_SETTINGS_WIND_MAX : value);
+}
+
+static int wind_blows(int strength) {
+    return (strength >= 1) && (strength <= GDX_SETTINGS_WIND_MAX);
 }
 
 int gdx_branch_edit_point_extra(int point, int which) {
@@ -323,6 +354,12 @@ int gdx_branch_edit_point_extra(int point, int which) {
 
     if ((point < 0) || (point >= sLive.set.ringCount) || (point >= GDX_BRANCH_EDIT_MAX_POINTS)) {
         return 0;
+    }
+    if (which == GDX_BRANCH_EDIT_EXTRA_WIND_STRENGTH) {
+        return sLive.ringExtras[point].windStrength;
+    }
+    if (which == GDX_BRANCH_EDIT_EXTRA_WIND_ANGLE) {
+        return sLive.ringExtras[point].windAngle;
     }
     field = extra_field(&sLive.ringExtras[point], which);
     return (field != NULL) ? *field : 0;
@@ -334,9 +371,34 @@ void gdx_branch_edit_set_point_extra(int point, int which, int value) {
     if ((point < 0) || (point >= sLive.set.ringCount) || (point >= GDX_BRANCH_EDIT_MAX_POINTS)) {
         return;
     }
+    if (which == GDX_BRANCH_EDIT_EXTRA_WIND_STRENGTH) {
+        GdxPointExtras* extras = &sLive.ringExtras[point];
+
+        extras->windStrength = wind_strength_clamp(value);
+        if (!wind_blows(extras->windStrength)) {
+            extras->windAngle = 0;
+        }
+        edit_publish();
+        return;
+    }
+    if (which == GDX_BRANCH_EDIT_EXTRA_WIND_ANGLE) {
+        /* Only a point with its own wind has a direction, so the stored values keep one encoding. */
+        if (wind_blows(sLive.ringExtras[point].windStrength)) {
+            sLive.ringExtras[point].windAngle = (uint16_t) wind_angle_wrap(value);
+            edit_publish();
+        }
+        return;
+    }
     field = extra_field(&sLive.ringExtras[point], which);
+    if ((which == GDX_BRANCH_EDIT_EXTRA_PAD_BOOST) && (sLive.ringExtras[point].padKind != GDX_SETTINGS_PAD_SUPER)) {
+        /* Only a Super pad has a boost, so the stored values keep one encoding. */
+        return;
+    }
     if (field != NULL) {
         *field = (uint8_t) extra_clamp(which, value);
+        if ((which == GDX_BRANCH_EDIT_EXTRA_PAD_KIND) && (*field != GDX_SETTINGS_PAD_SUPER)) {
+            sLive.ringExtras[point].padBoost = 0;
+        }
         edit_publish();
     }
 }
@@ -349,6 +411,8 @@ int gdx_branch_edit_track_setting(int which) {
             return sLive.magnetStrength;
         case GDX_BRANCH_EDIT_TRACK_RANGE:
             return sLive.magnetRange;
+        case GDX_BRANCH_EDIT_TRACK_AI:
+            return sLive.aiAggression;
         default:
             return 0;
     }
@@ -367,6 +431,11 @@ void gdx_branch_edit_set_track_setting(int which, int value) {
             break;
         case GDX_BRANCH_EDIT_TRACK_RANGE:
             sLive.magnetRange = (uint8_t) extra_clamp(GDX_BRANCH_EDIT_EXTRA_MAGNET_RANGE, value);
+            break;
+        case GDX_BRANCH_EDIT_TRACK_AI:
+            sLive.aiAggression = (uint8_t) ((value < GDX_SETTINGS_AI_TRACK)    ? GDX_SETTINGS_AI_TRACK
+                                            : (value > GDX_SETTINGS_AI_BRUTAL) ? GDX_SETTINGS_AI_BRUTAL
+                                                                               : value);
             break;
         default:
             return;
@@ -529,11 +598,20 @@ static void extras_on_insert(int newIndex, const GdxBranchEditPoint* ring, int r
         const int before = (newIndex - 1 + ringCount) % ringCount;
         const GdxPointExtras* old = &sLive.ringExtras[before];
 
+        /* Wind is not a part: the new point splits a segment, so both halves keep its wind. */
+        fresh.windStrength = old->windStrength;
+        fresh.windAngle = old->windAngle;
         if ((ring[newIndex].parts[0] != GDX_BRANCH_EDIT_PART_NONE) &&
             (ring[newIndex].parts[0] == ring[before].parts[0])) {
             fresh.pitWidth = old->pitWidth;
             fresh.magnetStrength = old->magnetStrength;
             fresh.magnetRange = old->magnetRange;
+        }
+        if ((ring[newIndex].parts[1] != GDX_BRANCH_EDIT_PART_NONE) &&
+            (ring[newIndex].parts[1] == ring[before].parts[1])) {
+            fresh.padKind = old->padKind;
+            fresh.padWidth = old->padWidth;
+            fresh.padBoost = old->padBoost;
         }
         if ((ring[newIndex].parts[2] != GDX_BRANCH_EDIT_PART_NONE) &&
             (ring[newIndex].parts[2] == ring[before].parts[2])) {

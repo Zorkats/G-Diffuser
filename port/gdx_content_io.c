@@ -584,10 +584,11 @@ static void gdx_content_sign_meta(const char* courseId, int index, GdxCourseMeta
  * no track has any, -1 on failure. */
 static int gdx_content_write_meta(const char* gdxcPath, const char* const* names, const char* extension,
                                   const uint32_t* payloadCrcs, int count) {
+    /* Static: with staff ghosts the metadata and the file run to about 115 KB each. Exports run one at a time. */
+    static GdxCourseMeta metas[GDX_CONTENT_BUNDLE_MAX_TRACKS];
+    static unsigned char bytes[GDX_META_SIDECAR_WRITE_MAX_BYTES];
     char courseIds[GDX_CONTENT_BUNDLE_MAX_TRACKS][GDX_BRANCH_COURSE_ID_MAX + 1];
-    GdxCourseMeta metas[GDX_CONTENT_BUNDLE_MAX_TRACKS];
     GdxMetaSidecarEntry entries[GDX_CONTENT_BUNDLE_MAX_TRACKS];
-    unsigned char bytes[GDX_META_SIDECAR_WRITE_MAX_BYTES];
     unsigned char seed[GDX_PROFILE_KEYS_SEED_BYTES];
     char metaPath[1600];
     size_t pathLen = strlen(gdxcPath);

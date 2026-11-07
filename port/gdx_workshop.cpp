@@ -44,6 +44,9 @@
 #define STBI_WRITE_NO_STDIO_DEPRECATION
 #include "gdx_stb_image_write.h"
 
+#include "gdx_alt_assets.h" // GdxAltAssetsDirtyShadowed
+#include "gdx_palette_crc.h"
+
 // Loaded-asset registry reverse lookup (port/AssetLoader.cpp): decoded RDRAM ptr -> asset key.
 extern "C" const char* GDiffuser_LookupLoadedAssetKey(const void* buffer, size_t minSize, int requireUnmodified);
 // Interpreter texture-cache full clear (libultraship/src/fast/interpreter.cpp).
@@ -491,20 +494,23 @@ std::vector<size_t> packOrderPermutation(const std::vector<std::pair<std::string
 }
 
 // Cached "textures/pack/<key>" existence probe, shared by the single-image and per-tile atlas
-// lookups. Caller holds gCacheMutex. Returns the override path, or empty for "checked, no override".
+// lookups. With alt assets on, "alt/textures/pack/<key>" wins (gdx_alt_assets.h); the switch bumps
+// the epoch, so a cached answer never outlives it. Caller holds gCacheMutex. Returns the override
+// path, or empty for "checked, no override".
 const std::string& lookupOverrideCached(const std::string& key) {
     auto it = gOverrideCache.find(key);
     if (it != gOverrideCache.end()) {
         return it->second;
     }
     // First miss for this key this epoch: consult the ResourceManager exactly once.
-    std::string overridePath = std::string("textures/pack/") + key;
-    bool exists = false;
-    auto am = archiveManager();
+    std::string overridePath;
+    auto ctx = Ship::Context::GetInstance();
+    auto rm = (ctx != nullptr) ? ctx->GetResourceManager() : nullptr;
+    auto am = (rm != nullptr) ? rm->GetArchiveManager() : nullptr;
     if (am != nullptr) {
-        exists = am->HasFile(overridePath);
+        overridePath = GdxAltAssetsPackOverridePath(*am, key, rm->IsAltAssetsEnabled());
     }
-    auto ins = gOverrideCache.emplace(key, exists ? overridePath : std::string());
+    auto ins = gOverrideCache.emplace(key, std::move(overridePath));
     return ins.first->second;
 }
 
@@ -617,11 +623,152 @@ extern "C" const char* GdxWorkshopLookupAtlasTileOverride(const char* baseKey, s
     return cached.empty() ? nullptr : cached.c_str();
 }
 
+// ── Palette variants (HT) ─────────────────────────────────────────────────────────────────────────
+// A CI texture a GLideN64 pack holds under several palettes ships one image per palette CRC at
+// textures/pack/<key>.pal/<CC>-<XXXXXXXX> (gdx_palette_crc.h). The index maps each base key to its
+// cimax and CRC -> path, built once per pack epoch from the archive listing.
+namespace {
+
+struct PaletteVariantSet {
+    unsigned cimax = 0;
+    std::unordered_map<uint32_t, std::string> byCrc;
+};
+
+std::unordered_map<std::string, PaletteVariantSet> gPaletteVariants;
+uint32_t gPaletteVariantsEpoch = 0;
+bool gPaletteVariantsBuilt = false;
+
+// Adds every well-formed variant under prefix. An entry already present wins, so the alt/ listing,
+// added first, shadows the plain one per palette, like alt/ shadows a plain override.
+void addPaletteVariants(Ship::ArchiveManager& am, const std::string& prefix, int* refused) {
+    auto files = am.ListFiles(prefix + "*");
+    if (files == nullptr) {
+        return;
+    }
+    for (const std::string& path : *files) {
+        if (path.size() <= prefix.size() || path.compare(0, prefix.size(), prefix) != 0 ||
+            path.find(GDX_PALETTE_VARIANT_DIR) == std::string::npos) {
+            continue;
+        }
+        const char* rel = path.c_str() + prefix.size();
+        size_t keyLen = 0;
+        const char* leaf = nullptr;
+        unsigned cimax = 0;
+        uint32_t crc = 0;
+        if (gdx_palette_variant_split(rel, &keyLen, &leaf) == 0 ||
+            gdx_palette_variant_parse_leaf(leaf, std::strlen(leaf), &cimax, &crc) == 0) {
+            (*refused)++;
+            continue;
+        }
+        PaletteVariantSet& set = gPaletteVariants[std::string(rel, keyLen)];
+        if (set.byCrc.empty()) {
+            set.cimax = cimax;
+        } else if (set.cimax != cimax) {
+            // Every variant of one texture hashes the same entry count; a stray one is ignored.
+            (*refused)++;
+            continue;
+        }
+        set.byCrc.emplace(crc, path);
+    }
+}
+
+// Caller holds gCacheMutex.
+void ensurePaletteVariants() {
+    if (gPaletteVariantsBuilt && gPaletteVariantsEpoch == gPackEpoch) {
+        return;
+    }
+    gPaletteVariants.clear();
+    gPaletteVariantsBuilt = true;
+    gPaletteVariantsEpoch = gPackEpoch;
+    auto ctx = Ship::Context::GetInstance();
+    auto rm = (ctx != nullptr) ? ctx->GetResourceManager() : nullptr;
+    auto am = (rm != nullptr) ? rm->GetArchiveManager() : nullptr;
+    if (am == nullptr) {
+        return;
+    }
+    int refused = 0;
+    if (rm->IsAltAssetsEnabled()) {
+        addPaletteVariants(*am, Ship::IResource::gAltAssetPrefix + "textures/pack/", &refused);
+    }
+    addPaletteVariants(*am, "textures/pack/", &refused);
+    if (!gPaletteVariants.empty() || refused != 0) {
+        gdx_port_logf("[workshop] palette variants: %zu texture(s), %d entry(ies) refused\n", gPaletteVariants.size(),
+                      refused);
+    }
+}
+
+} // namespace
+
+extern "C" int GdxWorkshopPaletteVariantsPresent(void) {
+    std::lock_guard<std::mutex> lock(gCacheMutex);
+    ensurePaletteVariants();
+    return gPaletteVariants.empty() ? 0 : 1;
+}
+
+extern "C" const char* GdxWorkshopLookupPaletteVariant(const char* baseKey, const uint8_t* palette,
+                                                       size_t paletteSize) {
+    if (baseKey == nullptr || baseKey[0] == '\0' || palette == nullptr) {
+        return nullptr;
+    }
+    std::lock_guard<std::mutex> lock(gCacheMutex);
+    ensurePaletteVariants();
+    auto set = gPaletteVariants.find(baseKey);
+    if (set == gPaletteVariants.end()) {
+        return nullptr;
+    }
+    uint32_t crc = 0;
+    if (gdx_palette_crc(palette, paletteSize, set->second.cimax + 1u, &crc) == 0) {
+        return nullptr;
+    }
+    auto hit = set->second.byCrc.find(crc);
+    return hit == set->second.byCrc.end() ? nullptr : hit->second.c_str();
+}
+
 // Pack epoch for other subsystems that cache per-mount probe results (gdx_audio_seq_packs.cpp);
 // gPackEpoch itself stays file-local.
 extern "C" uint32_t GdxWorkshopPackEpoch(void) {
     std::lock_guard<std::mutex> lock(gCacheMutex);
     return gPackEpoch;
+}
+
+namespace {
+
+void bumpPackEpoch() {
+    std::lock_guard<std::mutex> lock(gCacheMutex);
+    gPackEpoch++;
+    gOverrideCache.clear();
+    gOverrideSizeCache.clear();
+}
+
+} // namespace
+
+extern "C" int gdx_workshop_alt_assets_wanted(void) {
+    return (CVarGetInteger("gEnhancements.Workshop.TexturePacks", 0) != 0) &&
+           (CVarGetInteger("gEnhancements.Workshop.AltAssets", 0) != 0);
+}
+
+extern "C" void GdxWorkshopApplyAltAssets(int refreshCaches) {
+    auto ctx = Ship::Context::GetInstance();
+    auto rm = (ctx != nullptr) ? ctx->GetResourceManager() : nullptr;
+    if (rm == nullptr) {
+        return;
+    }
+    const bool wanted = gdx_workshop_alt_assets_wanted() != 0;
+    if (rm->IsAltAssetsEnabled() == wanted) {
+        return;
+    }
+    rm->SetAltAssetsEnabled(wanted);
+    gdx_port_logf("[workshop] alt/ assets %s\n", wanted ? "on" : "off");
+    if (refreshCaches == 0) {
+        return;
+    }
+    // Turning it off needs no resource work: an alt/ resource is cached under its own alt/ path,
+    // so the base path loads the stock resource again.
+    if (wanted) {
+        GdxAltAssetsDirtyShadowed(*rm);
+    }
+    gfx_texture_cache_clear();
+    bumpPackEpoch();
 }
 
 // ── Texture dump ──────────────────────────────────────────────────────────────────────────────────
@@ -767,6 +914,7 @@ extern "C" void GdxWorkshopReload(char* outStatus, size_t outStatusLen) {
     rm->DirtyResources("audio/sample/*");
     rm->DirtyResources("audio/font/*");
     rm->DirtyResources("models/pack/*");
+    rm->DirtyResources("alt/*");
 
     // Quiesce the resource thread pool before touching the ArchiveManager: DirtyResources queues an
     // async worker that iterates the archive manager's file table, and remounting archives under it
@@ -830,15 +978,19 @@ extern "C" void GdxWorkshopReload(char* outStatus, size_t outStatusLen) {
     // AddArchive/RemoveArchive rebuild the virtual file system internally, so no explicit
     // ResetVirtualFileSystem call is needed here (and the method is protected anyway).
 
+    // A remount can add alt/ entries the cache holds as misses, or shadow base resources already
+    // cached, so both are refreshed against the new pack set.
+    GdxWorkshopApplyAltAssets(0);
+    if (rm->IsAltAssetsEnabled()) {
+        rm->DirtyResources("alt/*");
+        rm->WaitForAsyncTasks();
+        GdxAltAssetsDirtyShadowed(*rm);
+    }
+
     gfx_texture_cache_clear();
 
     // Bump the pack epoch to invalidate the override cache.
-    {
-        std::lock_guard<std::mutex> lock(gCacheMutex);
-        gPackEpoch++;
-        gOverrideCache.clear();
-        gOverrideSizeCache.clear();
-    }
+    bumpPackEpoch();
 
     // Model-pack trampolines repoint D_800CDDB0 entries; re-apply present keys and
     // restore stock for removed ones (or all of them when the master switch is off).
@@ -858,7 +1010,13 @@ int GdxWorkshopOverrideCount() {
         return 0;
     }
     auto files = am->ListFiles("textures/pack/*");
-    return (files != nullptr) ? static_cast<int>(files->size()) : 0;
+    int count = (files != nullptr) ? static_cast<int>(files->size()) : 0;
+    // alt/ entries count while they are in use; an entry in both places counts twice.
+    if (gdx_workshop_alt_assets_wanted() != 0) {
+        auto alt = am->ListFiles("alt/textures/pack/*");
+        count += (alt != nullptr) ? static_cast<int>(alt->size()) : 0;
+    }
+    return count;
 }
 
 std::string GdxWorkshopModsDir(bool createIfMissing) {
