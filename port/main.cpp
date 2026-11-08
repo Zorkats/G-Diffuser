@@ -23,12 +23,13 @@
 #include "gdx_gui.h"
 #include "gdx_menu.h"
 #include "libultraship/window/gui/GfxDebuggerWindow.h"
-#include "libultraship/window/gui/InputEditorWindow.h"
+#include "gdx_input_editor.h"
 #include "gdx_ghost_window.h"
 #include "gdx_content_window.h"
 #include "gdx_hackmods.h"
 #include "gdx_hackmods_window.h"
 #include "gdx_input_viewer.h"
+#include "gdx_physical_input.h"
 #include "gdx_console_log.h"
 #include "port_log.h"
 #include "rom_buffer.h"
@@ -523,6 +524,7 @@ static void gdxSyncGamepadPortRouting(const std::shared_ptr<Ship::ControlDeck>& 
         if (controller != nullptr &&
             !controller->HasMappingsForPhysicalDeviceType(Ship::PhysicalDeviceType::SDLGamepad)) {
             controller->AddDefaultMappings(Ship::PhysicalDeviceType::SDLGamepad);
+            GdxPhysicalInput::Invalidate();
             gdx_port_logf("[input] port %d: seeded default gamepad mappings\n", port + 1);
         }
     }
@@ -1180,6 +1182,7 @@ int main(int argc, char** argv) {
     auto gui = std::make_shared<GdxFast3dGui>(std::vector<std::shared_ptr<Ship::GuiWindow>>());
     logStep("construct Fast3dWindow(gui)");
     auto window = std::make_shared<Fast::Fast3dWindow>(gui);
+    window->SetKeyboardEventCallback(GdxPhysicalInput::ProcessKeyboardEvent);
     logStep("InitWindow");            ctx->InitWindow(window);
 
     // The LUS dev/input windows the Gui ctor does NOT auto-add, then the full-screen menu
@@ -1192,7 +1195,7 @@ int main(int argc, char** argv) {
         // port target (cvars.cmake is include()d only inside libultraship/src).
         pgui->AddGuiWindow(std::make_shared<LUS::GfxDebuggerWindow>("gGfxDebuggerEnabled", "Gfx Debugger"));
         pgui->AddGuiWindow(
-            std::make_shared<LUS::InputEditorWindow>("gControllerConfigurationEnabled", "Input Editor"));
+            std::make_shared<GdxInputEditor>("gControllerConfigurationEnabled", "Input Editor"));
         pgui->AddGuiWindow(
             std::make_shared<GdxGhostWindow>("gEnhancements.Practice.GhostBrowserOpen", "Ghost Browser"));
         // The F12 unified Export/Import shell; v1 hosts E1 .gdxc track/machine export.
