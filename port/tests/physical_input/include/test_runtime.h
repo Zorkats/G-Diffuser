@@ -103,6 +103,7 @@ class Context {
     std::shared_ptr<ControlDeck> deck = std::make_shared<ControlDeck>();
     std::shared_ptr<Window> window = std::make_shared<Window>();
     static auto GetInstance() { return current; }
+    static std::string GetAppDirectoryPath(const std::string& = "") { return "."; }
     auto GetControlDeck() { return deck; }
     auto GetWindow() { return window; }
     auto GetConsoleVariables() { return std::make_shared<FakeCVars>(); }

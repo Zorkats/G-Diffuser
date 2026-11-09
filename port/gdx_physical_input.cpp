@@ -1,4 +1,13 @@
 // G-Diffuser: per-action physical overrides, independent of the legacy controller configuration.
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#endif
+
 #include "gdx_physical_input.h"
 
 #include "libultraship/bridge/consolevariablebridge.h"
@@ -21,6 +30,10 @@
 #include <set>
 #include <string>
 #include <tuple>
+
+#include <rapidjson/document.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 
 // LUS's CVar compile definitions are local to its source directory; retain the same default here.
 #ifndef CVAR_SIMULATED_INPUT_LAG
@@ -212,7 +225,7 @@ const Bindings& Effective(int port, int context, int output) {
     bank.inheritedMask = mask;
     return bank.inheritedBindings;
 }
-void Store(int port, int context, int output, const Bindings& bindings, bool configured) {
+void Store(int port, int context, int output, const Bindings& bindings, bool configured, bool save = true) {
     const auto prefix = Prefix(port, context, output);
     int count = 0;
     for (const auto& binding : bindings) {
@@ -233,7 +246,9 @@ void Store(int port, int context, int output, const Bindings& bindings, bool con
         bank.inheritedLoaded = false;
     }
     Refresh(port, context, output);
-    CVarSave();
+    if (save) {
+        CVarSave();
+    }
 }
 
 // Sample even unbound sources, independently of UI blockers. Otherwise a held input could acquire a
@@ -395,6 +410,160 @@ Binding CaptureSDL(int port, int output) {
     }
     return Ship::ButtonMappingFactory::CreateButtonMappingFromSDLInput(port, gdx_input_actions_output_bit(output));
 }
+
+std::string ExportGamepadProfile(int port, const std::string& name, std::string* error) {
+    if (error != nullptr) {
+        error->clear();
+    }
+    if (port < 0 || port >= kPorts) {
+        if (error != nullptr) *error = "Select a valid player port first.";
+        return {};
+    }
+
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    writer.StartObject();
+    writer.Key("format"); writer.String("gdiffuser.gamepad-profile");
+    writer.Key("version"); writer.Int(1);
+    writer.Key("name"); writer.String(name.c_str(), static_cast<rapidjson::SizeType>(name.size()));
+    writer.Key("contexts"); writer.StartObject();
+    for (int context = 0; context < GDX_INPUT_CONTEXT_COUNT; ++context) {
+        writer.Key(kContexts[context]); writer.StartObject();
+        for (int output = 0; output < GDX_INPUT_OUT_COUNT; ++output) {
+            writer.Key(kOutputs[output]); writer.StartArray();
+            for (const auto& binding : Effective(port, context, output)) {
+                Descriptor descriptor;
+                if (!Describe(binding, descriptor) ||
+                    (descriptor.type != SDLButton && descriptor.type != SDLAxis)) {
+                    continue;
+                }
+                writer.StartObject();
+                writer.Key("type"); writer.String(descriptor.type == SDLButton ? "button" : "axis");
+                writer.Key("code"); writer.Int(descriptor.code);
+                writer.Key("direction"); writer.Int(descriptor.direction);
+                writer.EndObject();
+            }
+            writer.EndArray();
+        }
+        writer.EndObject();
+    }
+    writer.EndObject();
+    writer.EndObject();
+    return std::string(buffer.GetString(), buffer.GetSize());
+}
+
+bool ImportGamepadProfile(int port, const std::string& json, std::string* error) {
+    if (error != nullptr) {
+        error->clear();
+    }
+    auto fail = [error](const char* message) {
+        if (error != nullptr) *error = message;
+        return false;
+    };
+    constexpr size_t kMaxProfileBytes = 1024 * 1024;
+    if (port < 0 || port >= kPorts) {
+        return fail("Select a valid player port first.");
+    }
+    if (json.empty() || json.size() > kMaxProfileBytes) {
+        return fail("The profile file is empty or too large.");
+    }
+
+    rapidjson::Document document;
+    document.Parse<rapidjson::kParseIterativeFlag>(json.data(), json.size());
+    if (document.HasParseError() || !document.IsObject()) {
+        return fail("The profile is not valid JSON.");
+    }
+    const auto format = document.FindMember("format");
+    const auto version = document.FindMember("version");
+    const auto contexts = document.FindMember("contexts");
+    if (format == document.MemberEnd() || !format->value.IsString() ||
+        std::string(format->value.GetString(), format->value.GetStringLength()) != "gdiffuser.gamepad-profile" ||
+        version == document.MemberEnd() || !version->value.IsInt() || version->value.GetInt() != 1 ||
+        contexts == document.MemberEnd() || !contexts->value.IsObject()) {
+        return fail("This is not a supported G-Diffuser gamepad profile.");
+    }
+
+    using ProfileRows = std::array<std::array<std::vector<Descriptor>, GDX_INPUT_OUT_COUNT>,
+                                   GDX_INPUT_CONTEXT_COUNT>;
+    ProfileRows profile;
+    for (int context = 0; context < GDX_INPUT_CONTEXT_COUNT; ++context) {
+        const auto contextMember = contexts->value.FindMember(kContexts[context]);
+        if (contextMember == contexts->value.MemberEnd() || !contextMember->value.IsObject()) {
+            return fail("The profile is missing an action context.");
+        }
+        for (int output = 0; output < GDX_INPUT_OUT_COUNT; ++output) {
+            const auto rowMember = contextMember->value.FindMember(kOutputs[output]);
+            if (rowMember == contextMember->value.MemberEnd() || !rowMember->value.IsArray()) {
+                return fail("The profile is missing an action row.");
+            }
+            std::set<Descriptor> seen;
+            for (const auto& item : rowMember->value.GetArray()) {
+                if (!item.IsObject()) {
+                    return fail("The profile contains an invalid gamepad binding.");
+                }
+                const auto type = item.FindMember("type");
+                const auto code = item.FindMember("code");
+                const auto direction = item.FindMember("direction");
+                if (type == item.MemberEnd() || !type->value.IsString() || code == item.MemberEnd() ||
+                    !code->value.IsInt() || direction == item.MemberEnd() || !direction->value.IsInt()) {
+                    return fail("The profile contains an incomplete gamepad binding.");
+                }
+                const std::string typeName(type->value.GetString(), type->value.GetStringLength());
+                const int sourceType = typeName == "button" ? SDLButton : typeName == "axis" ? SDLAxis : 0;
+                const Descriptor descriptor{ sourceType, code->value.GetInt(), direction->value.GetInt() };
+                if (sourceType == 0 || Create(port, output, descriptor) == nullptr) {
+                    return fail("The profile contains an unsupported gamepad button or axis.");
+                }
+                if (seen.insert(descriptor).second) {
+                    if (profile[context][output].size() >= kMaxBindings) {
+                        return fail("A profile action row contains too many bindings.");
+                    }
+                    profile[context][output].push_back(descriptor);
+                }
+            }
+        }
+    }
+
+    std::array<std::array<Bindings, GDX_INPUT_OUT_COUNT>, GDX_INPUT_CONTEXT_COUNT> updated;
+    std::array<std::array<bool, GDX_INPUT_OUT_COUNT>, GDX_INPUT_CONTEXT_COUNT> changed{};
+    bool anyChanged = false;
+    for (int context = 0; context < GDX_INPUT_CONTEXT_COUNT; ++context) {
+        for (int output = 0; output < GDX_INPUT_OUT_COUNT; ++output) {
+            for (const auto& binding : Effective(port, context, output)) {
+                Descriptor descriptor;
+                if (!Describe(binding, descriptor)) {
+                    continue;
+                }
+                if (descriptor.type == SDLButton || descriptor.type == SDLAxis) {
+                    changed[context][output] = true;
+                } else {
+                    updated[context][output].push_back(Create(port, output, descriptor));
+                }
+            }
+            for (const auto& descriptor : profile[context][output]) {
+                updated[context][output].push_back(Create(port, output, descriptor));
+                changed[context][output] = true;
+            }
+            if (updated[context][output].size() > kMaxBindings) {
+                return fail("The profile would make an action row exceed the binding limit.");
+            }
+            anyChanged = anyChanged || changed[context][output];
+        }
+    }
+
+    if (anyChanged) {
+        for (int context = 0; context < GDX_INPUT_CONTEXT_COUNT; ++context) {
+            for (int output = 0; output < GDX_INPUT_OUT_COUNT; ++output) {
+                if (changed[context][output]) {
+                    Store(port, context, output, updated[context][output], true, false);
+                }
+            }
+        }
+        CVarSave();
+    }
+    return true;
+}
+
 void BeginKeyboardCapture() {
     sCapturedKey = -1;
     sKeyboardCapture = true;

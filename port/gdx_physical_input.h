@@ -20,6 +20,7 @@ int gdx_physical_input_has_live_input(int port);
 }
 
 #include <memory>
+#include <string>
 #include <vector>
 #include "gdx_input_actions.h"
 #include "ship/controller/controldevice/controller/mapping/ControllerButtonMapping.h"
@@ -48,6 +49,12 @@ bool RemoveBinding(int port, int context, int output, int index);
 void ClearBindings(int port, int context, int output);     // Explicitly configured, empty row.
 void UseLegacyBindings(int port, int context, int output); // Inherit without changing legacy settings.
 std::shared_ptr<Ship::ControllerButtonMapping> CaptureSDL(int port, int output);
+
+// Profiles contain only SDL gamepad button/axis bindings. Import replaces those bindings across
+// every action context while preserving keyboard and mouse bindings. Import validates completely
+// before changing or persisting any rows.
+std::string ExportGamepadProfile(int port, const std::string& name, std::string* error = nullptr);
+bool ImportGamepadProfile(int port, const std::string& json, std::string* error = nullptr);
 
 // Capture does not acquire input blockers or persist anything; the UI owns that lifetime.
 void BeginKeyboardCapture();

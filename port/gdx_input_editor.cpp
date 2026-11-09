@@ -7,6 +7,10 @@
 #include "ship/window/Window.h"
 #include "ship/window/gui/IconsFontAwesome4.h"
 
+#include <cctype>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
 
 namespace {
@@ -105,6 +109,69 @@ const char* BindingIcon(Ship::ControllerButtonMapping& binding) {
         default:
             return ICON_FA_BUG;
     }
+}
+
+std::string ProfileStem(const char* name) {
+    std::string stem;
+    if (name == nullptr) return stem;
+    for (const unsigned char character : std::string(name)) {
+        if (std::isalnum(character) || character == '-' || character == '_') {
+            stem.push_back(static_cast<char>(character));
+        } else if (character == ' ') {
+            stem.push_back('-');
+        } else {
+            return {};
+        }
+    }
+    return stem;
+}
+
+std::filesystem::path LocalProfilePath(const char* name) {
+    const std::string stem = ProfileStem(name);
+    if (stem.empty()) return {};
+    return std::filesystem::path(Ship::Context::GetAppDirectoryPath()) / "gamepad-profiles" / (stem + ".json");
+}
+
+bool ReadProfileFile(const std::filesystem::path& path, std::string& contents, std::string& error) {
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(path, ec);
+    if (ec || size == 0 || size > 1024 * 1024) {
+        error = "Could not read the profile file, or it is empty/over 1 MB.";
+        return false;
+    }
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        error = "Could not open the profile file.";
+        return false;
+    }
+    contents.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    if (file.bad() || contents.size() != size) {
+        error = "Could not read the complete profile file.";
+        return false;
+    }
+    return true;
+}
+
+bool WriteProfileFile(const std::filesystem::path& path, const std::string& contents, std::string& error) {
+    std::error_code ec;
+    if (!path.parent_path().empty()) {
+        std::filesystem::create_directories(path.parent_path(), ec);
+    }
+    if (ec) {
+        error = "Could not create the profile directory.";
+        return false;
+    }
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    if (!file) {
+        error = "Could not create the profile file.";
+        return false;
+    }
+    file.write(contents.data(), static_cast<std::streamsize>(contents.size()));
+    if (!file) {
+        error = "Could not write the complete profile file.";
+        return false;
+    }
+    return true;
 }
 } // namespace
 
@@ -344,6 +411,83 @@ void GdxInputEditor::DrawElement() {
     ImGui::SetNextItemWidth(150.0f);
     ImGui::Combo("Player", &mPort, players, 4);
     ImGui::TextDisabled("Bindings below affect the game, not navigation in this settings window.");
+
+    if (ImGui::CollapsingHeader("Profile Management")) {
+        ImGui::SetNextItemWidth(220.0f);
+        ImGui::InputText("Profile name", mProfileName, sizeof(mProfileName));
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputText("Import / export file", mProfileFile, sizeof(mProfileFile));
+        ImGui::TextWrapped("Profiles include only gamepad buttons/axes; imports replace those for the selected player and preserve keyboard/mouse bindings.");
+        ImGui::TextDisabled("Save/load uses the local gamepad-profiles folder; enter a file path above to import or export.");
+
+        if (ImGui::Button("Save profile")) {
+            const auto path = LocalProfilePath(mProfileName);
+            if (path.empty()) {
+                mProfileStatus = "Use a profile name containing only letters, numbers, spaces, - or _.";
+            } else {
+                std::string error;
+                const std::string json = GdxPhysicalInput::ExportGamepadProfile(mPort, mProfileName, &error);
+                if (json.empty()) {
+                    mProfileStatus = error.empty() ? "Could not create the profile." : error;
+                } else if (WriteProfileFile(path, json, error)) {
+                    mProfileStatus = "Saved: " + path.string();
+                } else {
+                    mProfileStatus = error;
+                }
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Load profile")) {
+            const auto path = LocalProfilePath(mProfileName);
+            std::string json, error;
+            if (path.empty()) {
+                mProfileStatus = "Use a profile name containing only letters, numbers, spaces, - or _.";
+            } else if (ReadProfileFile(path, json, error) &&
+                       GdxPhysicalInput::ImportGamepadProfile(mPort, json, &error)) {
+                mProfileStatus = "Loaded profile for Player " + std::to_string(mPort + 1) + ".";
+            } else {
+                mProfileStatus = error;
+            }
+        }
+        ImGui::NewLine();
+        if (ImGui::Button("Import profile")) {
+            std::string json, error;
+            if (mProfileFile[0] == '\0') {
+                mProfileStatus = "Enter the path to a gamepad profile JSON file.";
+            } else if (ReadProfileFile(std::filesystem::path(mProfileFile), json, error) &&
+                       GdxPhysicalInput::ImportGamepadProfile(mPort, json, &error)) {
+                const auto localPath = LocalProfilePath(mProfileName);
+                if (!localPath.empty() && WriteProfileFile(localPath, json, error)) {
+                    mProfileStatus = "Imported for Player " + std::to_string(mPort + 1) + " and saved: " +
+                                     localPath.string();
+                } else {
+                    mProfileStatus = "Imported for Player " + std::to_string(mPort + 1) +
+                                     ", but could not save locally: " + error;
+                }
+            } else {
+                mProfileStatus = error;
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Export profile")) {
+            const auto localPath = LocalProfilePath(mProfileName);
+            std::string json, error;
+            if (mProfileFile[0] == '\0') {
+                mProfileStatus = "Enter the destination path for the exported profile.";
+            } else if (localPath.empty()) {
+                mProfileStatus = "Use a profile name containing only letters, numbers, spaces, - or _.";
+            } else if (ReadProfileFile(localPath, json, error) &&
+                       WriteProfileFile(std::filesystem::path(mProfileFile), json, error)) {
+                mProfileStatus = "Exported: " + std::filesystem::path(mProfileFile).string();
+            } else {
+                mProfileStatus = error;
+            }
+        }
+        if (!mProfileStatus.empty()) {
+            ImGui::TextWrapped("%s", mProfileStatus.c_str());
+        }
+    }
+
     if (ImGui::BeginTabBar("##ActionContexts")) {
         if (ImGui::BeginTabItem("Race")) {
             ImGui::TextDisabled("On track and test drives, while not paused.");

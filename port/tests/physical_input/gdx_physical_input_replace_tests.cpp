@@ -205,6 +205,58 @@ void TestDeduplication() {
                          std::make_shared<SDLAxisDirectionToButtonMapping>(0, Zbit, SDL_CONTROLLER_AXIS_LEFTX, POSITIVE)));
     CHECK(GetBindings(0, Race, A).size() == 1);
 }
+void TestGamepadProfiles() {
+    Reset(false);
+    CHECK(AddBinding(0, Race, A, Key(LUS_KB_Q)));
+    CHECK(AddBinding(0, Race, A, std::make_shared<SDLButtonToButtonMapping>(0, Abit, SDL_CONTROLLER_BUTTON_X)));
+    CHECK(AddBinding(0, Menu, Z,
+                     std::make_shared<SDLAxisDirectionToButtonMapping>(0, Zbit, SDL_CONTROLLER_AXIS_LEFTY, POSITIVE)));
+
+    std::string error;
+    const std::string profile = ExportGamepadProfile(0, "Test Pad", &error);
+    CHECK(!profile.empty());
+    CHECK(error.empty());
+    CHECK(profile.find("gdiffuser.gamepad-profile") != std::string::npos);
+    CHECK(profile.find("\"name\":\"Test Pad\"") != std::string::npos);
+
+    CHECK(AddBinding(1, Race, A, Key(LUS_KB_E)));
+    CHECK(AddBinding(1, Race, A, std::make_shared<SDLButtonToButtonMapping>(0, Abit, SDL_CONTROLLER_BUTTON_B)));
+    CHECK(AddBinding(1, Menu, Z, std::make_shared<MouseButtonToButtonMapping>(0, Zbit, LUS_MOUSE_BTN_RIGHT)));
+    Legacy(1, Bbit, Key(LUS_KB_W, Bbit));
+    Invalidate();
+    const int beforeSaves = saves;
+    CHECK(ImportGamepadProfile(1, profile, &error));
+    CHECK(error.empty());
+    CHECK(saves == beforeSaves + 1); // Whole-profile import persists once.
+
+    auto raceA = GetBindings(1, Race, A);
+    CHECK(raceA.size() == 2);
+    CHECK(std::dynamic_pointer_cast<KeyboardKeyToButtonMapping>(raceA[0])->GetKeyboardScancode() == LUS_KB_E);
+    CHECK(std::dynamic_pointer_cast<SDLButtonToButtonMapping>(raceA[1])->GetSDLControllerButton() ==
+          SDL_CONTROLLER_BUTTON_X);
+    CHECK(!IsConfigured(1, Race, GDX_INPUT_OUT_B)); // Unrelated inherited rows stay inherited.
+    auto inheritedB = GetEffectiveBindings(1, Race, GDX_INPUT_OUT_B);
+    CHECK(inheritedB.size() == 1);
+    CHECK(std::dynamic_pointer_cast<KeyboardKeyToButtonMapping>(inheritedB[0])->GetKeyboardScancode() == LUS_KB_W);
+    auto menuZ = GetBindings(1, Menu, Z);
+    CHECK(menuZ.size() == 2);
+    CHECK(std::dynamic_pointer_cast<MouseButtonToButtonMapping>(menuZ[0])->GetMouseButton() == LUS_MOUSE_BTN_RIGHT);
+    auto axis = std::dynamic_pointer_cast<SDLAxisDirectionToButtonMapping>(menuZ[1]);
+    CHECK(axis != nullptr);
+    CHECK(axis->GetSDLControllerAxis() == SDL_CONTROLLER_AXIS_LEFTY);
+    CHECK(axis->GetAxisDirection() == POSITIVE);
+
+    const auto beforeInvalid = values;
+    const int savesBeforeInvalid = saves;
+    CHECK(!ImportGamepadProfile(1, "{ invalid json", &error));
+    CHECK(!error.empty());
+    CHECK(values == beforeInvalid);
+    CHECK(saves == savesBeforeInvalid);
+    CHECK(!ImportGamepadProfile(1, profile + std::string(1024 * 1024, ' '), &error));
+    CHECK(values == beforeInvalid);
+    CHECK(saves == savesBeforeInvalid);
+}
+
 void TestReplacementStateAndCapacity() {
     Reset(false);
     CHECK(AddBinding(0, Race, A, Key(LUS_KB_Q)));
@@ -244,5 +296,6 @@ void TestReplaceBinding() {
     TestRejectedReplacement();
     TestSnapshotAndCloning();
     TestDeduplication();
+    TestGamepadProfiles();
     TestReplacementStateAndCapacity();
 }

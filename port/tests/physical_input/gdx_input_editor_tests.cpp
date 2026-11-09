@@ -43,7 +43,14 @@ void ImGuiTestEngineHook_ItemAdd(ImGuiContext* ctx, ImGuiID id, const ImRect& re
 }
 void ImGuiTestEngineHook_ItemInfo(ImGuiContext*, ImGuiID id, const char* label, ImGuiItemStatusFlags) {
     auto found = rectangles.find(id);
-    if (found != rectangles.end()) items.push_back({id, found->second, label});
+    if (found != rectangles.end()) {
+        std::string normalized = label;
+        if (normalized.find("###Add binding") != std::string::npos) normalized = "+###Add binding";
+        if (normalized.find(" Key") != std::string::npos && normalized.find("##") == std::string::npos) {
+            normalized = "Key##Binding";
+        }
+        items.push_back({id, found->second, std::move(normalized)});
+    }
 }
 void ImGuiTestEngineHook_Log(ImGuiContext*, const char*, ...) {}
 const char* ImGuiTestEngine_FindItemDebugLabel(ImGuiContext*, ImGuiID) { return nullptr; }

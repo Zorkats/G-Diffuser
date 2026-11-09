@@ -32,7 +32,8 @@ add_executable(gdx_physical_input_tests
     ${GDX_PHYSICAL_RUNTIME_SOURCES})
 # The fixtures shadow services, not the production mapping classes or implementations.
 target_include_directories(gdx_physical_input_tests PRIVATE
-    include "${GDX_ROOT}/libultraship/include" "${GDX_ROOT}/port" "${GDX_ROOT}/decomp/include")
+    include "${GDX_ROOT}/libultraship/include" "${GDX_ROOT}/port" "${GDX_ROOT}/decomp/include"
+    "${GDX_ROOT}/port/third_party/discord-rpc/thirdparty")
 
 add_executable(gdx_input_actions_tests
     "${GDX_ROOT}/port/tests/gdx_input_actions_tests.c"
@@ -68,7 +69,8 @@ if(GDX_TEST_HEADLESS_IMGUI)
             "${GDX_TEST_IMGUI_DIR}/imgui_widgets.cpp")
         target_include_directories(gdx_input_editor_tests PRIVATE
             ui_include include "${GDX_TEST_IMGUI_DIR}" "${GDX_ROOT}/libultraship/include"
-            "${GDX_ROOT}/port" "${GDX_ROOT}/decomp/include")
+            "${GDX_ROOT}/port" "${GDX_ROOT}/decomp/include"
+            "${GDX_ROOT}/port/third_party/discord-rpc/thirdparty")
         target_compile_definitions(gdx_input_editor_tests PRIVATE IMGUI_ENABLE_TEST_ENGINE)
         list(APPEND GDX_TEST_TARGETS gdx_input_editor_tests)
         message(STATUS "Headless input editor tests: ${GDX_TEST_IMGUI_DIR}")

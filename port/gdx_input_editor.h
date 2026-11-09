@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 #include "libultraship/window/gui/InputEditorWindow.h"
 
 // The same action-first editor is embedded in Settings and used by the pop-out window.
@@ -24,6 +26,9 @@ class GdxInputEditor : public LUS::InputEditorWindow {
     int mCaptureOutput = 0;
     int mCaptureIndex = -1;
     int mLastCaptureFrame = -1;
+    char mProfileName[64] = "Default";
+    char mProfileFile[512] = {};
+    std::string mProfileStatus;
     bool mCapturing = false;
     bool mCaptureArmed = false;
     double mArmAfter = 0.0;
