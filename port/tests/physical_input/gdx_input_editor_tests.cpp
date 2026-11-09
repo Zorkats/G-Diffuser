@@ -265,6 +265,8 @@ void ControllerCapture(Harness& h) {
     auto button = std::dynamic_pointer_cast<Ship::SDLButtonToButtonMapping>(bindings[0]);
     CHECK(button != nullptr);
     CHECK(button->GetSDLControllerButton() == SDL_CONTROLLER_BUTTON_BACK);
+    h.Frame(true, false, 0.40f); // The captured button remains held past the old timeout.
+    CHECK(h.Blocked() && h.NavigationBlocked());
     pad.buttons[SDL_CONTROLLER_BUTTON_BACK] = false;
     h.Frame(true, false, 0.40f);
     CHECK(!h.Blocked() && !h.NavigationBlocked() && !h.CaptureActive());

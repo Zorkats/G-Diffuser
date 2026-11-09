@@ -410,6 +410,35 @@ Binding CaptureSDL(int port, int output) {
     }
     return Ship::ButtonMappingFactory::CreateButtonMappingFromSDLInput(port, gdx_input_actions_output_bit(output));
 }
+bool IsGamepadInputHeld(int port) {
+    if (port < 0 || port >= kPorts) {
+        return false;
+    }
+    auto ctx = Ship::Context::GetInstance();
+    auto deck = ctx != nullptr ? ctx->GetControlDeck() : nullptr;
+    auto devices = deck != nullptr ? deck->GetConnectedPhysicalDeviceManager() : nullptr;
+    if (devices == nullptr) {
+        return false;
+    }
+    for (const auto& [instanceId, gamepad] : devices->GetConnectedSDLGamepadsForPort(port)) {
+        if (gamepad == nullptr || !SDL_GameControllerGetAttached(gamepad)) {
+            continue;
+        }
+        for (int button = SDL_CONTROLLER_BUTTON_A; button < SDL_CONTROLLER_BUTTON_MAX; ++button) {
+            if (SDL_GameControllerGetButton(gamepad, static_cast<SDL_GameControllerButton>(button))) {
+                return true;
+            }
+        }
+        for (int axis = SDL_CONTROLLER_AXIS_LEFTX; axis < SDL_CONTROLLER_AXIS_MAX; ++axis) {
+            const float value =
+                SDL_GameControllerGetAxis(gamepad, static_cast<SDL_GameControllerAxis>(axis)) / 32767.0f;
+            if (value < -0.7f || value > 0.7f) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
 
 std::string ExportGamepadProfile(int port, const std::string& name, std::string* error) {
     if (error != nullptr) {

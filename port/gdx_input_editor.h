@@ -31,6 +31,7 @@ class GdxInputEditor : public LUS::InputEditorWindow {
     std::string mProfileStatus;
     bool mCapturing = false;
     bool mCaptureArmed = false;
+    bool mAwaitingGamepadRelease = false;
     double mArmAfter = 0.0;
     double mUnblockAfter = 0.0;
 };

@@ -221,10 +221,13 @@ void GdxInputEditor::UpdateElement() {
         EndCapture();
     }
     auto ctx = Ship::Context::GetInstance();
-    if (mCapturing || ImGui::GetTime() < mUnblockAfter) {
+    const bool waitingForGamepadRelease =
+        mAwaitingGamepadRelease && GdxPhysicalInput::IsGamepadInputHeld(mCapturePort);
+    if (mCapturing || ImGui::GetTime() < mUnblockAfter || waitingForGamepadRelease) {
         ctx->GetControlDeck()->BlockGameInput(kCaptureBlockId);
         ctx->GetWindow()->GetGui()->SetGamepadNavigationBlocked(true);
     } else {
+        mAwaitingGamepadRelease = false;
         ctx->GetControlDeck()->UnblockGameInput(kCaptureBlockId);
     }
 }
@@ -384,6 +387,8 @@ void GdxInputEditor::DrawCapture() {
                         mCapturePort, gdx_input_actions_output_bit(mCaptureOutput), static_cast<Ship::KbScancode>(key));
                 }
                 if (binding != nullptr) {
+                    mAwaitingGamepadRelease = mAwaitingGamepadRelease ||
+                                               GdxPhysicalInput::IsGamepadInputHeld(mCapturePort);
                     finished = mCaptureIndex < 0 ?
                         GdxPhysicalInput::AddBinding(mCapturePort, mCaptureContext, mCaptureOutput, binding) :
                         GdxPhysicalInput::ReplaceBinding(mCapturePort, mCaptureContext, mCaptureOutput, mCaptureIndex, binding);

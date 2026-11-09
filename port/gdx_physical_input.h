@@ -49,6 +49,8 @@ bool RemoveBinding(int port, int context, int output, int index);
 void ClearBindings(int port, int context, int output);     // Explicitly configured, empty row.
 void UseLegacyBindings(int port, int context, int output); // Inherit without changing legacy settings.
 std::shared_ptr<Ship::ControllerButtonMapping> CaptureSDL(int port, int output);
+// True while any gamepad button or capture-threshold axis on the port is held.
+bool IsGamepadInputHeld(int port);
 
 // Profiles contain only SDL gamepad button/axis bindings. Import replaces those bindings across
 // every action context while preserving keyboard and mouse bindings. Import validates completely
