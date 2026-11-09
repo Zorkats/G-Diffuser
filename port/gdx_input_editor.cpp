@@ -5,7 +5,7 @@
 #include "ship/controller/controldeck/ControlDeck.h"
 #include "ship/controller/controldevice/controller/mapping/keyboard/KeyboardKeyToButtonMapping.h"
 #include "ship/window/Window.h"
-
+#include "ship/window/gui/IconsFontAwesome4.h"
 
 #include <string>
 
@@ -72,6 +72,39 @@ const ActionText* Actions(int context) {
         return kRaceActions;
     }
     return context == GDX_INPUT_CONTEXT_COURSE_EDIT ? kCourseActions : kMenuActions;
+}
+
+void GetBindingColors(Ship::PhysicalDeviceType deviceType, ImVec4& color, ImVec4& hoveredColor) {
+    switch (deviceType) {
+        case Ship::PhysicalDeviceType::Keyboard:
+            color = ImVec4(0.651f, 0.482f, 0.357f, 0.5f);
+            hoveredColor = ImVec4(0.651f, 0.482f, 0.357f, 1.0f);
+            break;
+        case Ship::PhysicalDeviceType::Mouse:
+            color = ImVec4(0.5f, 0.5f, 0.5f, 0.5f);
+            hoveredColor = ImVec4(0.5f, 0.5f, 0.5f, 1.0f);
+            break;
+        case Ship::PhysicalDeviceType::SDLGamepad:
+            color = ImVec4(0.0f, 0.255f, 0.976f, 0.5f);
+            hoveredColor = ImVec4(0.0f, 0.255f, 0.976f, 1.0f);
+            break;
+        default:
+            color = ImVec4(0.431f, 0.369f, 0.706f, 0.5f);
+            hoveredColor = ImVec4(0.431f, 0.369f, 0.706f, 1.0f);
+            break;
+    }
+}
+
+const char* BindingIcon(Ship::ControllerButtonMapping& binding) {
+    switch (binding.GetMappingType()) {
+        case MAPPING_TYPE_GAMEPAD:
+            return ICON_FA_GAMEPAD;
+        case MAPPING_TYPE_KEYBOARD:
+        case MAPPING_TYPE_MOUSE:
+            return ICON_FA_KEYBOARD_O;
+        default:
+            return ICON_FA_BUG;
+    }
 }
 } // namespace
 
@@ -172,14 +205,17 @@ void GdxInputEditor::DrawActions(int context) {
         ImGui::NewLine();
         ImGui::SameLine(rowIndent);
         ImGui::BeginDisabled();
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.4f, 0.4f, 0.4f, 1.0f));
         ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.0f, 0.5f));
         ImGui::Button(rows[output].label, ImVec2(labelWidth, 0.0f));
         ImGui::PopStyleVar();
+        ImGui::PopStyleColor();
         ImGui::EndDisabled();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
             ImGui::SetTooltip("%s", rows[output].tip);
         }
         ImGui::SameLine(bindingsOffset);
+        const float rowRight = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
         auto bindings = GdxPhysicalInput::GetEffectiveBindings(mPort, context, output);
         if (bindings.empty()) {
             ImGui::AlignTextToFramePadding();
@@ -189,8 +225,23 @@ void GdxInputEditor::DrawActions(int context) {
         for (int index = 0; index < static_cast<int>(bindings.size()); ++index) {
             ImGui::PushID(index);
             const auto& binding = bindings[index];
-            const std::string label = binding->GetPhysicalInputName() + "##Binding";
-            if (ImGui::Button(label.c_str())) {
+            const std::string inputName = binding->GetPhysicalInputName();
+            const std::string label = std::string(BindingIcon(*binding)) + " " + inputName;
+            ImVec4 buttonColor;
+            ImVec4 buttonHoveredColor;
+            GetBindingColors(binding->GetPhysicalDeviceType(), buttonColor, buttonHoveredColor);
+            ImGui::PushStyleColor(ImGuiCol_Button, buttonColor);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, buttonHoveredColor);
+            ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.0f, 0.5f));
+            const float buttonWidth = ImGui::CalcTextSize(label.c_str()).x + 12.0f * scale;
+            if (ImGui::GetCursorScreenPos().x + buttonWidth > rowRight) {
+                ImGui::NewLine();
+                ImGui::SameLine(bindingsOffset);
+            }
+            const bool clicked = ImGui::Button(label.c_str(), ImVec2(buttonWidth, 0.0f));
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor(2);
+            if (clicked) {
                 ImGui::OpenPopup("Binding options");
             }
             if (ImGui::IsItemHovered()) {
@@ -214,7 +265,14 @@ void GdxInputEditor::DrawActions(int context) {
             }
             ImGui::SameLine();
         }
-        if (ImGui::Button("+###Add binding", ImVec2(20.0f * scale, 0.0f))) {
+        if (ImGui::GetCursorScreenPos().x + 20.0f * scale > rowRight) {
+            ImGui::NewLine();
+            ImGui::SameLine(bindingsOffset);
+        }
+        ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(1.0f, 0.5f));
+        const bool addBinding = ImGui::Button(ICON_FA_PLUS "###Add binding", ImVec2(20.0f * scale, 0.0f));
+        ImGui::PopStyleVar();
+        if (addBinding) {
             mCaptureContext = context;
             mCaptureOutput = output;
             mCaptureIndex = -1;
