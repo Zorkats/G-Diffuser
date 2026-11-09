@@ -304,7 +304,9 @@ void GdxInputEditor::DrawActions(int context) {
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, buttonHoveredColor);
             ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.0f, 0.5f));
             const float buttonWidth = ImGui::CalcTextSize(label.c_str()).x + 12.0f * scale;
-            if (ImGui::GetCursorScreenPos().x + buttonWidth > rowRight) {
+            const float removeButtonWidth = ImGui::CalcTextSize(ICON_FA_TIMES).x + 10.0f * scale;
+            const float bindingGroupWidth = buttonWidth + removeButtonWidth + 4.0f * scale;
+            if (ImGui::GetCursorScreenPos().x + bindingGroupWidth > rowRight) {
                 ImGui::NewLine();
                 ImGui::SameLine(bindingsOffset);
             }
@@ -312,27 +314,28 @@ void GdxInputEditor::DrawActions(int context) {
             ImGui::PopStyleVar();
             ImGui::PopStyleColor(2);
             if (clicked) {
-                ImGui::OpenPopup("Binding options");
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("%s\nClick to change or remove.", binding->GetPhysicalDeviceName().c_str());
-            }
-            // Capture's modal belongs to the editor scope, not the row ID stack.
-            bool rebind = false;
-            if (ImGui::BeginPopup("Binding options")) {
-                rebind = ImGui::Selectable("Change binding");
-                if (ImGui::Selectable("Remove binding")) {
-                    GdxPhysicalInput::RemoveBinding(mPort, context, output, index);
-                }
-                ImGui::EndPopup();
-            }
-            ImGui::PopID();
-            if (rebind) {
                 mCaptureContext = context;
                 mCaptureOutput = output;
                 mCaptureIndex = index;
                 mCapturePort = mPort;
             }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s\nClick to change binding.", binding->GetPhysicalDeviceName().c_str());
+            }
+            ImGui::SameLine(0.0f, 0.0f);
+            ImGui::PushStyleColor(ImGuiCol_Button, buttonColor);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, buttonHoveredColor);
+            ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(1.0f, 0.5f));
+            const bool removeClicked = ImGui::Button(ICON_FA_TIMES "###Remove binding", ImVec2(removeButtonWidth, 0.0f));
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor(2);
+            if (removeClicked) {
+                GdxPhysicalInput::RemoveBinding(mPort, context, output, index);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Remove binding");
+            }
+            ImGui::PopID();
             ImGui::SameLine();
         }
         if (ImGui::GetCursorScreenPos().x + 20.0f * scale > rowRight) {
@@ -351,12 +354,7 @@ void GdxInputEditor::DrawActions(int context) {
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Add binding");
         }
-        if (GdxPhysicalInput::IsConfigured(mPort, context, output)) {
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Reset")) {
-                GdxPhysicalInput::UseLegacyBindings(mPort, context, output);
-            }
-        }
+
         ImGui::PopID();
     }
     ImGui::PopID();
