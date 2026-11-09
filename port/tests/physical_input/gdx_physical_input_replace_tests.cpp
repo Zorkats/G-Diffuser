@@ -257,6 +257,53 @@ void TestGamepadProfiles() {
     CHECK(saves == savesBeforeInvalid);
 }
 
+void TestDefaultGamepadProfileInitialization() {
+    Reset(false);
+    Legacy(2, Abit, Key(LUS_KB_Q, Abit));
+    Invalidate();
+    const int savesBeforeInitialization = saves;
+    for (int port = 0; port < 4; ++port) {
+        CHECK(InitializeDefaultGamepadProfile(port));
+        CHECK(values["gEnhancements.Input.Physical.Port" + std::to_string(port + 1) +
+                     ".DefaultProfileVersion"] == 1);
+        CHECK(IsConfigured(port, Race, A));
+        auto raceA = GetBindings(port, Race, A);
+        CHECK(raceA.size() == (port == 2 ? 2u : 1u));
+        CHECK(std::dynamic_pointer_cast<SDLButtonToButtonMapping>(raceA.back())->GetSDLControllerButton() ==
+              SDL_CONTROLLER_BUTTON_A);
+    }
+    auto preservedKey = std::dynamic_pointer_cast<KeyboardKeyToButtonMapping>(GetBindings(2, Race, A).front());
+    CHECK(preservedKey != nullptr && preservedKey->GetKeyboardScancode() == LUS_KB_Q);
+    auto raceB = GetBindings(0, Race, GDX_INPUT_OUT_B);
+    CHECK(std::dynamic_pointer_cast<SDLButtonToButtonMapping>(raceB[0])->GetSDLControllerButton() ==
+          SDL_CONTROLLER_BUTTON_X);
+    auto raceCDown = GetBindings(0, Race, GDX_INPUT_OUT_CDOWN);
+    CHECK(raceCDown.size() == 2);
+    auto cDownAxis = std::dynamic_pointer_cast<SDLAxisDirectionToButtonMapping>(raceCDown[0]);
+    CHECK(cDownAxis != nullptr && cDownAxis->GetSDLControllerAxis() == SDL_CONTROLLER_AXIS_TRIGGERRIGHT &&
+          cDownAxis->GetAxisDirection() == POSITIVE);
+    CHECK(std::dynamic_pointer_cast<SDLButtonToButtonMapping>(raceCDown[1])->GetSDLControllerButton() ==
+          SDL_CONTROLLER_BUTTON_B);
+    CHECK(saves == savesBeforeInitialization + 4);
+
+    CHECK(ReplaceBinding(0, Race, A, 0,
+                         std::make_shared<SDLButtonToButtonMapping>(0, Abit, SDL_CONTROLLER_BUTTON_Y)));
+    Invalidate();
+    CHECK(InitializeDefaultGamepadProfile(0));
+    CHECK(std::dynamic_pointer_cast<SDLButtonToButtonMapping>(GetBindings(0, Race, A)[0])->
+              GetSDLControllerButton() == SDL_CONTROLLER_BUTTON_Y);
+    CHECK(!InitializeDefaultGamepadProfile(-1));
+
+    Reset(false);
+    CHECK(AddBinding(1, Race, A, Key(LUS_KB_E)));
+    const auto savedRaceA = GetBindings(1, Race, A);
+    CHECK(InitializeDefaultGamepadProfile(1));
+    CHECK(GetBindings(1, Race, A).size() == savedRaceA.size());
+    CHECK(std::dynamic_pointer_cast<KeyboardKeyToButtonMapping>(GetBindings(1, Race, A)[0])->
+              GetKeyboardScancode() == LUS_KB_E);
+    CHECK(!IsConfigured(1, Race, GDX_INPUT_OUT_B));
+}
+
 void TestReplacementStateAndCapacity() {
     Reset(false);
     CHECK(AddBinding(0, Race, A, Key(LUS_KB_Q)));

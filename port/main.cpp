@@ -633,6 +633,9 @@ extern "C" int gdx_lus_read_pads(int capacity, unsigned short* outButtons, signe
     }
 
     gdxSyncGamepadPortRouting(controlDeck);
+    for (int port = 0; port < MAXCONTROLLERS; ++port) {
+        GdxPhysicalInput::InitializeDefaultGamepadProfile(port);
+    }
 
     // WriteToOSContPad OR-accumulates into pad->button and only overwrites a stick axis when the
     // incoming value is 0 — it never clears the buffer. So we MUST zero it every frame or buttons

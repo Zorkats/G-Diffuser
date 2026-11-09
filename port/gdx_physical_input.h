@@ -57,6 +57,8 @@ bool IsGamepadInputHeld(int port);
 // before changing or persisting any rows.
 std::string ExportGamepadProfile(int port, const std::string& name, std::string* error = nullptr);
 bool ImportGamepadProfile(int port, const std::string& json, std::string* error = nullptr);
+// Applies the built-in default profile once per player, unless that player already has physical overrides.
+bool InitializeDefaultGamepadProfile(int port);
 
 // Capture does not acquire input blockers or persist anything; the UI owns that lifetime.
 void BeginKeyboardCapture();
