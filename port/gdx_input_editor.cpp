@@ -1,17 +1,20 @@
 #include "gdx_input_editor.h"
 #include "gdx_physical_input.h"
 
+#include "libultraship/bridge/consolevariablebridge.h"
 #include "ship/Context.h"
 #include "ship/controller/controldeck/ControlDeck.h"
 #include "ship/controller/controldevice/controller/mapping/keyboard/KeyboardKeyToButtonMapping.h"
 #include "ship/window/Window.h"
 #include "ship/window/gui/IconsFontAwesome4.h"
 
+#include <algorithm>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <vector>
 
 namespace {
 constexpr int kCaptureBlockId = 95237930;
@@ -126,11 +129,52 @@ std::string ProfileStem(const char* name) {
     return stem;
 }
 
+std::filesystem::path LocalProfileDirectory() {
+    return std::filesystem::path(Ship::Context::GetAppDirectoryPath()) / "gamepad-profiles";
+}
+
 std::filesystem::path LocalProfilePath(const char* name) {
     const std::string stem = ProfileStem(name);
     if (stem.empty()) return {};
-    return std::filesystem::path(Ship::Context::GetAppDirectoryPath()) / "gamepad-profiles" / (stem + ".json");
+    return LocalProfileDirectory() / (stem + ".json");
 }
+
+struct LocalProfile {
+    std::string name;
+    std::filesystem::path path;
+};
+
+std::vector<LocalProfile> ListLocalProfiles() {
+    std::vector<LocalProfile> profiles;
+    std::error_code ec;
+    std::filesystem::directory_iterator entry(LocalProfileDirectory(), ec), end;
+    while (!ec && entry != end) {
+        const auto path = entry->path();
+        if (entry->is_regular_file(ec) && path.extension() == ".json") {
+            profiles.push_back({ path.stem().string(), path });
+        }
+        entry.increment(ec);
+    }
+    std::sort(profiles.begin(), profiles.end(), [](const LocalProfile& left, const LocalProfile& right) {
+        return left.name < right.name;
+    });
+    return profiles;
+}
+
+std::string ActiveProfileCVar(int port) {
+    return "gEnhancements.Input.Physical.Port" + std::to_string(port + 1) + ".ActiveGamepadProfile";
+}
+
+std::string ActiveProfileName(int port) {
+    const char* name = CVarGetString(ActiveProfileCVar(port).c_str(), "");
+    return name != nullptr ? name : "";
+}
+
+void SetActiveProfileName(int port, const std::string& name) {
+    CVarSetString(ActiveProfileCVar(port).c_str(), name.c_str());
+    CVarSave();
+}
+
 
 bool ReadProfileFile(const std::filesystem::path& path, std::string& contents, std::string& error) {
     std::error_code ec;
@@ -172,6 +216,20 @@ bool WriteProfileFile(const std::filesystem::path& path, const std::string& cont
         return false;
     }
     return true;
+}
+
+bool EnsureDefaultProfileFile(int port, const std::string& activeProfile, std::string& error) {
+    if (activeProfile != "Default") return true;
+    const auto path = LocalProfilePath("Default");
+    std::error_code ec;
+    const bool exists = std::filesystem::exists(path, ec);
+    if (ec) {
+        error = "Could not check whether the Default profile exists.";
+        return false;
+    }
+    if (exists) return true;
+    const std::string json = GdxPhysicalInput::ExportGamepadProfile(port, "Default", &error);
+    return !json.empty() && WriteProfileFile(path, json, error);
 }
 } // namespace
 
@@ -406,89 +464,131 @@ void GdxInputEditor::DrawCapture() {
     }
 }
 
+void GdxInputEditor::DrawProfileManagement() {
+    std::string error;
+    const std::string activeProfile = ActiveProfileName(mPort);
+    if (!EnsureDefaultProfileFile(mPort, activeProfile, error)) {
+        mProfileStatus = error.empty() ? "Could not create the Default profile file." : error;
+    }
+
+    if (ImGui::BeginTable("ProfileManagementTable", 2, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg)) {
+        ImGui::TableSetupColumn("Profile Name", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, 160.0f);
+
+        for (const auto& profile : ListLocalProfiles()) {
+            ImGui::PushID(profile.name.c_str());
+            ImGui::TableNextRow();
+
+            // Column 0: Profile Name
+            ImGui::TableSetColumnIndex(0);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(profile.name.c_str());
+
+            // Column 1: Action Buttons
+            ImGui::TableSetColumnIndex(1);
+            if (profile.name == activeProfile) {
+                ImGui::BeginDisabled();
+                ImGui::Button("Currently Loaded");
+                ImGui::EndDisabled();
+            } else {
+                if (ImGui::Button("Load")) {
+                    std::string json, loadError;
+                    if (ReadProfileFile(profile.path, json, loadError) &&
+                        GdxPhysicalInput::ImportGamepadProfile(mPort, json, &loadError)) {
+                        SetActiveProfileName(mPort, profile.name);
+                        mProfileStatus = "Loaded " + profile.name + " for Player " + std::to_string(mPort + 1) + ".";
+                    } else {
+                        mProfileStatus = loadError;
+                    }
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Remove")) {
+                    mProfileToRemove = profile.path.string();
+                    mProfileToRemoveName = profile.name;
+                    ImGui::OpenPopup("Confirm profile removal");
+                }
+            }
+
+            // Modal Popup for Removal Confirmation
+            ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                                    ImVec2(0.5f, 0.5f));
+            if (ImGui::BeginPopupModal("Confirm profile removal", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                ImGui::TextWrapped("Remove profile '%s'? This cannot be undone.", mProfileToRemoveName.c_str());
+                if (ImGui::Button("Remove profile")) {
+                    std::error_code removeError;
+                    if (std::filesystem::remove(mProfileToRemove, removeError) && !removeError) {
+                        mProfileStatus = "Removed " + mProfileToRemoveName + ".";
+                    } else {
+                        mProfileStatus = removeError ? "Could not remove the profile file." : "Profile file was not found.";
+                    }
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Cancel")) {
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
+            }
+
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+
+    if (ImGui::Button("Make a new profile")) {
+        mNewProfileName[0] = '\0';
+        ImGui::OpenPopup("Create profile");
+    }
+    if (ImGui::BeginPopupModal("Create profile", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::InputText("Profile name", mNewProfileName, sizeof(mNewProfileName));
+        if (ImGui::Button("Create")) {
+            const auto path = LocalProfilePath(mNewProfileName);
+            std::error_code existsError;
+            if (path.empty()) {
+                mProfileStatus = "Use a profile name containing only letters, numbers, spaces, - or _.";
+            } else {
+                const bool exists = std::filesystem::exists(path, existsError);
+                if (existsError) {
+                    mProfileStatus = "Could not check whether the profile already exists.";
+                } else if (exists) {
+                    mProfileStatus = "A profile with that name already exists.";
+                } else {
+                    std::string saveError;
+                    const std::string json = GdxPhysicalInput::ExportGamepadProfile(mPort, mNewProfileName, &saveError);
+                    if (json.empty()) {
+                        mProfileStatus = saveError.empty() ? "Could not create the profile." : saveError;
+                    } else if (WriteProfileFile(path, json, saveError)) {
+                        const std::string name = path.stem().string();
+                        SetActiveProfileName(mPort, name);
+                        mProfileStatus = "Created " + name + " for Player " + std::to_string(mPort + 1) + ".";
+                        ImGui::CloseCurrentPopup();
+                    } else {
+                        mProfileStatus = saveError;
+                    }
+                }
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+    if (!mProfileStatus.empty()) {
+        ImGui::TextWrapped("%s", mProfileStatus.c_str());
+    }
+}
+
 void GdxInputEditor::DrawElement() {
     // A request made by a row is opened after leaving its ImGui ID stack.
     mCaptureOutput = mCapturing ? mCaptureOutput : -1;
-    ImGui::TextWrapped("Choose an action, then add a keyboard key, gamepad button, or axis. Click an existing binding to change or remove it. Changes save automatically.");
     const char* players[] = { "Player 1", "Player 2", "Player 3", "Player 4" };
     ImGui::SetNextItemWidth(150.0f);
     ImGui::Combo("Player", &mPort, players, 4);
-    ImGui::TextDisabled("Bindings below affect the game, not navigation in this settings window.");
 
     if (ImGui::CollapsingHeader("Profile Management")) {
-        ImGui::SetNextItemWidth(220.0f);
-        ImGui::InputText("Profile name", mProfileName, sizeof(mProfileName));
-        ImGui::SetNextItemWidth(-1.0f);
-        ImGui::InputText("Import / export file", mProfileFile, sizeof(mProfileFile));
-        ImGui::TextWrapped("Profiles include only gamepad buttons/axes; imports replace those for the selected player and preserve keyboard/mouse bindings.");
-        ImGui::TextDisabled("Save/load uses the local gamepad-profiles folder; enter a file path above to import or export.");
-
-        if (ImGui::Button("Save profile")) {
-            const auto path = LocalProfilePath(mProfileName);
-            if (path.empty()) {
-                mProfileStatus = "Use a profile name containing only letters, numbers, spaces, - or _.";
-            } else {
-                std::string error;
-                const std::string json = GdxPhysicalInput::ExportGamepadProfile(mPort, mProfileName, &error);
-                if (json.empty()) {
-                    mProfileStatus = error.empty() ? "Could not create the profile." : error;
-                } else if (WriteProfileFile(path, json, error)) {
-                    mProfileStatus = "Saved: " + path.string();
-                } else {
-                    mProfileStatus = error;
-                }
-            }
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Load profile")) {
-            const auto path = LocalProfilePath(mProfileName);
-            std::string json, error;
-            if (path.empty()) {
-                mProfileStatus = "Use a profile name containing only letters, numbers, spaces, - or _.";
-            } else if (ReadProfileFile(path, json, error) &&
-                       GdxPhysicalInput::ImportGamepadProfile(mPort, json, &error)) {
-                mProfileStatus = "Loaded profile for Player " + std::to_string(mPort + 1) + ".";
-            } else {
-                mProfileStatus = error;
-            }
-        }
-        ImGui::NewLine();
-        if (ImGui::Button("Import profile")) {
-            std::string json, error;
-            if (mProfileFile[0] == '\0') {
-                mProfileStatus = "Enter the path to a gamepad profile JSON file.";
-            } else if (ReadProfileFile(std::filesystem::path(mProfileFile), json, error) &&
-                       GdxPhysicalInput::ImportGamepadProfile(mPort, json, &error)) {
-                const auto localPath = LocalProfilePath(mProfileName);
-                if (!localPath.empty() && WriteProfileFile(localPath, json, error)) {
-                    mProfileStatus = "Imported for Player " + std::to_string(mPort + 1) + " and saved: " +
-                                     localPath.string();
-                } else {
-                    mProfileStatus = "Imported for Player " + std::to_string(mPort + 1) +
-                                     ", but could not save locally: " + error;
-                }
-            } else {
-                mProfileStatus = error;
-            }
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Export profile")) {
-            const auto localPath = LocalProfilePath(mProfileName);
-            std::string json, error;
-            if (mProfileFile[0] == '\0') {
-                mProfileStatus = "Enter the destination path for the exported profile.";
-            } else if (localPath.empty()) {
-                mProfileStatus = "Use a profile name containing only letters, numbers, spaces, - or _.";
-            } else if (ReadProfileFile(localPath, json, error) &&
-                       WriteProfileFile(std::filesystem::path(mProfileFile), json, error)) {
-                mProfileStatus = "Exported: " + std::filesystem::path(mProfileFile).string();
-            } else {
-                mProfileStatus = error;
-            }
-        }
-        if (!mProfileStatus.empty()) {
-            ImGui::TextWrapped("%s", mProfileStatus.c_str());
-        }
+        DrawProfileManagement();
     }
 
     if (ImGui::BeginTabBar("##ActionContexts")) {
@@ -517,9 +617,7 @@ void GdxInputEditor::DrawElement() {
         ImGui::TextWrapped("Shared analog movement: steer and pitch in races, navigate menus, and move or orbit in the editor.");
         DrawMovementSettings(mPort);
     }
-    if (ImGui::CollapsingHeader("Devices and feedback")) {
-        DrawDeviceSettings(mPort);
-    }
+    DrawDeviceSettings(mPort);
     ImGui::PopID();
     DrawCapture();
 }

@@ -16,6 +16,7 @@ class GdxInputEditor : public LUS::InputEditorWindow {
 
   private:
     void DrawActions(int context);
+    void DrawProfileManagement();
     void BeginCapture(int context, int output, int index);
     void EndCapture();
     void DrawCapture();
@@ -26,9 +27,10 @@ class GdxInputEditor : public LUS::InputEditorWindow {
     int mCaptureOutput = 0;
     int mCaptureIndex = -1;
     int mLastCaptureFrame = -1;
-    char mProfileName[64] = "Default";
-    char mProfileFile[512] = {};
+    char mNewProfileName[64] = {};
     std::string mProfileStatus;
+    std::string mProfileToRemove;
+    std::string mProfileToRemoveName;
     bool mCapturing = false;
     bool mCaptureArmed = false;
     bool mAwaitingGamepadRelease = false;

@@ -597,7 +597,9 @@ bool InitializeDefaultGamepadProfile(int port) {
     if (port < 0 || port >= kPorts) {
         return false;
     }
-    const auto marker = "gEnhancements.Input.Physical.Port" + std::to_string(port + 1) + ".DefaultProfileVersion";
+    const auto portPrefix = "gEnhancements.Input.Physical.Port" + std::to_string(port + 1);
+    const auto marker = portPrefix + ".DefaultProfileVersion";
+    const auto activeProfile = portPrefix + ".ActiveGamepadProfile";
     if (CVarGetInteger(marker.c_str(), 0) >= 1) {
         return true;
     }
@@ -615,8 +617,10 @@ bool InitializeDefaultGamepadProfile(int port) {
 
     static const std::string profile = R"json({"format":"gdiffuser.gamepad-profile","version":1,"name":"Default","contexts":{"Menu":{"A":[{"type":"button","code":0,"direction":0}],"B":[{"type":"button","code":1,"direction":0}],"Z":[{"type":"axis","code":4,"direction":1},{"type":"axis","code":5,"direction":1}],"Start":[{"type":"button","code":6,"direction":0}],"DUp":[{"type":"button","code":11,"direction":0}],"DDown":[{"type":"button","code":12,"direction":0}],"DLeft":[{"type":"button","code":13,"direction":0}],"DRight":[{"type":"button","code":14,"direction":0}],"L":[{"type":"button","code":9,"direction":0}],"R":[{"type":"button","code":10,"direction":0}],"CUp":[{"type":"axis","code":3,"direction":-1}],"CDown":[{"type":"axis","code":3,"direction":1}],"CLeft":[{"type":"axis","code":2,"direction":-1}],"CRight":[{"type":"axis","code":2,"direction":1}]},"Race":{"A":[{"type":"button","code":0,"direction":0}],"B":[{"type":"button","code":2,"direction":0}],"Z":[{"type":"button","code":9,"direction":0}],"Start":[{"type":"button","code":6,"direction":0}],"DUp":[{"type":"button","code":11,"direction":0}],"DDown":[{"type":"button","code":12,"direction":0}],"DLeft":[{"type":"button","code":13,"direction":0}],"DRight":[{"type":"button","code":14,"direction":0}],"L":[{"type":"axis","code":4,"direction":1}],"R":[{"type":"button","code":10,"direction":0}],"CUp":[{"type":"button","code":11,"direction":0},{"type":"axis","code":3,"direction":1}],"CDown":[{"type":"button","code":12,"direction":0},{"type":"axis","code":5,"direction":1},{"type":"button","code":1,"direction":0}],"CLeft":[{"type":"button","code":13,"direction":0}],"CRight":[{"type":"button","code":14,"direction":0},{"type":"button","code":3,"direction":0}]},"CourseEdit":{"A":[{"type":"button","code":0,"direction":0}],"B":[{"type":"button","code":1,"direction":0}],"Z":[{"type":"axis","code":4,"direction":1},{"type":"axis","code":5,"direction":1}],"Start":[{"type":"button","code":6,"direction":0}],"DUp":[{"type":"button","code":11,"direction":0}],"DDown":[{"type":"button","code":12,"direction":0}],"DLeft":[{"type":"button","code":13,"direction":0}],"DRight":[{"type":"button","code":14,"direction":0}],"L":[{"type":"button","code":9,"direction":0}],"R":[{"type":"button","code":10,"direction":0}],"CUp":[{"type":"axis","code":3,"direction":-1}],"CDown":[{"type":"axis","code":3,"direction":1}],"CLeft":[{"type":"axis","code":2,"direction":-1}],"CRight":[{"type":"axis","code":2,"direction":1}]}}})json";
     CVarSetInteger(marker.c_str(), 1);
+    CVarSetString(activeProfile.c_str(), "Default");
     if (!ImportGamepadProfile(port, profile, nullptr)) {
         CVarSetInteger(marker.c_str(), 0);
+        CVarSetString(activeProfile.c_str(), "");
         return false;
     }
     return true;

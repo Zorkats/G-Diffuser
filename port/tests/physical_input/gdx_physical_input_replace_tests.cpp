@@ -11,6 +11,7 @@
 #include <cstdlib>
 
 extern std::map<std::string, int> values;
+extern std::map<std::string, std::string> stringValues;
 extern int saves, checks;
 extern bool allowActionMaskWrite;
 void Reset(bool warm);
@@ -266,6 +267,8 @@ void TestDefaultGamepadProfileInitialization() {
         CHECK(InitializeDefaultGamepadProfile(port));
         CHECK(values["gEnhancements.Input.Physical.Port" + std::to_string(port + 1) +
                      ".DefaultProfileVersion"] == 1);
+        CHECK(stringValues["gEnhancements.Input.Physical.Port" + std::to_string(port + 1) +
+                           ".ActiveGamepadProfile"] == "Default");
         CHECK(IsConfigured(port, Race, A));
         auto raceA = GetBindings(port, Race, A);
         CHECK(raceA.size() == (port == 2 ? 2u : 1u));

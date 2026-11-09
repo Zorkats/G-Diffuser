@@ -9,10 +9,13 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 
 namespace {
 std::map<std::string, int> values;
+std::map<std::string, std::string> stringValues;
 int saves = 0, writes = 0, checks = 0;
 #define CHECK(condition) do { ++checks; if (!(condition)) { std::fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #condition); std::exit(1); } } while (0)
 struct Item { ImGuiID id; ImRect rect; std::string label; };
@@ -64,6 +67,15 @@ extern "C" void CVarSetInteger(const char* name, int value) {
     ++writes;
     values[name] = value;
 }
+extern "C" const char* CVarGetString(const char* name, const char* fallback) {
+    auto found = stringValues.find(name);
+    return found == stringValues.end() ? fallback : found->second.c_str();
+}
+extern "C" void CVarSetString(const char* name, const char* value) {
+    CHECK(std::string(name).find("gEnhancements.Input.Physical.Port") == 0);
+    ++writes;
+    stringValues[name] = value;
+}
 extern "C" void CVarSave() { ++saves; }
 std::string StringHelper::Sprintf(const char* format, ...) {
     char text[512];
@@ -80,6 +92,7 @@ struct Harness {
     Harness() {
         Ship::Context::current = std::make_shared<Ship::Context>();
         values.clear();
+        stringValues.clear();
         GdxPhysicalInput::EndKeyboardCapture();
         GdxPhysicalInput::Invalidate();
         ImGui::CreateContext();
@@ -341,6 +354,52 @@ void Heartbeat(Harness& h) {
     h.SaveKey(Ship::LUS_KB_A);
     Binding(0, Race, Ship::LUS_KB_A);
 }
+void Profiles(Harness& h) {
+    const auto directory = std::filesystem::path(Ship::Context::GetAppDirectoryPath()) / "gamepad-profiles";
+    std::error_code ec;
+    std::filesystem::remove_all(directory, ec);
+    std::filesystem::create_directories(directory, ec);
+    CHECK(!ec);
+
+    CHECK(GdxPhysicalInput::AddBinding(0, Race, A,
+          std::make_shared<Ship::SDLButtonToButtonMapping>(0, gdx_input_actions_output_bit(A), SDL_CONTROLLER_BUTTON_X)));
+    auto saveFixture = [&](const char* name) {
+        std::string error;
+        const std::string json = GdxPhysicalInput::ExportGamepadProfile(0, name, &error);
+        CHECK(!json.empty() && error.empty());
+        std::ofstream file(directory / (std::string(name) + ".json"), std::ios::binary);
+        CHECK(static_cast<bool>(file));
+        file << json;
+        CHECK(static_cast<bool>(file));
+    };
+    saveFixture("WiiU");
+    saveFixture("Personal");
+    stringValues["gEnhancements.Input.Physical.Port1.ActiveGamepadProfile"] = "Default";
+
+    h.Click("Profile Management");
+    h.Frame();
+    CHECK(std::filesystem::exists(directory / "Default.json")); // First-run Default is available in the list.
+    CHECK(h.Find("Currently Loaded").label == "Currently Loaded");
+    CHECK(h.Find("Make a new profile").label == "Make a new profile");
+    h.Click("Load"); // Sorted list: Default is current, so Personal is the first Load.
+    CHECK(stringValues["gEnhancements.Input.Physical.Port1.ActiveGamepadProfile"] == "Personal");
+
+    h.Click("Remove", 1); // Keep Default and Personal; target WiiU.
+
+    CHECK(std::filesystem::exists(directory / "WiiU.json"));
+    h.Click("Remove profile");
+    CHECK(!std::filesystem::exists(directory / "WiiU.json"));
+
+    h.Click("Make a new profile");
+    h.Click("Profile name");
+    ImGui::GetIO().AddInputCharactersUTF8("Custom");
+    h.Frame();
+    h.Click("Create");
+    CHECK(std::filesystem::exists(directory / "Custom.json"));
+    CHECK(stringValues["gEnhancements.Input.Physical.Port1.ActiveGamepadProfile"] == "Custom");
+    std::filesystem::remove_all(directory, ec);
+}
+
 void Destructor(Harness& h) {
     h.Open();
     h.editor.reset();
@@ -365,6 +424,7 @@ int main(int argc, char** argv) {
     else if (name == "collapsed") Teardown(h, true);
     else if (name == "heartbeat") Heartbeat(h);
     else if (name == "destructor") Destructor(h);
+    else if (name == "profiles") Profiles(h);
     else CHECK(false);
     std::printf("PASS %s (%d checks)\n", name.c_str(), checks);
 }

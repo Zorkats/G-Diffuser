@@ -13,6 +13,7 @@
 using namespace Ship;
 using namespace GdxPhysicalInput;
 std::map<std::string, int> values;
+std::map<std::string, std::string> stringValues;
 int saves = 0, checks = 0, reads = 0, lagReads = 0;
 bool allowActionMaskWrite = false;
 std::map<std::string, int> readsByKey;
@@ -30,6 +31,14 @@ extern "C" void CVarSetInteger(const char* name, int value) {
  CHECK(std::string(name).find("gEnhancements.Input.Physical.Port") == 0 ||
        (allowActionMaskWrite && std::string(name).find("gEnhancements.Input.Actions.") == 0));
  values[name] = value;
+}
+extern "C" const char* CVarGetString(const char* name, const char* fallback) {
+ auto found = stringValues.find(name);
+ return found == stringValues.end() ? fallback : found->second.c_str();
+}
+extern "C" void CVarSetString(const char* name, const char* value) {
+ CHECK(std::string(name).find("gEnhancements.Input.Physical.Port") == 0);
+ stringValues[name] = value;
 }
 extern "C" void CVarSave() { ++saves; }
 std::string StringHelper::Sprintf(const char* format, ...) {
@@ -60,6 +69,7 @@ void Reset(bool warm = true) {
  Context::current = std::make_shared<Context>();
  WheelHandler::GetInstance()->directions = {};
  values.clear();
+ stringValues.clear();
  Invalidate();
  if (warm) {
   for (int port = 0; port < 4; ++port) Apply(Menu, 0, port);
