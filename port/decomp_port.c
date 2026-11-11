@@ -31,11 +31,11 @@ extern void gdx_addr_log(const char* kind, uintptr_t raw, void* resolved);
    (see port_log.h's gdx_log_file_enabled). Used below for the segment-9
    activation diagnostic (Course Edit node-info panel scatter investigation). */
 extern void gdx_dbg_logf(const char* fmt, ...);
-extern void* gdx_host_calloc(size_t count, size_t size);
+extern void* gdx_host_alloc_rdram(size_t size); // n64_gfx_bridge.cpp; honours GDX_RDRAM_LOW32
 extern void  gdx_host_exit(int status);
 extern void  gdx_host_abort(void);
-extern void* gdx_resolve_registered_host_address(unsigned int addr);
-extern void* gdx_resolve_module_host_address(unsigned int addr);
+extern void* gdx_resolve_registered_host_address_pass(unsigned int addr, int restoreBit31);
+extern void* gdx_resolve_module_host_address_pass(unsigned int addr, int restoreBit31);
 extern void* gdx_ensure_asset_segment_for_symbol(unsigned int symLow32, unsigned int* outOffset);
 extern int   gdx_load_venue_texture_segment(int venue);
 extern s32   gGameMode;
@@ -98,7 +98,7 @@ extern GfxPool D_1000000; // defined below; forward-declared here so gdx_rdram_i
 extern GfxPool D_8024DCE0[2];
 
 void gdx_rdram_init(void) {
-    gdx_rdram = (unsigned char*)gdx_host_calloc(1, GDX_RDRAM_SIZE);
+    gdx_rdram = (unsigned char*)gdx_host_alloc_rdram(GDX_RDRAM_SIZE);
     if (gdx_rdram == NULL) {
         gdx_cki("[rdram] FATAL: failed to allocate RDRAM buffer, requested bytes", (int)GDX_RDRAM_SIZE);
         gdx_host_exit(1);
@@ -568,7 +568,11 @@ static void* Gdx_ResolvePortAddress(uintptr_t addr) {
         return resolved;
     }
 
-    registered = gdx_resolve_registered_host_address(raw);
+    /* The two guessers rebuild a host pointer from its low 32 bits. Only their exact candidate
+       runs here. The candidate with bit 31 restored waits until after the RDRAM mappings below:
+       ahead of them it turned an RDRAM offset into a pointer inside whatever buffer the allocator
+       had placed at 0x????????80xxxxxx, the audio table blob or the RDRAM buffer itself. */
+    registered = gdx_resolve_registered_host_address_pass(raw, 0);
     if (registered != NULL) {
         if (resolveLogs < 12) {
             resolveLogs++;
@@ -577,7 +581,7 @@ static void* Gdx_ResolvePortAddress(uintptr_t addr) {
         return registered;
     }
 
-    moduleHost = gdx_resolve_module_host_address(raw);
+    moduleHost = gdx_resolve_module_host_address_pass(raw, 0);
     if (moduleHost != NULL) {
         if (resolveLogs < 12) {
             resolveLogs++;
@@ -606,6 +610,25 @@ static void* Gdx_ResolvePortAddress(uintptr_t addr) {
             gdx_addr_log("rdram", addr, resolved);
         }
         return resolved;
+    }
+
+    /* Not an RDRAM address: a host pointer that lost bit 31 on the way here (Linux PIE). */
+    registered = gdx_resolve_registered_host_address_pass(raw, 1);
+    if (registered != NULL) {
+        if (resolveLogs < 12) {
+            resolveLogs++;
+            gdx_addr_log("registered-bit31", addr, registered);
+        }
+        return registered;
+    }
+
+    moduleHost = gdx_resolve_module_host_address_pass(raw, 1);
+    if (moduleHost != NULL) {
+        if (resolveLogs < 12) {
+            resolveLogs++;
+            gdx_addr_log("module-bit31", addr, moduleHost);
+        }
+        return moduleHost;
     }
 
     if ((((raw >> 24) & 0xF) < 16) && (gSegments[(raw >> 24) & 0xF] != 0)) {
@@ -643,13 +666,29 @@ uintptr_t Segment_SetPhysicalAddress(s32 segment, uintptr_t addr) {
     return addr;
 }
 
+/* A base handed to Segment_SetAddress is an RDRAM offset: the carves in sys_gfx.c and the loaders
+   in this file all store `buffer - gdx_rdram`. It maps straight to the buffer. Sent through
+   Gdx_ResolvePortAddress, the same number can also be the low 32 bits of a host address, and on
+   the launches where a registered buffer or the exe image sat on a matching address the guess won:
+   the segment pointed at unrelated memory and its display lists were garbage. The unk-bss marker is
+   the one host token a caller passes, so it keeps the general path, as does 0. */
+static void* Gdx_ResolveSegmentBase(uintptr_t addr) {
+    unsigned long long offset = (unsigned long long)addr;
+
+    if ((offset != 0) && (offset < GDX_RDRAM_SIZE) && (gdx_rdram != NULL) &&
+        ((unsigned int)offset != (unsigned int)(uintptr_t)SEGMENT_VRAM_START(unk_bss_segment))) {
+        return gdx_rdram + (size_t)offset;
+    }
+    return Gdx_ResolvePortAddress(addr);
+}
+
 uintptr_t Segment_SetAddress(s32 segment, uintptr_t addr) {
     void* resolved;
     /* Defensive bounds — gSegments has 16 slots. */
     if ((unsigned)segment >= 16u) {
         return addr;
     }
-    resolved = Gdx_ResolvePortAddress(addr);
+    resolved = Gdx_ResolveSegmentBase(addr);
     gSegments[segment] = (unsigned long long)resolved;
     gdx_seg_log("SetAddr", segment, addr, resolved);
     return addr;
@@ -985,8 +1024,9 @@ static void gdx_load_segment9_for_mode(void) {
 
     if (diagThisCall) {
         gdx_dbg_logf("[seg9diag] load_segment9_for_mode exit gameMode=%d loaded=%d activeContent=%d "
-                     "Segment_SetAddress(9)=0x%08X\n",
-                     (int)gGameMode, loaded, (int)sGdxSeg9Active, (unsigned int)gSegment22B0A0VramStart);
+                     "Segment_SetAddress(9)=0x%08X base=%p\n",
+                     (int)gGameMode, loaded, (int)sGdxSeg9Active, (unsigned int)gSegment22B0A0VramStart,
+                     (void*)gSegments[9]);
     }
 }
 

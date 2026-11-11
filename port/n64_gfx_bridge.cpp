@@ -43,6 +43,7 @@
 #include "port_log.h"
 #include "rom_buffer.h"
 #include "gdx_segment_source.h"
+#include "gdx_host_placement.h"
 #include "n64_rdram.h"
 #include "n64_gfx_bridge.h"
 #include "gdx_machine_capture_runtime.h"
@@ -500,7 +501,25 @@ std::vector<HostRange> gHostRanges;
  * executable still resolves genuine pointers into its own BSS when nothing else matches. */
 static uintptr_t sGdxExeRangeBegin = 0;
 
+/* A registered range whose low32 window meets an N64 address makes that address ambiguous to the
+   low32 guessers. Buffers the port allocates are placed clear of those windows
+   (gdx_host_placement.h); this reports the ones that are not, the exe image and its BSS. The BSS
+   ranges register first and can fill the line budget, so the one exe image line bypasses it. */
+static void GdxWarnLow32Collision(const char* what, uintptr_t begin, size_t size, bool budgeted) {
+    static int sWarnings = 0;
+    if ((budgeted && (sWarnings >= 8)) || !gdx_low32_window_collides(begin, size)) {
+        return;
+    }
+    if (budgeted) {
+        ++sWarnings;
+    }
+    gdx_port_logf("[placement] WARNING: %s at %p low32=%08X size=0x%zx meets an N64 address window; "
+                  "a token in it can resolve into this range\n",
+                  what, reinterpret_cast<void*>(begin), static_cast<unsigned>(begin & 0xFFFFFFFFu), size);
+}
+
 static void GdxAddHostRange(uintptr_t begin, size_t size) {
+    GdxWarnLow32Collision("registered range", begin, size, true);
     if (sGdxExeRangeBegin != 0 && !gHostRanges.empty() && gHostRanges.back().begin == sGdxExeRangeBegin) {
         gHostRanges.insert(gHostRanges.end() - 1, HostRange{ begin, size });
     } else {
@@ -520,7 +539,7 @@ std::vector<HostRange> gHostPointerStubs;
 std::vector<HostRange> gF3DAssetRanges;
 std::vector<HostRange> gNativeRgba16Ranges;
 std::vector<uintptr_t> gPendingNativeRgba16RangeClears;
-std::vector<uint8_t> gSetupGfxSegment;
+std::vector<uint8_t, GdxPlacedAllocator<uint8_t>> gSetupGfxSegment; // registered: placed
 std::vector<PersistentRawTextureCopy> gRawTextureCopies;
 std::vector<uintptr_t> gPendingTextureCacheDeletes;
 std::vector<std::unique_ptr<uint8_t[]>> gPersistentAllocations;
@@ -566,7 +585,7 @@ struct LoadedAssetSegment {
     uint8_t segment = 0;
     uint32_t romBase = 0;
     bool compressed = false;
-    std::vector<uint8_t> bytes;
+    std::vector<uint8_t, GdxPlacedAllocator<uint8_t>> bytes; // registered as a host range: placed
 };
 
 std::vector<LoadedAssetSegment> gLoadedAssetSegments;
@@ -8401,6 +8420,7 @@ extern "C" void gdx_register_main_module_range(void) {
         }
     }
 
+    GdxWarnLow32Collision("exe image", moduleBegin, static_cast<size_t>(moduleEnd - moduleBegin), false);
     gHostRanges.push_back({ moduleBegin, moduleEnd - moduleBegin }); // must stay last: see GdxAddHostRange
     sGdxExeRangeBegin = moduleBegin;
     gdx_port_logf("[bridge-init] registered EXE module range: base=%p low32=%08X size=0x%zx\n",
@@ -8662,6 +8682,36 @@ extern "C" int gdx_load_venue_texture_segment(int venue) {
     return 1;
 }
 
+/* Road themes (decomp course.c): the decoded texture bank of a venue, for a Course Edit segment that wears
+   that venue's road. NULL for the venue bound to segment 0x0A, whose road keeps the stock path through the
+   D_A00x000 stubs, and for a venue that cannot be loaded. The banks are decoded at boot and never evicted,
+   so a base is looked up once. Game thread only, like gdx_load_venue_texture_segment. */
+extern "C" void* gdx_venue_road_bank(int venue) {
+    static uintptr_t sBases[std::size(kGdxVenueSegmentSymbols)] = {};
+
+    if (venue < 0 || static_cast<size_t>(venue) >= std::size(kGdxVenueSegmentSymbols)) {
+        return nullptr;
+    }
+    if (sBases[venue] == 0) {
+        const unsigned long long bound = gSegments[0x0A];
+        const uintptr_t base =
+            EnsureAssetSegmentForSymbol(Low32(reinterpret_cast<uintptr_t>(kGdxVenueSegmentSymbols[venue])));
+
+        // The lookup claims a segment slot that is still 0. A theme never binds the segment.
+        if (gSegments[0x0A] != bound) {
+            gdx_segment_epoch_begin();
+            gSegments[0x0A] = bound;
+            gdx_segment_epoch_end();
+        }
+        if (base == 0) {
+            gdx_port_logf("[segment] road theme: venue %d has no texture bank\n", venue);
+            return nullptr;
+        }
+        sBases[venue] = base;
+    }
+    return (sBases[venue] == gSegments[0x0A]) ? nullptr : reinterpret_cast<void*>(sBases[venue]);
+}
+
 /* PORT replacement for func_800747EC's building-texture DMA (course_gadgets.c).
  * On console that DMA lands a per-venue 0x800 slice of super_textures on top of
  * course_track_gfx at D_8014A20; under PORT the destination
@@ -8882,6 +8932,70 @@ extern "C" void gdx_dma_report_short_dest(const void* dst, unsigned int size, si
                   dst, size, capacity, romOffset);
 }
 
+/* Allocates the zeroed RDRAM buffer, placed so its low 32 bits meet no N64 address
+   (gdx_host_placement.h). GDX_RDRAM_LOW32=<hex> asks instead for a buffer whose address ends in
+   those 32 bits, which is how the low32 collisions between the buffer and N64 address tokens are
+   reproduced on demand (80002040 is the layout that crashed in gfx_step). The variable is read once
+   at boot, before the config exists, and only Windows honours it. */
+extern "C" void* gdx_host_alloc_rdram(size_t size) {
+#ifdef _WIN32
+    const char* wanted = std::getenv("GDX_RDRAM_LOW32");
+    if ((wanted != nullptr) && (wanted[0] != '\0')) {
+        const uint32_t low32 = static_cast<uint32_t>(std::strtoul(wanted, nullptr, 16));
+        const uintptr_t inPage = low32 & 0xFFFFu; /* VirtualAlloc reserves on 64 KB boundaries */
+        for (uintptr_t high = 0x1AAu; high < 0x1BAu; high++) {
+            const uintptr_t regionBase = (high << 32) | (low32 & 0xFFFF0000u);
+            void* region = VirtualAlloc(reinterpret_cast<void*>(regionBase), size + 0x10000u,
+                                        MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+            if (region != nullptr) {
+                void* placed = static_cast<unsigned char*>(region) + inPage;
+                gdx_port_logf("[rdram] GDX_RDRAM_LOW32=%08X: buffer placed at %p\n", low32, placed);
+                return placed;
+            }
+        }
+        gdx_port_logf("[rdram] GDX_RDRAM_LOW32=%08X: no free region, using the default allocation\n",
+                      low32);
+    }
+#endif
+    void* buffer = gdx_host_alloc_placed(size);
+    if (buffer != nullptr) {
+        gdx_port_logf("[rdram] buffer at %p low32=%08X meets an N64 address window=%d\n", buffer,
+                      static_cast<unsigned>(reinterpret_cast<uintptr_t>(buffer) & 0xFFFFFFFFu),
+                      gdx_low32_window_collides(reinterpret_cast<uintptr_t>(buffer), size));
+    }
+    return buffer;
+}
+
+/* One candidate of a low32 lookup against the registered host ranges: the value as given, or
+   (restoreBit31) the value with bit 31 set. A caller that can tell an N64 address from a truncated
+   host pointer uses this to keep the bit 31 guess behind its own mappings; see
+   Gdx_ResolvePortAddress. */
+extern "C" void* gdx_resolve_registered_host_address_pass(unsigned int addr, int restoreBit31) {
+    const uint32_t candidate = restoreBit31 ? (addr | 0x80000000u) : addr;
+    if (restoreBit31 && (candidate == addr)) {
+        return nullptr; /* bit 31 already set: nothing new to try */
+    }
+    for (const HostRange& range : gHostRanges) {
+        if ((range.begin == 0) || (range.size == 0)) {
+            continue;
+        }
+
+        const uint32_t baseLow = Low32(range.begin);
+        const uint32_t offset = candidate - baseLow;
+        if (offset < range.size) {
+            static int sRegisteredResolveLogs = 0;
+            if (sRegisteredResolveLogs < 8) {
+                ++sRegisteredResolveLogs;
+                gdx_port_logf("[registered-resolve] raw=%08X cand=%08X base=%p baseLow=%08X size=0x%zx -> %p\n",
+                              addr, candidate, reinterpret_cast<void*>(range.begin), baseLow, range.size,
+                              reinterpret_cast<void*>(range.begin + offset));
+            }
+            return reinterpret_cast<void*>(range.begin + offset);
+        }
+    }
+    return nullptr;
+}
+
 extern "C" void* gdx_resolve_registered_host_address(unsigned int addr) {
     /* Two candidates per lookup: the raw value, then the value with bit 31 restored.
        Decomp code routinely converts pointers with the KSEG0->physical idiom
@@ -8893,34 +9007,13 @@ extern "C" void* gdx_resolve_registered_host_address(unsigned int addr) {
        LOADBUFF/SAVEBUFF ops resolved NULL and were skipped, producing the
        all-zero (silent) sample output. The exact-match pass always runs first,
        so this cannot shadow a legitimate raw match. */
-    for (int pass = 0; pass < 2; pass++) {
-        const uint32_t candidate = (pass == 0) ? addr : (addr | 0x80000000u);
-        if (pass == 1 && candidate == addr) {
-            break; /* bit 31 already set: nothing new to try */
-        }
-        for (const HostRange& range : gHostRanges) {
-            if ((range.begin == 0) || (range.size == 0)) {
-                continue;
-            }
-
-            const uint32_t baseLow = Low32(range.begin);
-            const uint32_t offset = candidate - baseLow;
-            if (offset < range.size) {
-                static int sRegisteredResolveLogs = 0;
-                if (sRegisteredResolveLogs < 8) {
-                    ++sRegisteredResolveLogs;
-                    gdx_port_logf("[registered-resolve] raw=%08X cand=%08X base=%p baseLow=%08X size=0x%zx -> %p\n",
-                                  addr, candidate, reinterpret_cast<void*>(range.begin), baseLow, range.size,
-                                  reinterpret_cast<void*>(range.begin + offset));
-                }
-                return reinterpret_cast<void*>(range.begin + offset);
-            }
-        }
-    }
-    return nullptr;
+    void* exact = gdx_resolve_registered_host_address_pass(addr, 0);
+    return (exact != nullptr) ? exact : gdx_resolve_registered_host_address_pass(addr, 1);
 }
 
-extern "C" void* gdx_resolve_module_host_address(unsigned int addr) {
+/* One candidate of a low32 lookup against the exe image; same contract as
+   gdx_resolve_registered_host_address_pass. */
+extern "C" void* gdx_resolve_module_host_address_pass(unsigned int addr, int restoreBit31) {
     uintptr_t moduleBegin = 0;
     uintptr_t moduleEnd = 0;
     GetMainModuleRange(moduleBegin, moduleEnd);
@@ -8928,37 +9021,40 @@ extern "C" void* gdx_resolve_module_host_address(unsigned int addr) {
         return nullptr;
     }
 
+    const uint32_t candidate = restoreBit31 ? (addr | 0x80000000u) : addr;
+    if (restoreBit31 && (candidate == addr)) {
+        return nullptr;
+    }
+
+    uintptr_t full = (moduleBegin & 0xFFFFFFFF00000000ULL) | static_cast<uintptr_t>(candidate);
+    if (full < moduleBegin) {
+        full += 0x100000000ULL;
+    }
+
+    /* Match the bridge's module reconstruction rule: linker/BSS segment symbols can
+       point at section boundaries that are not themselves readable, while offsets
+       from that base can still land on valid display-list/data bytes. */
+    if ((full >= moduleBegin) && (full < moduleEnd)) {
+        static int sModuleResolveLogs = 0;
+        if (sModuleResolveLogs < 8) {
+            ++sModuleResolveLogs;
+            gdx_port_logf("[module-resolve] raw=%08X cand=%08X -> %p module=[%p,%p)\n",
+                          addr, candidate, reinterpret_cast<void*>(full),
+                          reinterpret_cast<void*>(moduleBegin), reinterpret_cast<void*>(moduleEnd));
+        }
+        return reinterpret_cast<void*>(full);
+    }
+    return nullptr;
+}
+
+extern "C" void* gdx_resolve_module_host_address(unsigned int addr) {
     /* Same two-candidate rule as gdx_resolve_registered_host_address above: the raw
        low32, then low32 with bit 31 restored (KSEG0->physical stripping — see the
        comment there). On Linux PIE the module's BSS low32 range regularly crosses
        0x80000000, so stripped pointers reconstructed below moduleBegin and the +4GB
        correction overshot moduleEnd -> NULL (silent audio: skipped LOADBUFF/SAVEBUFF). */
-    for (int pass = 0; pass < 2; pass++) {
-        const uint32_t candidate = (pass == 0) ? addr : (addr | 0x80000000u);
-        if (pass == 1 && candidate == addr) {
-            break;
-        }
-
-        uintptr_t full = (moduleBegin & 0xFFFFFFFF00000000ULL) | static_cast<uintptr_t>(candidate);
-        if (full < moduleBegin) {
-            full += 0x100000000ULL;
-        }
-
-        /* Match the bridge's module reconstruction rule: linker/BSS segment symbols can
-           point at section boundaries that are not themselves readable, while offsets
-           from that base can still land on valid display-list/data bytes. */
-        if ((full >= moduleBegin) && (full < moduleEnd)) {
-            static int sModuleResolveLogs = 0;
-            if (sModuleResolveLogs < 8) {
-                ++sModuleResolveLogs;
-                gdx_port_logf("[module-resolve] raw=%08X cand=%08X -> %p module=[%p,%p)\n",
-                              addr, candidate, reinterpret_cast<void*>(full),
-                              reinterpret_cast<void*>(moduleBegin), reinterpret_cast<void*>(moduleEnd));
-            }
-            return reinterpret_cast<void*>(full);
-        }
-    }
-    return nullptr;
+    void* exact = gdx_resolve_module_host_address_pass(addr, 0);
+    return (exact != nullptr) ? exact : gdx_resolve_module_host_address_pass(addr, 1);
 }
 
 // gFrameMirrorFb / gFrameMirrorValid are declared near the top of this file

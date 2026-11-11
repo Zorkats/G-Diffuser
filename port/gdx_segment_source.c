@@ -14,6 +14,7 @@
  * the payload memcpy is done AFTER releasing the lock.
  */
 #include "gdx_segment_source.h"
+#include "gdx_host_placement.h"
 
 #include <stddef.h>
 #include <stdlib.h>
@@ -171,7 +172,9 @@ static int seg_ensure_loaded(GdxSegFamilySlot* slot) {
      * the archive's real payload is larger than the table promises, the copy is
      * truncated below and we fall back (conservative, still byte-correct). */
     cap = (size_t)GDX_ARCHIVE_PAYLOAD_OFFSET + (size_t)e->size;
-    buf = (unsigned char*)malloc(cap);
+    /* main.cpp registers the audio payloads as host ranges, so every family buffer is placed clear
+     * of the N64 address windows (gdx_host_placement.h) and freed with the matching call. */
+    buf = (unsigned char*)gdx_host_alloc_placed(cap);
     if (buf == NULL) {
         slot->loadState = 2;
         return 0;
@@ -180,7 +183,7 @@ static int seg_ensure_loaded(GdxSegFamilySlot* slot) {
     copied = 0;
     if (!GDiffuser_LoadArchiveFileBytes(e->o2r_key, buf, cap, &copied) ||
         copied < (size_t)GDX_ARCHIVE_PAYLOAD_OFFSET) {
-        free(buf);
+        gdx_host_free_placed(buf, cap);
         slot->loadState = 2;
         return 0;
     }
@@ -195,7 +198,7 @@ static int seg_ensure_loaded(GdxSegFamilySlot* slot) {
      * promises (containment guarantees every served read fits inside e->size). */
     if (payloadSize < e->size ||
         (size_t)GDX_ARCHIVE_PAYLOAD_OFFSET + (size_t)payloadSize > copied) {
-        free(buf);
+        gdx_host_free_placed(buf, cap);
         slot->loadState = 2;
         return 0;
     }

@@ -1,5 +1,6 @@
 #include "rom_buffer.h"
 #include "port_log.h"
+#include "gdx_host_placement.h"
 #ifdef __APPLE__
 #include "gdx_macos_ui.h"
 #endif
@@ -74,14 +75,16 @@ static void load_rom_from_file(FILE* f, const char* displayPath) {
         return;
     }
     size_t sz = (size_t)szl;
-    uint8_t* buf = (uint8_t*)malloc(sz);
+    /* Registered as a host range once loaded (main.cpp), so it is placed clear of the N64 address
+       windows (gdx_host_placement.h). Every reject path below frees it with the matching call. */
+    uint8_t* buf = (uint8_t*)gdx_host_alloc_placed(sz);
     if (!buf) { fclose(f); return; }
-    if (fread(buf, 1, sz, f) != sz) { free(buf); fclose(f); return; }
+    if (fread(buf, 1, sz, f) != sz) { gdx_host_free_placed(buf, sz); fclose(f); return; }
     fclose(f);
     if (buf[0] != 0x80 || buf[1] != 0x37 || buf[2] != 0x12 || buf[3] != 0x40) {
         gdx_port_logf("[rom] REJECTED %s: not a big-endian .z64 image (magic %02X%02X%02X%02X)\n", displayPath,
                       buf[0], buf[1], buf[2], buf[3]);
-        free(buf);
+        gdx_host_free_placed(buf, sz);
         return;
     }
 #ifndef GDX_ALLOW_JP_INPUTS
@@ -98,7 +101,7 @@ static void load_rom_from_file(FILE* f, const char* displayPath) {
                       "-DGDX_ALLOW_JP_INPUTS=ON to enable it).\n",
                       displayPath);
         s_refusedJapaneseRom = true;
-        free(buf);
+        gdx_host_free_placed(buf, sz);
         return;
     }
 #endif
