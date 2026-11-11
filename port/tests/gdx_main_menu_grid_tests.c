@@ -28,35 +28,64 @@ static int sChecks;
 /* Course Edit (4) and Create Machine (7) without the 64DD disk. */
 #define NO_DISK (GDX_MAIN_MENU_GRID_ALL & ~(BIT(4) | BIT(7)))
 
+/* Card numbers: 0 GP Race, 1 Time Attack, 2 Death Race, 3 VS Battle, 4 Course Edit, 5 Practice, 6 Options,
+ * 7 Create Machine, 8 G-NET. Places, row by row: 0 1 3 / 5 8 2 / 4 6 7. */
 static void test_positions(void) {
-    CHECK(gdx_main_menu_grid_left(0) == 56);
-    CHECK(gdx_main_menu_grid_left(1) == 136);
-    CHECK(gdx_main_menu_grid_left(2) == 216);
-    CHECK(gdx_main_menu_grid_left(8) == 216);
-    CHECK(gdx_main_menu_grid_top(0) == 38);
-    CHECK(gdx_main_menu_grid_top(4) == 104);
-    CHECK(gdx_main_menu_grid_top(8) == 170);
+    /* Top row. */
+    CHECK(gdx_main_menu_grid_left(0) == 56 && gdx_main_menu_grid_top(0) == 38);
+    CHECK(gdx_main_menu_grid_left(1) == 136 && gdx_main_menu_grid_top(1) == 38);
+    CHECK(gdx_main_menu_grid_left(3) == 216 && gdx_main_menu_grid_top(3) == 38);
+    /* Middle row, G-NET in the centre. */
+    CHECK(gdx_main_menu_grid_left(5) == 56 && gdx_main_menu_grid_top(5) == 104);
+    CHECK(gdx_main_menu_grid_left(GDX_MAIN_MENU_GNET_CARD) == 136);
+    CHECK(gdx_main_menu_grid_top(GDX_MAIN_MENU_GNET_CARD) == 104);
+    CHECK(gdx_main_menu_grid_left(2) == 216 && gdx_main_menu_grid_top(2) == 104);
+    /* Bottom row. */
+    CHECK(gdx_main_menu_grid_left(4) == 56 && gdx_main_menu_grid_top(4) == 170);
+    CHECK(gdx_main_menu_grid_left(6) == 136 && gdx_main_menu_grid_top(6) == 170);
+    CHECK(gdx_main_menu_grid_left(7) == 216 && gdx_main_menu_grid_top(7) == 170);
     /* Out of range falls back to the first card. */
     CHECK(gdx_main_menu_grid_left(9) == 56);
     CHECK(gdx_main_menu_grid_top(-1) == 38);
     /* The bottom row, 86 * 0.75 = 64.5 pixels tall, ends inside the 240-pixel screen. */
-    CHECK(gdx_main_menu_grid_top(8) + 65 <= 240);
+    CHECK(gdx_main_menu_grid_top(7) + 65 <= 240);
+}
+
+static void test_every_card_has_its_own_place(void) {
+    int a;
+    int b;
+
+    for (a = 0; a < GDX_MAIN_MENU_GRID_CARDS; a++) {
+        for (b = a + 1; b < GDX_MAIN_MENU_GRID_CARDS; b++) {
+            CHECK(gdx_main_menu_grid_left(a) != gdx_main_menu_grid_left(b) ||
+                  gdx_main_menu_grid_top(a) != gdx_main_menu_grid_top(b));
+        }
+    }
 }
 
 static void test_move_all_available(void) {
     const unsigned all = GDX_MAIN_MENU_GRID_ALL;
 
+    /* Along the top row and off its end. */
     CHECK(gdx_main_menu_grid_move(0, GDX_MAIN_MENU_GRID_RIGHT, all) == 1);
-    CHECK(gdx_main_menu_grid_move(2, GDX_MAIN_MENU_GRID_RIGHT, all) == 2);
-    CHECK(gdx_main_menu_grid_move(3, GDX_MAIN_MENU_GRID_LEFT, all) == 3);
-    CHECK(gdx_main_menu_grid_move(5, GDX_MAIN_MENU_GRID_LEFT, all) == 4);
-    CHECK(gdx_main_menu_grid_move(1, GDX_MAIN_MENU_GRID_DOWN, all) == 4);
-    CHECK(gdx_main_menu_grid_move(4, GDX_MAIN_MENU_GRID_DOWN, all) == 7);
-    CHECK(gdx_main_menu_grid_move(7, GDX_MAIN_MENU_GRID_DOWN, all) == 7);
-    CHECK(gdx_main_menu_grid_move(8, GDX_MAIN_MENU_GRID_UP, all) == 5);
+    CHECK(gdx_main_menu_grid_move(1, GDX_MAIN_MENU_GRID_RIGHT, all) == 3);
+    CHECK(gdx_main_menu_grid_move(3, GDX_MAIN_MENU_GRID_RIGHT, all) == 3);
+    /* Along the middle row, through G-NET. */
+    CHECK(gdx_main_menu_grid_move(2, GDX_MAIN_MENU_GRID_LEFT, all) == GDX_MAIN_MENU_GNET_CARD);
+    CHECK(gdx_main_menu_grid_move(GDX_MAIN_MENU_GNET_CARD, GDX_MAIN_MENU_GRID_LEFT, all) == 5);
+    CHECK(gdx_main_menu_grid_move(5, GDX_MAIN_MENU_GRID_LEFT, all) == 5);
+    /* Down the middle column and off its end. */
+    CHECK(gdx_main_menu_grid_move(1, GDX_MAIN_MENU_GRID_DOWN, all) == GDX_MAIN_MENU_GNET_CARD);
+    CHECK(gdx_main_menu_grid_move(GDX_MAIN_MENU_GNET_CARD, GDX_MAIN_MENU_GRID_DOWN, all) == 6);
+    CHECK(gdx_main_menu_grid_move(6, GDX_MAIN_MENU_GRID_DOWN, all) == 6);
+    CHECK(gdx_main_menu_grid_move(GDX_MAIN_MENU_GNET_CARD, GDX_MAIN_MENU_GRID_UP, all) == 1);
+    /* Up the right column and off its end. */
+    CHECK(gdx_main_menu_grid_move(7, GDX_MAIN_MENU_GRID_UP, all) == 2);
+    CHECK(gdx_main_menu_grid_move(2, GDX_MAIN_MENU_GRID_UP, all) == 3);
     CHECK(gdx_main_menu_grid_move(0, GDX_MAIN_MENU_GRID_UP, all) == 0);
+    /* Along the bottom row. */
+    CHECK(gdx_main_menu_grid_move(4, GDX_MAIN_MENU_GRID_RIGHT, all) == 6);
     CHECK(gdx_main_menu_grid_move(6, GDX_MAIN_MENU_GRID_RIGHT, all) == 7);
-    CHECK(gdx_main_menu_grid_move(7, GDX_MAIN_MENU_GRID_RIGHT, all) == GDX_MAIN_MENU_GNET_CARD);
     /* Unknown direction and an out-of-range card change nothing. */
     CHECK(gdx_main_menu_grid_move(4, 7, all) == 4);
     CHECK(gdx_main_menu_grid_move(9, GDX_MAIN_MENU_GRID_LEFT, all) == 9);
@@ -64,22 +93,27 @@ static void test_move_all_available(void) {
 }
 
 static void test_move_without_disk(void) {
-    /* Left and right step over the missing cards. */
-    CHECK(gdx_main_menu_grid_move(3, GDX_MAIN_MENU_GRID_RIGHT, NO_DISK) == 5);
-    CHECK(gdx_main_menu_grid_move(5, GDX_MAIN_MENU_GRID_LEFT, NO_DISK) == 3);
-    CHECK(gdx_main_menu_grid_move(6, GDX_MAIN_MENU_GRID_RIGHT, NO_DISK) == 8);
-    CHECK(gdx_main_menu_grid_move(8, GDX_MAIN_MENU_GRID_LEFT, NO_DISK) == 6);
-    /* Down from the middle column: Course Edit is missing, so the nearest card, the left one on a tie. */
-    CHECK(gdx_main_menu_grid_move(1, GDX_MAIN_MENU_GRID_DOWN, NO_DISK) == 3);
-    CHECK(gdx_main_menu_grid_move(3, GDX_MAIN_MENU_GRID_DOWN, NO_DISK) == 6);
-    CHECK(gdx_main_menu_grid_move(5, GDX_MAIN_MENU_GRID_DOWN, NO_DISK) == 8);
-    CHECK(gdx_main_menu_grid_move(8, GDX_MAIN_MENU_GRID_UP, NO_DISK) == 5);
+    /* Options is alone in the bottom row. */
+    CHECK(gdx_main_menu_grid_move(6, GDX_MAIN_MENU_GRID_LEFT, NO_DISK) == 6);
+    CHECK(gdx_main_menu_grid_move(6, GDX_MAIN_MENU_GRID_RIGHT, NO_DISK) == 6);
+    /* Down from a side column: the card below is missing, so the nearest one in that row. */
+    CHECK(gdx_main_menu_grid_move(5, GDX_MAIN_MENU_GRID_DOWN, NO_DISK) == 6);
+    CHECK(gdx_main_menu_grid_move(2, GDX_MAIN_MENU_GRID_DOWN, NO_DISK) == 6);
+    CHECK(gdx_main_menu_grid_move(GDX_MAIN_MENU_GNET_CARD, GDX_MAIN_MENU_GRID_DOWN, NO_DISK) == 6);
+    CHECK(gdx_main_menu_grid_move(6, GDX_MAIN_MENU_GRID_UP, NO_DISK) == GDX_MAIN_MENU_GNET_CARD);
+    /* Versus missing too, with one controller: the top row ends at Time Attack. */
+    {
+        const unsigned noVersus = NO_DISK & ~BIT(3);
+
+        CHECK(gdx_main_menu_grid_move(1, GDX_MAIN_MENU_GRID_RIGHT, noVersus) == 1);
+        CHECK(gdx_main_menu_grid_move(2, GDX_MAIN_MENU_GRID_UP, noVersus) == 1);
+    }
     /* A whole row missing is skipped. */
     {
-        const unsigned middleGone = GDX_MAIN_MENU_GRID_ALL & ~(BIT(3) | BIT(4) | BIT(5));
+        const unsigned middleGone = GDX_MAIN_MENU_GRID_ALL & ~(BIT(5) | BIT(8) | BIT(2));
 
-        CHECK(gdx_main_menu_grid_move(1, GDX_MAIN_MENU_GRID_DOWN, middleGone) == 7);
-        CHECK(gdx_main_menu_grid_move(8, GDX_MAIN_MENU_GRID_UP, middleGone) == 2);
+        CHECK(gdx_main_menu_grid_move(1, GDX_MAIN_MENU_GRID_DOWN, middleGone) == 6);
+        CHECK(gdx_main_menu_grid_move(7, GDX_MAIN_MENU_GRID_UP, middleGone) == 3);
     }
     /* Nothing to reach. */
     CHECK(gdx_main_menu_grid_move(0, GDX_MAIN_MENU_GRID_RIGHT, BIT(0)) == 0);
@@ -87,11 +121,16 @@ static void test_move_without_disk(void) {
 }
 
 static void test_settle(void) {
-    CHECK(gdx_main_menu_grid_settle(4, GDX_MAIN_MENU_GRID_ALL) == 4);
-    CHECK(gdx_main_menu_grid_settle(4, NO_DISK) == 3);
+    CHECK(gdx_main_menu_grid_settle(GDX_MAIN_MENU_GNET_CARD, GDX_MAIN_MENU_GRID_ALL) == GDX_MAIN_MENU_GNET_CARD);
+    /* Course Edit and Create Machine settle on Options, the one card left in their row. */
+    CHECK(gdx_main_menu_grid_settle(4, NO_DISK) == 6);
     CHECK(gdx_main_menu_grid_settle(7, NO_DISK) == 6);
-    CHECK(gdx_main_menu_grid_settle(7, BIT(8) | BIT(1)) == 8);
-    CHECK(gdx_main_menu_grid_settle(4, BIT(1)) == 1);
+    /* Versus settles on Time Attack, and a tie goes left. */
+    CHECK(gdx_main_menu_grid_settle(3, BIT(0) | BIT(1)) == 1);
+    CHECK(gdx_main_menu_grid_settle(1, BIT(0) | BIT(3)) == 0);
+    /* A row with nothing left: the first available card in reading order. */
+    CHECK(gdx_main_menu_grid_settle(7, BIT(8) | BIT(1)) == 1);
+    CHECK(gdx_main_menu_grid_settle(4, BIT(2) | BIT(8)) == 8);
     CHECK(gdx_main_menu_grid_settle(12, NO_DISK) == 0);
     CHECK(gdx_main_menu_grid_settle(-3, BIT(2)) == 2);
     CHECK(gdx_main_menu_grid_settle(5, 0u) == 0);
@@ -246,6 +285,7 @@ static void test_generated_map(void) {
 
 int main(void) {
     test_positions();
+    test_every_card_has_its_own_place();
     test_move_all_available();
     test_move_without_disk();
     test_settle();

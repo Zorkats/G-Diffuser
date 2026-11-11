@@ -8,6 +8,7 @@
 //   GDX_DET_LOG=<path>             Write the log. Opened once, truncated.
 //   GDX_DET_DUMP=<race>:<frame>    Also write every probed field of every racer on that frame, in
 //                                  hex and as a number, so a hash mismatch names its field.
+//                                  <race>:<first>-<last> does it for a run of frames.
 //   GDX_DET_RACE_SEED=<n>          Reseed both RNGs and zero gGameFrameCount at the start of
 //                                  every Race_Init (gdx_det_layout.c). Works without GDX_DET_LOG.
 //
@@ -95,6 +96,7 @@ void gdx_det_probe_record(const GdxDetFrame* frame) {
     static FILE* sOut;
     static int sDumpRace = -1;
     static int sDumpFrame = -1;
+    static int sDumpLast = -1;
     static int sRace;
     static int sFrame;
     static int sLastMode = -1;
@@ -113,8 +115,14 @@ void gdx_det_probe_record(const GdxDetFrame* frame) {
         if (path != NULL && path[0] != '\0') {
             sOut = fopen(path, "w");
         }
-        if (dump != NULL && sscanf(dump, "%d:%d", &sDumpRace, &sDumpFrame) != 2) {
-            sDumpRace = sDumpFrame = -1;
+        if (dump != NULL) {
+            int fields = sscanf(dump, "%d:%d-%d", &sDumpRace, &sDumpFrame, &sDumpLast);
+
+            if (fields == 2) {
+                sDumpLast = sDumpFrame;
+            } else if (fields != 3) {
+                sDumpRace = sDumpFrame = sDumpLast = -1;
+            }
         }
     }
     if (sOut == NULL) {
@@ -163,7 +171,7 @@ void gdx_det_probe_record(const GdxDetFrame* frame) {
     }
     fputc('\n', sOut);
 
-    if (sRace == sDumpRace && sFrame == sDumpFrame) {
+    if (sRace == sDumpRace && sFrame >= sDumpFrame && sFrame <= sDumpLast) {
         for (i = 0; i < count; i++) {
             gdx_det_dump_racer(sOut, sFrame, i, frame->racers + (size_t)i * frame->racerSize);
         }

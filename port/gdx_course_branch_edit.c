@@ -15,11 +15,19 @@ typedef struct EditState {
     uint8_t magnetStrength;
     uint8_t magnetRange;
     uint8_t aiAggression;
+    uint8_t windStrength; /* the track's wind */
+    uint16_t windAngle;
+    uint8_t roadTheme; /* the track's road theme */
+    uint8_t backgroundCount;
+    GdxBackgroundSlot backgrounds[GDX_SETTINGS_BACKGROUND_MAX];
 } EditState;
 
 /* Fails to compile when the undo snapshot size is too small for the state. */
 typedef char GdxBranchEditStateFits[(sizeof(EditState) <= GDX_BRANCH_EDIT_STATE_BYTES) ? 1 : -1];
 typedef char GdxBranchEditExtrasFit[(GDX_BRANCH_EDIT_MAX_POINTS <= GDX_SETTINGS_MAX_POINTS) ? 1 : -1];
+typedef char GdxBranchEditBackgroundsMatch[(GDX_BRANCH_EDIT_BACKGROUND_MAX == GDX_SETTINGS_BACKGROUND_MAX) ? 1 : -1];
+typedef char GdxBranchEditBackgroundImagesMatch[
+    (GDX_BRANCH_EDIT_BACKGROUND_IMAGE_MAX == GDX_SETTINGS_BACKGROUND_IMAGE_MAX) ? 1 : -1];
 
 static EditState sLive;
 static EditState sBackup;
@@ -35,6 +43,11 @@ static void edit_build_settings(GdxCourseSettings* out, int ringCount, int skipN
     out->magnetStrength = sLive.magnetStrength;
     out->magnetRange = sLive.magnetRange;
     out->aiAggression = sLive.aiAggression;
+    out->windStrength = sLive.windStrength;
+    out->windAngle = sLive.windAngle;
+    out->roadTheme = sLive.roadTheme;
+    out->backgroundCount = sLive.backgroundCount;
+    memcpy(out->backgrounds, sLive.backgrounds, sizeof(out->backgrounds));
     for (i = 0; (i < ringCount) && (i < GDX_BRANCH_EDIT_MAX_POINTS); i++) {
         out->ring[i] = sLive.ringExtras[i];
     }
@@ -189,6 +202,11 @@ int gdx_branch_edit_select(const char* courseId, int ringCount) {
         sLive.magnetStrength = sLoaded.magnetStrength;
         sLive.magnetRange = sLoaded.magnetRange;
         sLive.aiAggression = sLoaded.aiAggression;
+        sLive.windStrength = sLoaded.windStrength;
+        sLive.windAngle = sLoaded.windAngle;
+        sLive.roadTheme = sLoaded.roadTheme;
+        sLive.backgroundCount = sLoaded.backgroundCount;
+        memcpy(sLive.backgrounds, sLoaded.backgrounds, sizeof(sLive.backgrounds));
         if ((sLoaded.ringCount == ringCount) && (ringCount <= GDX_BRANCH_EDIT_MAX_POINTS)) {
             int f;
             int i;
@@ -302,6 +320,8 @@ static int extra_clamp(int which, int value) {
     } else if (which == GDX_BRANCH_EDIT_EXTRA_PAD_BOOST) {
         min = GDX_SETTINGS_PAD_BOOST_MIN;
         max = GDX_SETTINGS_PAD_BOOST_MAX;
+    } else if (which == GDX_BRANCH_EDIT_EXTRA_ROAD_THEME) {
+        max = GDX_SETTINGS_ROAD_THEME_MAX;
     }
     if (value <= 0) {
         return 0;
@@ -327,6 +347,8 @@ static uint8_t* extra_field(GdxPointExtras* extras, int which) {
             return &extras->padWidth;
         case GDX_BRANCH_EDIT_EXTRA_PAD_BOOST:
             return &extras->padBoost;
+        case GDX_BRANCH_EDIT_EXTRA_ROAD_THEME:
+            return &extras->roadTheme;
         default:
             return NULL;
     }
@@ -413,6 +435,12 @@ int gdx_branch_edit_track_setting(int which) {
             return sLive.magnetRange;
         case GDX_BRANCH_EDIT_TRACK_AI:
             return sLive.aiAggression;
+        case GDX_BRANCH_EDIT_TRACK_WIND_STRENGTH:
+            return sLive.windStrength;
+        case GDX_BRANCH_EDIT_TRACK_WIND_ANGLE:
+            return sLive.windAngle;
+        case GDX_BRANCH_EDIT_TRACK_ROAD_THEME:
+            return sLive.roadTheme;
         default:
             return 0;
     }
@@ -437,9 +465,96 @@ void gdx_branch_edit_set_track_setting(int which, int value) {
                                             : (value > GDX_SETTINGS_AI_BRUTAL) ? GDX_SETTINGS_AI_BRUTAL
                                                                                : value);
             break;
+        case GDX_BRANCH_EDIT_TRACK_WIND_STRENGTH:
+            sLive.windStrength = wind_strength_clamp(value);
+            if (!wind_blows(sLive.windStrength)) {
+                sLive.windAngle = 0;
+            }
+            break;
+        case GDX_BRANCH_EDIT_TRACK_WIND_ANGLE:
+            /* Only a wind has a direction, so the stored values keep one encoding. */
+            if (!wind_blows(sLive.windStrength)) {
+                return;
+            }
+            sLive.windAngle = (uint16_t) wind_angle_wrap(value);
+            break;
+        case GDX_BRANCH_EDIT_TRACK_ROAD_THEME:
+            sLive.roadTheme = (uint8_t) extra_clamp(GDX_BRANCH_EDIT_EXTRA_ROAD_THEME, value);
+            break;
         default:
             return;
     }
+    edit_publish();
+}
+
+int gdx_branch_edit_background_count(void) {
+    return sLive.backgroundCount;
+}
+
+int gdx_branch_edit_background(int slot, int* image, int* angle) {
+    if ((slot < 0) || (slot >= sLive.backgroundCount)) {
+        return 0;
+    }
+    if (image != NULL) {
+        *image = sLive.backgrounds[slot].image;
+    }
+    if (angle != NULL) {
+        *angle = sLive.backgrounds[slot].angle;
+    }
+    return 1;
+}
+
+static uint8_t background_image_clamp(int image) {
+    if (image < 1) {
+        return 1;
+    }
+    return (uint8_t) ((image > GDX_SETTINGS_BACKGROUND_IMAGE_MAX) ? GDX_SETTINGS_BACKGROUND_IMAGE_MAX : image);
+}
+
+/* The slots are written field by field and moved as bytes, so the bytes between their fields stay zero and two
+ * equal lists are equal states. */
+int gdx_branch_edit_set_background(int slot, int image, int angle) {
+    if ((slot < 0) || (slot > sLive.backgroundCount) || (slot >= GDX_SETTINGS_BACKGROUND_MAX)) {
+        return 0;
+    }
+    if (slot == sLive.backgroundCount) {
+        sLive.backgroundCount++;
+    }
+    sLive.backgrounds[slot].image = background_image_clamp(image);
+    sLive.backgrounds[slot].angle = (uint16_t) wind_angle_wrap(angle);
+    edit_publish();
+    return 1;
+}
+
+int gdx_branch_edit_remove_background(int slot) {
+    int last = sLive.backgroundCount - 1;
+
+    if ((slot < 0) || (slot > last)) {
+        return 0;
+    }
+    memmove(&sLive.backgrounds[slot], &sLive.backgrounds[slot + 1],
+            (size_t) (last - slot) * sizeof(sLive.backgrounds[0]));
+    memset(&sLive.backgrounds[last], 0, sizeof(sLive.backgrounds[0]));
+    sLive.backgroundCount = (uint8_t) last;
+    edit_publish();
+    return 1;
+}
+
+void gdx_branch_edit_set_backgrounds(const int* images, const int* angles, int count) {
+    int i;
+
+    if (count < 0) {
+        count = 0;
+    }
+    if (count > GDX_SETTINGS_BACKGROUND_MAX) {
+        count = GDX_SETTINGS_BACKGROUND_MAX;
+    }
+    memset(sLive.backgrounds, 0, sizeof(sLive.backgrounds));
+    for (i = 0; i < count; i++) {
+        sLive.backgrounds[i].image = background_image_clamp(images[i]);
+        sLive.backgrounds[i].angle = (uint16_t) wind_angle_wrap(angles[i]);
+    }
+    sLive.backgroundCount = (uint8_t) count;
     edit_publish();
 }
 
@@ -598,9 +713,10 @@ static void extras_on_insert(int newIndex, const GdxBranchEditPoint* ring, int r
         const int before = (newIndex - 1 + ringCount) % ringCount;
         const GdxPointExtras* old = &sLive.ringExtras[before];
 
-        /* Wind is not a part: the new point splits a segment, so both halves keep its wind. */
+        /* Wind and the road theme are not parts: the new point splits a segment, so both halves keep them. */
         fresh.windStrength = old->windStrength;
         fresh.windAngle = old->windAngle;
+        fresh.roadTheme = old->roadTheme;
         if ((ring[newIndex].parts[0] != GDX_BRANCH_EDIT_PART_NONE) &&
             (ring[newIndex].parts[0] == ring[before].parts[0])) {
             fresh.pitWidth = old->pitWidth;
@@ -797,16 +913,56 @@ void gdx_branch_edit_on_reverse(int ringCount) {
 }
 
 void gdx_branch_edit_on_translate(float dx, float dz) {
+    gdx_branch_edit_on_move(dx, 0.0f, dz);
+}
+
+void gdx_branch_edit_on_move(float dx, float dy, float dz) {
     int f;
     int i;
 
     for (f = 0; f < sLive.set.forkCount; f++) {
         for (i = 0; i < sLive.set.forks[f].nodeCount; i++) {
             sLive.set.forks[f].nodes[i].pos[0] += dx;
+            sLive.set.forks[f].nodes[i].pos[1] += dy;
             sLive.set.forks[f].nodes[i].pos[2] += dz;
         }
     }
     edit_publish();
+}
+
+void gdx_branch_edit_fit_move(const float delta[3], const float lo[3], const float hi[3], float fit[3]) {
+    int axis;
+    int f;
+    int i;
+
+    for (axis = 0; axis < 3; axis++) {
+        float room = 0.0f;
+        int any = 0;
+
+        /* The room left on the side the move goes to: the least any stored node has. */
+        for (f = 0; f < sLive.set.forkCount; f++) {
+            for (i = 0; i < sLive.set.forks[f].nodeCount; i++) {
+                float at = sLive.set.forks[f].nodes[i].pos[axis];
+                float left = (delta[axis] > 0.0f) ? (hi[axis] - at) : (at - lo[axis]);
+
+                if (!any || (left < room)) {
+                    room = left;
+                    any = 1;
+                }
+            }
+        }
+        fit[axis] = delta[axis];
+        if (any) {
+            float size = (delta[axis] > 0.0f) ? delta[axis] : -delta[axis];
+
+            if (room < 0.0f) {
+                room = 0.0f;
+            }
+            if (size > room) {
+                fit[axis] = (delta[axis] > 0.0f) ? room : -room;
+            }
+        }
+    }
 }
 
 int gdx_branch_edit_sync(int ringCount) {

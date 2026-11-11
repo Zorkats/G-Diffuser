@@ -70,9 +70,11 @@ const int gGdxDetFieldCount = sizeof(gGdxDetFields) / sizeof(gGdxDetFields[0]);
 // matters as much as the seeds: Cpu_GenerateInputs (cpu.c) lets each CPU racer think only on
 // frames where (id & 3) == gGameFrameCount % 4. This is the seam an online race would feed.
 void gdx_det_race_init(void) {
+    extern int gdx_net_race_armed_seed(unsigned int* seed); // gdx_net_race_bridge.c
     unsigned int seed;
 
-    if (gdx_det_probe_race_seed(&seed)) {
+    // The developer seed wins; otherwise a room's race starts every copy from the room's seed.
+    if (gdx_det_probe_race_seed(&seed) || gdx_net_race_armed_seed(&seed)) {
         Math_Rand1Init(seed, seed + seed);
         Math_Rand2Init(seed + seed, seed);
         gGameFrameCount = 0;

@@ -299,9 +299,13 @@ static void test_ai_block(void) {
     CHECK(gdx_settings_decode(sBlock, (size_t) len, bind, &out) == GDX_SETTINGS_ERR_LAYOUT,
           "version 4 without a preset is refused: it is only written for one");
     sBlock[16] = GDX_SETTINGS_AI_FIERCE;
+    sBlock[4] = 6;
+    reseal(sBlock, (size_t) len);
+    CHECK(gdx_settings_decode(sBlock, (size_t) len, bind, &out) == GDX_SETTINGS_ERR_VERSION, "version 6 is unknown");
     sBlock[4] = 5;
     reseal(sBlock, (size_t) len);
-    CHECK(gdx_settings_decode(sBlock, (size_t) len, bind, &out) == GDX_SETTINGS_ERR_VERSION, "version 5 is unknown");
+    CHECK(gdx_settings_decode(sBlock, (size_t) len, bind, &out) == GDX_SETTINGS_ERR_LAYOUT,
+          "version 4 bytes under a version 5 header are refused");
 
     /* A version 3 block keeps reading its header bytes as spare: test builds kept a whole-track wind there. */
     make_settings(&in);
@@ -320,6 +324,172 @@ static void test_ai_block(void) {
     memset(&in, 0, sizeof(in));
     in.aiAggression = GDX_SETTINGS_AI_CALM;
     CHECK(!gdx_settings_is_empty(&in), "a preset alone is a value");
+}
+
+static int round_trips(const GdxCourseSettings* in, uint32_t bind, int len) {
+    GdxCourseSettings out;
+
+    return (len > 0) && (gdx_settings_decode(sBlock, (size_t) len, bind, &out) == GDX_SETTINGS_OK) &&
+           (memcmp(in, &out, sizeof(out)) == 0);
+}
+
+/* Version 5: the track's wind, road themes and backgrounds. */
+static void test_track_block(void) {
+    static unsigned char moved[GDX_SETTINGS_BLOCK_MAX_BYTES];
+    GdxCourseSettings in;
+    GdxCourseSettings out;
+    const uint32_t bind = 0x7AC4B10Cu;
+    const size_t slots = GDX_SETTINGS_BLOCK_HEADER_SIZE_V5;
+    size_t entry;
+    int len;
+    int i;
+
+    /* The track's wind. */
+    make_settings(&in);
+    in.windStrength = 75;
+    in.windAngle = 345;
+    len = gdx_settings_encode(&in, bind, sBlock, sizeof(sBlock));
+    CHECK((len == GDX_SETTINGS_BLOCK_HEADER_SIZE_V5 + 3 * GDX_SETTINGS_ENTRY_BYTES_V5 + 4) && (sBlock[4] == 5) &&
+              (sBlock[16] == 0) && (sBlock[17] == 75) && (sBlock[18] == (345 & 0xFF)) && (sBlock[19] == (345 >> 8)) &&
+              (sBlock[20] == 0) && (sBlock[21] == 0) && (sBlock[22] == 0) && (sBlock[23] == 0),
+          "a track wind writes version 5, with the wind at 0x11 and no preset");
+    CHECK(round_trips(&in, bind, len), "a track wind round trips");
+    CHECK((gdx_settings_rebind(sBlock, (size_t) len, bind, bind + 1, moved, sizeof(moved)) == len) &&
+              (gdx_settings_decode(moved, (size_t) len, bind + 1, &out) == GDX_SETTINGS_OK) &&
+              (memcmp(&in, &out, sizeof(in)) == 0),
+          "a version 5 block rebinds");
+
+    sBlock[17] = 0;
+    reseal(sBlock, (size_t) len);
+    CHECK(gdx_settings_decode(sBlock, (size_t) len, bind, &out) == GDX_SETTINGS_ERR_VALUE,
+          "a track angle without a strength is refused");
+    sBlock[18] = 0;
+    sBlock[19] = 0;
+    reseal(sBlock, (size_t) len);
+    CHECK(gdx_settings_decode(sBlock, (size_t) len, bind, &out) == GDX_SETTINGS_ERR_LAYOUT,
+          "version 5 without a value of its own is refused: it is only written for one");
+    sBlock[17] = GDX_SETTINGS_WIND_MAX + 1;
+    reseal(sBlock, (size_t) len);
+    CHECK(gdx_settings_decode(sBlock, (size_t) len, bind, &out) == GDX_SETTINGS_ERR_VALUE, "a track wind over 100 is refused");
+    sBlock[17] = 75;
+    sBlock[18] = (unsigned char) (360 & 0xFF);
+    sBlock[19] = (unsigned char) (360 >> 8);
+    reseal(sBlock, (size_t) len);
+    CHECK(gdx_settings_decode(sBlock, (size_t) len, bind, &out) == GDX_SETTINGS_ERR_VALUE, "a track angle of 360 is refused");
+
+    in.aiAggression = GDX_SETTINGS_AI_CALM;
+    in.ring[7].windStrength = 40;
+    in.ring[7].windAngle = 180;
+    in.ring[5].padKind = GDX_SETTINGS_PAD_BRAKE;
+    len = gdx_settings_encode(&in, bind, sBlock, sizeof(sBlock));
+    CHECK((sBlock[4] == 5) && (sBlock[16] == GDX_SETTINGS_AI_CALM) && round_trips(&in, bind, len),
+          "a track wind with a preset, a point wind and a pad round trips in version 5");
+
+    memset(&in, 0, sizeof(in));
+    in.windStrength = 1;
+    CHECK(!gdx_settings_is_empty(&in), "a track wind alone is a value");
+    in.windStrength = 0;
+    in.windAngle = 90;
+    CHECK(gdx_settings_validate(&in) == GDX_SETTINGS_ERR_VALUE, "validate refuses a track angle without a strength");
+
+    /* Road themes. */
+    make_settings(&in);
+    in.ring[6].roadTheme = 1;
+    len = gdx_settings_encode(&in, bind, sBlock, sizeof(sBlock));
+    CHECK((len == GDX_SETTINGS_BLOCK_HEADER_SIZE_V5 + 4 * GDX_SETTINGS_ENTRY_BYTES_V5 + 4) && (sBlock[4] == 5) &&
+              (sBlock[20] == 0) && round_trips(&in, bind, len),
+          "a point's road theme alone writes version 5 and an entry of its own");
+    in.roadTheme = 2;
+    in.ring[3].roadTheme = GDX_SETTINGS_ROAD_THEME_MAX;
+    in.nodes[1][4].roadTheme = 5;
+    len = gdx_settings_encode(&in, bind, sBlock, sizeof(sBlock));
+    CHECK((sBlock[20] == 2) && round_trips(&in, bind, len), "a track theme, point themes and a path B theme round trip");
+
+    /* Entry order: ring 3, 6, 9, then the fork node. Entry 0 is ring point 3. */
+    entry = GDX_SETTINGS_BLOCK_HEADER_SIZE_V5;
+    CHECK(sBlock[entry + 13] == GDX_SETTINGS_ROAD_THEME_MAX, "an entry's road theme is its last byte");
+    sBlock[entry + 13] = GDX_SETTINGS_ROAD_THEME_MAX + 1;
+    reseal(sBlock, (size_t) len);
+    CHECK(gdx_settings_decode(sBlock, (size_t) len, bind, &out) == GDX_SETTINGS_ERR_VALUE, "an unknown point theme is refused");
+    sBlock[entry + 13] = GDX_SETTINGS_ROAD_THEME_MAX;
+    sBlock[20] = GDX_SETTINGS_ROAD_THEME_MAX + 1;
+    reseal(sBlock, (size_t) len);
+    CHECK(gdx_settings_decode(sBlock, (size_t) len, bind, &out) == GDX_SETTINGS_ERR_VALUE, "an unknown track theme is refused");
+
+    memset(&in, 0, sizeof(in));
+    in.roadTheme = 3;
+    CHECK(!gdx_settings_is_empty(&in), "a track theme alone is a value");
+    memset(&in, 0, sizeof(in));
+    in.ringCount = 4;
+    in.ring[2].roadTheme = 3;
+    CHECK(!gdx_settings_is_empty(&in), "a point theme alone is a value");
+
+    /* Backgrounds. */
+    make_settings(&in);
+    in.backgroundCount = 2;
+    in.backgrounds[0].image = 1;
+    in.backgrounds[1].image = GDX_SETTINGS_BACKGROUND_IMAGE_MAX;
+    in.backgrounds[1].angle = 359;
+    len = gdx_settings_encode(&in, bind, sBlock, sizeof(sBlock));
+    CHECK((len == GDX_SETTINGS_BLOCK_HEADER_SIZE_V5 + 2 * GDX_SETTINGS_BACKGROUND_BYTES +
+                      3 * GDX_SETTINGS_ENTRY_BYTES_V5 + 4) &&
+              (sBlock[4] == 5) && (sBlock[21] == 2) && (sBlock[slots] == 1) && (sBlock[slots + 1] == 0) &&
+              (sBlock[slots + 2] == 0) && (sBlock[slots + 3] == GDX_SETTINGS_BACKGROUND_IMAGE_MAX) &&
+              (sBlock[slots + 4] == (359 & 0xFF)) && (sBlock[slots + 5] == (359 >> 8)),
+          "backgrounds write version 5, three bytes a slot before the entries");
+    CHECK(round_trips(&in, bind, len), "backgrounds round trip");
+
+    sBlock[21] = 1;
+    reseal(sBlock, (size_t) len);
+    CHECK(gdx_settings_decode(sBlock, (size_t) len, bind, &out) == GDX_SETTINGS_ERR_LAYOUT,
+          "a background count that does not fill the block is refused");
+    sBlock[21] = GDX_SETTINGS_BACKGROUND_MAX + 1;
+    reseal(sBlock, (size_t) len);
+    CHECK(gdx_settings_decode(sBlock, (size_t) len, bind, &out) == GDX_SETTINGS_ERR_VALUE, "more than six backgrounds are refused");
+    sBlock[21] = 2;
+    sBlock[slots] = 0;
+    reseal(sBlock, (size_t) len);
+    CHECK(gdx_settings_decode(sBlock, (size_t) len, bind, &out) == GDX_SETTINGS_ERR_VALUE, "a slot without an image is refused");
+    sBlock[slots] = GDX_SETTINGS_BACKGROUND_IMAGE_MAX + 1;
+    reseal(sBlock, (size_t) len);
+    CHECK(gdx_settings_decode(sBlock, (size_t) len, bind, &out) == GDX_SETTINGS_ERR_VALUE, "an unknown image is refused");
+    sBlock[slots] = 1;
+    sBlock[slots + 1] = (unsigned char) (360 & 0xFF);
+    sBlock[slots + 2] = (unsigned char) (360 >> 8);
+    reseal(sBlock, (size_t) len);
+    CHECK(gdx_settings_decode(sBlock, (size_t) len, bind, &out) == GDX_SETTINGS_ERR_VALUE, "a background angle of 360 is refused");
+
+    memset(&in, 0, sizeof(in));
+    in.backgroundCount = GDX_SETTINGS_BACKGROUND_MAX;
+    for (i = 0; i < GDX_SETTINGS_BACKGROUND_MAX; i++) {
+        in.backgrounds[i].image = (uint8_t) (10 + i);
+        in.backgrounds[i].angle = (uint16_t) (i * 60);
+    }
+    len = gdx_settings_encode(&in, bind, sBlock, sizeof(sBlock));
+    CHECK((len == GDX_SETTINGS_BLOCK_HEADER_SIZE_V5 + GDX_SETTINGS_BACKGROUND_MAX * GDX_SETTINGS_BACKGROUND_BYTES + 4) &&
+              round_trips(&in, bind, len) && !gdx_settings_is_empty(&in),
+          "six backgrounds alone are a value and round trip with no entries");
+    in.backgroundCount = 5;
+    CHECK(gdx_settings_validate(&in) == GDX_SETTINGS_ERR_VALUE, "a slot past the count is refused");
+    in.backgroundCount = GDX_SETTINGS_BACKGROUND_MAX + 1;
+    CHECK(gdx_settings_validate(&in) == GDX_SETTINGS_ERR_VALUE, "validate refuses more than six backgrounds");
+
+    /* The state file carries a version 5 block like any other. */
+    make_settings(&in);
+    in.windStrength = 50;
+    in.windAngle = 15;
+    in.roadTheme = 7;
+    in.backgroundCount = 1;
+    in.backgrounds[0].image = 9;
+    in.backgrounds[0].angle = 120;
+    gdx_settings_store_clear();
+    gdx_settings_store_set("T.CRSD", &in);
+    len = gdx_settings_store_encode_file(sFile, sizeof(sFile));
+    gdx_settings_store_clear();
+    CHECK((len > 0) && (gdx_settings_store_restore_file(sFile, (size_t) len) == GDX_SETTINGS_OK) &&
+              gdx_settings_store_get("T.CRSD", &out) && (memcmp(&in, &out, sizeof(in)) == 0),
+          "the state file round trips the track's wind, theme and backgrounds");
+    gdx_settings_store_clear();
 }
 
 /* The race's scale: the preset applied to the player's option. Normal is 100% whatever the option is. */
@@ -555,7 +725,8 @@ static void test_view(void) {
     gdx_settings_store_clear();
     gdx_settings_set_active(NULL);
     CHECK((gdx_settings_view_pit_width(3) == 0) && (gdx_settings_view_lava_mode() == 0) &&
-              (gdx_settings_view_magnet_strength(9) == 0.0f) && (gdx_settings_view_magnet_range(9) == 0.0f),
+              (gdx_settings_view_magnet_strength(9) == 0.0f) && (gdx_settings_view_magnet_range(9) == 0.0f) &&
+              (gdx_settings_view_track_wind_strength() == 0) && (gdx_settings_view_track_wind_angle() == 0),
           "no active settings reads as not set");
 
     make_settings(&in);
@@ -610,6 +781,69 @@ static void test_view(void) {
     gdx_settings_view_select_course("V.CRSD", 11);
     CHECK((gdx_settings_view_wind_strength(5) == 0) && (gdx_settings_view_wind_any() == 0),
           "another ring length drops the points' wind");
+    in.windStrength = 30;
+    in.windAngle = 270;
+    gdx_settings_store_set("V.CRSD", &in);
+    gdx_settings_view_select_course("V.CRSD", 11);
+    CHECK(gdx_settings_view_wind_any() && (gdx_settings_view_track_wind_strength() == 30) &&
+              (gdx_settings_view_track_wind_angle() == 270) && (gdx_settings_view_wind_strength(5) == 0),
+          "the track's wind is a track value, so another ring length keeps it");
+    gdx_settings_view_select_course("V.CRSD", 10);
+    CHECK((gdx_settings_view_track_wind_strength() == 30) && (gdx_settings_view_wind_strength(5) == 90) &&
+              (gdx_settings_view_wind_angle(5) == 45),
+          "a point keeps its own wind next to the track's");
+    in.windStrength = 0;
+    in.windAngle = 0;
+    gdx_settings_store_set("V.CRSD", &in);
+    gdx_settings_view_select_course("V.CRSD", 10);
+
+    CHECK((gdx_settings_view_road_theme(5) == 0) && (gdx_settings_view_road_theme(-1) == 0),
+          "a track without a road theme reads its venue's own road");
+    in.roadTheme = 3;
+    in.ring[5].roadTheme = 7;
+    gdx_settings_store_set("V.CRSD", &in);
+    gdx_settings_view_select_course("V.CRSD", 10);
+    CHECK((gdx_settings_view_road_theme(5) == 7) && (gdx_settings_view_road_theme(4) == 3) &&
+              (gdx_settings_view_road_theme(-1) == 3) && (gdx_settings_view_road_theme(10) == 3),
+          "a point reads its own road theme, and every other segment the track's");
+    gdx_settings_view_select_course("V.CRSD", 11);
+    CHECK(gdx_settings_view_road_theme(5) == 3,
+          "the track's road theme is a track value, so another ring length keeps it");
+    in.roadTheme = 0;
+    in.ring[5].roadTheme = 0;
+    gdx_settings_store_set("V.CRSD", &in);
+    gdx_settings_view_select_course("V.CRSD", 10);
+
+    {
+        int image = 0;
+        int angle = 0;
+        int image1 = 0;
+        int angle1 = 0;
+
+        CHECK((gdx_settings_view_background_count() == 0) && !gdx_settings_view_background(0, &image, &angle),
+              "a track without horizon images reads none");
+        in.backgroundCount = 2;
+        in.backgrounds[0].image = 12;
+        in.backgrounds[0].angle = 45;
+        in.backgrounds[1].image = 55;
+        in.backgrounds[1].angle = 359;
+        gdx_settings_store_set("V.CRSD", &in);
+        gdx_settings_view_select_course("V.CRSD", 10);
+        CHECK((gdx_settings_view_background_count() == 2) && gdx_settings_view_background(0, &image, &angle) &&
+                  (image == 12) && (angle == 45) && gdx_settings_view_background(1, &image1, &angle1) &&
+                  (image1 == 55) && (angle1 == 359),
+              "the horizon images read in their order");
+        CHECK(!gdx_settings_view_background(2, &image, &angle) && !gdx_settings_view_background(-1, &image, &angle) &&
+                  gdx_settings_view_background(1, NULL, NULL),
+              "a slot outside the list reads nothing");
+        gdx_settings_view_select_course("V.CRSD", 11);
+        CHECK(gdx_settings_view_background_count() == 2,
+              "the horizon images are track values, so another ring length keeps them");
+        in.backgroundCount = 0;
+        memset(in.backgrounds, 0, sizeof(in.backgrounds));
+        gdx_settings_store_set("V.CRSD", &in);
+        gdx_settings_view_select_course("V.CRSD", 10);
+    }
 
     CHECK(gdx_settings_view_ai_scale() == 1.0f, "a track without a preset reads stock aggression");
     CHECK(gdx_settings_view_ai_resolve(0.5f) == 0.5f, "a track without a preset keeps the player's option");
@@ -671,6 +905,7 @@ int main(void) {
     test_pad_block();
     test_wind_block();
     test_ai_block();
+    test_track_block();
     test_ai_resolve();
     test_rebind();
     test_store();

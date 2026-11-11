@@ -1,9 +1,9 @@
 // port/gdx_course_edit_parts_panel.cpp -- Course Edit panel for values the stock course file has no room for.
 //
-// Shows the selected point's part widths, magnet values, dash pad kind and wind, and the track's lava rule, magnet
-// values and wind (gdx_course_settings.h). 0 on a slider means the point or track has no value of its own. Changes
-// are queued for the game thread (gdx_course_edit_input_request_extra), which owns the edit state and the undo
-// stack.
+// Shows the selected point's part widths, magnet values, dash pad kind, wind and road theme, and the track's lava
+// rule, magnet values, wind and road theme (gdx_course_settings.h). 0 on a slider means the point or track has no
+// value of its own. Changes are queued for the game thread (gdx_course_edit_input_request_extra), which owns the
+// edit state and the undo stack.
 //
 // The panel starts collapsed and sits under the icon row, on the right. While the mouse is over it,
 // GdxCourseEditPartsPanelWantsMouse keeps the click out of the editor. gEnhancements.CourseEdit.PartSettingsPanel
@@ -173,8 +173,8 @@ constexpr float kCompassSize = 36.0f;
 const char* const kAngleTip = "The way the wind blows. 0 is north, the top of the race map, and 90 is east. "
                               "Click or drag the compass, or Ctrl+click the value to type it.";
 
-// A compass angle: a slider, and a compass that shows the wind's way and sets it on a click or drag.
-void AngleControl(const char* id, int angle, bool isTrack, int point, int which) {
+// A compass angle: a slider, and a compass that shows the way and sets it on a click or drag. Both show tooltip.
+void AngleControl(const char* id, int angle, bool isTrack, int point, int which, const char* tooltip) {
     int value = angle;
 
     ImGui::PushID(id);
@@ -182,7 +182,7 @@ void AngleControl(const char* id, int angle, bool isTrack, int point, int which)
     if (ImGui::SliderInt("##angle", &value, 0, GDX_SETTINGS_WIND_ANGLE_MAX, "%d deg", ImGuiSliderFlags_AlwaysClamp)) {
         QueueChange(isTrack, point, which, value);
     }
-    ImGui::SetItemTooltip("%s", kAngleTip);
+    ImGui::SetItemTooltip("%s", tooltip);
     ImGui::SameLine();
 
     const ImVec2 corner = ImGui::GetCursorScreenPos();
@@ -206,7 +206,7 @@ void AngleControl(const char* id, int angle, bool isTrack, int point, int which)
             }
         }
     }
-    ImGui::SetItemTooltip("%s", kAngleTip);
+    ImGui::SetItemTooltip("%s", tooltip);
 
     ImDrawList* draw = ImGui::GetWindowDrawList();
     const ImU32 ring = ImGui::GetColorU32(ImGuiCol_Border);
@@ -230,11 +230,50 @@ void AngleControl(const char* id, int angle, bool isTrack, int point, int which)
     ImGui::PopID();
 }
 
-// The wind on a point's segment: the WIND part's presets, an exact strength, and its angle.
-void DrawPointWind(int point) {
+// A road theme: another venue's road textures, on the segment that starts at a point or, for the track, on every
+// segment without one of its own.
+void DrawRoadTheme(bool isTrack, int point) {
+    static const char* const kVenues[] = { "Mute City",  "Port Town", "Big Blue",   "Sand Ocean",
+                                           "Devil's Forest", "White Land", "Sector", "Red Canyon",
+                                           "Fire Field", "Silence",   "Ending" };
+    static_assert(IM_ARRAYSIZE(kVenues) == GDX_SETTINGS_ROAD_THEME_MAX, "one name for each road theme");
+    const int which = isTrack ? GDX_BRANCH_EDIT_TRACK_ROAD_THEME : GDX_BRANCH_EDIT_EXTRA_ROAD_THEME;
+    const int theme = isTrack ? gdx_branch_edit_track_setting(which) : gdx_branch_edit_point_extra(point, which);
+    const char* notSet = isTrack ? "Venue" : "Track";
+    const char* preview = (theme >= 1 && theme <= GDX_SETTINGS_ROAD_THEME_MAX) ? kVenues[theme - 1] : notSet;
+
+    ImGui::SetNextItemWidth(kSliderWidth);
+    if (ImGui::BeginCombo(isTrack ? "Track road theme" : "Road theme", preview)) {
+        for (int i = 0; i <= GDX_SETTINGS_ROAD_THEME_MAX; i++) {
+            const bool picked = theme == i;
+            if (ImGui::Selectable(i == 0 ? notSet : kVenues[i - 1], picked) && !picked) {
+                QueueChange(isTrack, point, which, i);
+            }
+            if (picked) {
+                ImGui::SetItemDefaultFocus();
+            }
+        }
+        ImGui::EndCombo();
+    }
+    if (isTrack) {
+        ImGui::SetItemTooltip("The road textures on every segment that has no theme of its own. Venue keeps the road "
+                              "of the track's venue. It changes the look only, not the grip.");
+    } else {
+        ImGui::SetItemTooltip("Another venue's road textures on the segment from this point to the next. Track "
+                              "keeps the track's theme. It changes the look only, not the grip. Roads that look "
+                              "the same in every venue, such as pipes and tunnels, do not change.");
+    }
+}
+
+// A wind: the WIND part's presets, an exact strength, and its angle. A point's blows on the segment that starts
+// there, and the track's on every segment that has none of its own.
+void DrawWind(bool isTrack, int point) {
     static const char* const kPresets[] = { "None", "Weak", "Mid", "Strong", "Gale" };
     static const int kPresetStrengths[] = { 0, 25, 50, 75, 100 };
-    const int strength = gdx_branch_edit_point_extra(point, GDX_BRANCH_EDIT_EXTRA_WIND_STRENGTH);
+    const int strengthId = isTrack ? GDX_BRANCH_EDIT_TRACK_WIND_STRENGTH : GDX_BRANCH_EDIT_EXTRA_WIND_STRENGTH;
+    const int angleId = isTrack ? GDX_BRANCH_EDIT_TRACK_WIND_ANGLE : GDX_BRANCH_EDIT_EXTRA_WIND_ANGLE;
+    const int strength = isTrack ? gdx_branch_edit_track_setting(strengthId)
+                                 : gdx_branch_edit_point_extra(point, strengthId);
 
     const char* preview = nullptr;
     for (int i = 0; i < IM_ARRAYSIZE(kPresets); i++) {
@@ -243,11 +282,11 @@ void DrawPointWind(int point) {
         }
     }
     ImGui::SetNextItemWidth(kSliderWidth);
-    if (ImGui::BeginCombo("Wind", preview != nullptr ? preview : "Custom")) {
+    if (ImGui::BeginCombo(isTrack ? "Track wind" : "Wind", preview != nullptr ? preview : "Custom")) {
         for (int i = 0; i < IM_ARRAYSIZE(kPresets); i++) {
             const bool picked = strength == kPresetStrengths[i];
             if (ImGui::Selectable(kPresets[i], picked) && !picked) {
-                QueueChange(false, point, GDX_BRANCH_EDIT_EXTRA_WIND_STRENGTH, kPresetStrengths[i]);
+                QueueChange(isTrack, point, strengthId, kPresetStrengths[i]);
             }
             if (picked) {
                 ImGui::SetItemDefaultFocus();
@@ -255,23 +294,31 @@ void DrawPointWind(int point) {
         }
         ImGui::EndCombo();
     }
-    ImGui::SetItemTooltip("The wind on the segment from this point to the next. Tunnels always block it. The WIND "
-                          "part in Parts places it too; set its angle here.");
+    if (isTrack) {
+        ImGui::SetItemTooltip("The wind on every segment that has no wind of its own. Tunnels always block it. The "
+                              "TRACK and TURN rows of the WIND part in Parts set it too. The editor draws it as an "
+                              "arrow at the first point, and the race shows it as streaks only.");
+    } else {
+        ImGui::SetItemTooltip("The wind on the segment from this point to the next, in place of the track's. Tunnels "
+                              "always block it. The WIND part in Parts places it too; set its angle here.");
+    }
     if (strength == 0) {
         return;
     }
     int value = strength;
 
     ImGui::SetNextItemWidth(kSliderWidth);
-    if (ImGui::SliderInt("Wind strength", &value, 1, GDX_SETTINGS_WIND_MAX, "%d%%", ImGuiSliderFlags_AlwaysClamp)) {
-        QueueChange(false, point, GDX_BRANCH_EDIT_EXTRA_WIND_STRENGTH, value);
+    if (ImGui::SliderInt(isTrack ? "Track wind strength" : "Wind strength", &value, 1, GDX_SETTINGS_WIND_MAX, "%d%%",
+                         ImGuiSliderFlags_AlwaysClamp)) {
+        QueueChange(isTrack, point, strengthId, value);
     }
-    ImGui::SetItemTooltip("How hard the wind pushes here. It pushes twice as hard in the air, and harder while you "
+    ImGui::SetItemTooltip("How hard the wind pushes. It pushes twice as hard in the air, and harder while you "
                           "slide. Ctrl+click the value to type it.");
-    AngleControl("PointWindAngle", gdx_branch_edit_point_extra(point, GDX_BRANCH_EDIT_EXTRA_WIND_ANGLE), false, point,
-                 GDX_BRANCH_EDIT_EXTRA_WIND_ANGLE);
+    AngleControl(isTrack ? "TrackWindAngle" : "PointWindAngle",
+                 isTrack ? gdx_branch_edit_track_setting(angleId) : gdx_branch_edit_point_extra(point, angleId),
+                 isTrack, point, angleId, kAngleTip);
     ImGui::SameLine();
-    ImGui::TextUnformatted("Wind angle");
+    ImGui::TextUnformatted(isTrack ? "Track wind angle" : "Wind angle");
 }
 
 void DrawPointSection() {
@@ -310,7 +357,86 @@ void DrawPointSection() {
     if ((parts & GDX_BRANCH_EDITOR_PART_DASH) != 0) {
         DrawPadControls(point);
     }
-    DrawPointWind(point);
+    DrawWind(false, point);
+    DrawRoadTheme(false, point);
+}
+
+// The track's horizon images: stock images that stand around the track, each at a compass angle.
+void DrawHorizon() {
+    static const char* const kImages[] = {
+        "City skyline 1", "City skyline 2", "City skyline 3", "City skyline 4", "Mountains 1",
+        "Skull mountain", "Giant tree", "Mountain city", "City skyline 5", "City skyline 6",
+        "City skyline 7", "City skyline 8", "Night skyline 5", "Night skyline 6", "Night skyline 7",
+        "Night skyline 8", "Mountains 2", "Mountains 3", "Mountains and towers 1", "Mountains and towers 2",
+        "Towers 1", "Pyramid", "Towers 2", "Moon 1", "Statue 1",
+        "Mountains and towers 3", "Castle", "Mountains and towers 4", "Rocket launch 1", "Rocket launch 2",
+        "Rocket launch 3", "Radar dish", "Raised city 1", "Raised glass dome", "Raised city 2",
+        "Connected mountains", "Moon 2", "Flying city", "Night skyline 1", "Night skyline 2",
+        "Night skyline 3", "Night skyline 4", "Nintendo building", "Jack Cup building", "Nintendo N building",
+        "F-Zero X building", "Double spheroid building", "Queen Cup building", "King Cup building",
+        "Joker Cup building", "X Cup building", "Edit Cup building", "Man statue 2", "Moon 3",
+        "Single spheroid building",
+    };
+    static const char* const kCourses[] = {
+        "Mute City", "Silence", "Sand Ocean", "Devil's Forest", "Big Blue", "Port Town",
+        "Sector Alpha", "Red Canyon", "Devil's Forest 2", "Mute City 2", "Big Blue 2", "White Land",
+        "Fire Field", "Silence 2", "Sector Beta", "Red Canyon 2", "White Land 2", "Mute City 3",
+        "Rainbow Road", "Devil's Forest 3", "Space Plant", "Sand Ocean 2", "Port Town 2", "Big Hand",
+    };
+    static_assert(IM_ARRAYSIZE(kImages) == GDX_BRANCH_EDIT_BACKGROUND_IMAGE_MAX, "one name for each horizon image");
+    static const char* const kTip = "Where the image stands. 0 is north, the top of the race map, and 90 is east. "
+                                    "Click or drag the compass, or Ctrl+click the value to type it.";
+    const int count = gdx_branch_edit_background_count();
+
+    ImGui::TextUnformatted("Horizon images");
+    ImGui::SetItemTooltip("Images that stand on the horizon of this track, %d at most. A track with none keeps the "
+                          "stock horizon. They show in single player races and test runs, not in the editor's view.",
+                          GDX_BRANCH_EDIT_BACKGROUND_MAX);
+    for (int slot = 0; slot < count; slot++) {
+        int image = 1;
+        int angle = 0;
+
+        gdx_branch_edit_background(slot, &image, &angle);
+        const bool known = image >= 1 && image <= GDX_BRANCH_EDIT_BACKGROUND_IMAGE_MAX;
+
+        ImGui::PushID(slot);
+        ImGui::SetNextItemWidth(kSliderWidth);
+        if (ImGui::BeginCombo("##image", known ? kImages[image - 1] : "?")) {
+            for (int i = 1; i <= GDX_BRANCH_EDIT_BACKGROUND_IMAGE_MAX; i++) {
+                const bool picked = image == i;
+                if (ImGui::Selectable(kImages[i - 1], picked) && !picked) {
+                    QueueChange(true, 0, GDX_BRANCH_EDITOR_HORIZON_IMAGE + slot, i);
+                }
+                if (picked) {
+                    ImGui::SetItemDefaultFocus();
+                }
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Remove")) {
+            QueueChange(true, 0, GDX_BRANCH_EDITOR_HORIZON_REMOVE, slot);
+        }
+        AngleControl("HorizonAngle", angle, true, 0, GDX_BRANCH_EDITOR_HORIZON_ANGLE + slot, kTip);
+        ImGui::PopID();
+    }
+    if (count < GDX_BRANCH_EDIT_BACKGROUND_MAX) {
+        if (ImGui::Button("Add image")) {
+            QueueChange(true, 0, GDX_BRANCH_EDITOR_HORIZON_IMAGE + count, 1);
+        }
+        ImGui::SameLine();
+    }
+    ImGui::SetNextItemWidth(kSliderWidth);
+    if (ImGui::BeginCombo("##copyHorizon", "Copy from")) {
+        for (int i = 0; i < IM_ARRAYSIZE(kCourses); i++) {
+            if (ImGui::Selectable(kCourses[i])) {
+                QueueChange(true, 0, GDX_BRANCH_EDITOR_HORIZON_COPY, i);
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::SetItemTooltip("Replaces the list with the horizon of a stock course. A course without horizon images "
+                          "empties it.");
 }
 
 void DrawTrackSection() {
@@ -338,6 +464,9 @@ void DrawTrackSection() {
                           "difficulty. Track keeps the player's AI aggression option. Calm halves it,\n"
                           "Fierce is 1.5x and Brutal doubles it. Normal sets AI aggression to 100% on this\n"
                           "track, in place of the option. Past Normal, CPUs below Expert also spin attack.");
+    DrawWind(true, 0);
+    DrawRoadTheme(true, 0);
+    DrawHorizon();
     if (CVarGetInteger("gEnhancements.Gameplay.IgnoreTrackSettings", 0) != 0) {
         ImGui::TextDisabled("Ignore track settings is on, so you race on the menu's values.");
     }

@@ -49,12 +49,24 @@ int gdx_settings_view_pad_kind(int point);
 int gdx_settings_view_pad_width(int point);
 float gdx_settings_view_pad_boost(int point);
 
-/* A point's wind, as stored (gdx_wind_resolve applies it): strength 0 (none) or 1..100, and the compass angle
- * 0..359. Wind is per segment only. */
+/* A point's own wind, as stored: strength 0 (none) or 1..100, and the compass angle 0..359. */
 int gdx_settings_view_wind_strength(int point);
 int gdx_settings_view_wind_angle(int point);
-/* 1 when any point has wind, so the race loads the streak art. */
+/* The track's wind, as stored, with the same two values. It blows on every segment without a wind of its own
+ * (gdx_wind_resolve_track applies both). */
+int gdx_settings_view_track_wind_strength(void);
+int gdx_settings_view_track_wind_angle(void);
+/* 1 when the track or any point has wind, so the race loads the streak art. */
 int gdx_settings_view_wind_any(void);
+
+/* The road theme of the segment that starts at a point: the point's own, else the track's. 0 is the road of
+ * the course's venue and 1..11 is a venue + 1. A point outside the ring reads the track's. */
+int gdx_settings_view_road_theme(int point);
+
+/* The track's horizon images: how many it lists, and one of them as a stock image id and the compass angle it stands
+ * at (0 north, 90 east). background returns 0 for a slot outside the list; image and angle may be NULL. */
+int gdx_settings_view_background_count(void);
+int gdx_settings_view_background(int slot, int* image, int* angle);
 
 /* The multiplier the track's CPU aggression preset puts on the AI aggression option: 1 with no preset. Normal gives 1
  * here too, but it replaces the option, so the race uses gdx_settings_view_ai_resolve. */

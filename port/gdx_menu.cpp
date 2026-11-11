@@ -64,6 +64,7 @@ extern "C" const char* SDL_GetCurrentAudioDriver(void);
                            // one call
 
 #include "gdx_console_log.h" // Console page: drains the queued port-log lines into the LUS console
+#include "gdx_lan_lobby.h"   // GDX_NET_DEV, run once per frame from UpdateElement
 #include "gdx_ghost_io.h" // .gdg ghost import/export C API (Practice tab Export / Import buttons)
 #include "gdx_xcup_seed.h" // M3 X Cup seed codes (Gameplay tab custom block)
 #include "gdx_xcup_random.h" // X Cup random courses and the saved copy of a generated course
@@ -707,6 +708,7 @@ GdxMenu::GdxMenu() : Ship::GuiWindow("gOpenMenuBar", false, "G-Diffuser Menu") {
     // PRACTICE. Both are drawn under #ifdef PORT in hud.c / camera.c; photo mode saves and restores
     // eye/at/fov each frame so unpausing is 1:1.
     CVarRegisterInteger("gEnhancements.Practice.ShowLapDeltas", 0);
+    CVarRegisterInteger("gEnhancements.Hud.EndlessLapCounter", 0);
     CVarRegisterInteger("gEnhancements.Practice.PhotoMode", 0);
 
     // WORKSHOP. TexturePacks on lets the Tier-B shim (n64_gfx_bridge.cpp) rewrite a common-asset
@@ -771,33 +773,23 @@ void GdxMenu::InitElement() {
     }
 }
 
-// The main menu's G-NET card (O2-9, decomp/src/overlays/ovl_i6/main_menu.c) asks for Online > LAN Lobby. It
-// runs on the game side, so it only raises a flag; UpdateElement takes it, which runs every frame with the menu
-// open or closed.
-static std::atomic<bool> sLanLobbyRequested{ false };
+// The room's lock-in screen (gdx_net_machine_select.h) is a game screen, so the menu steps aside for it. The
+// request comes from the game side, so it only raises a flag; UpdateElement takes it, which runs every frame
+// with the menu open or closed.
+static std::atomic<bool> sCloseRequested{ false };
 
-extern "C" void gdx_menu_request_lan_lobby(void) {
-    sLanLobbyRequested.store(true);
+extern "C" void gdx_menu_request_close(void) {
+    sCloseRequested.store(true);
 }
 
 void GdxMenu::UpdateElement() {
     // Gui::DrawMenu calls this before it draws the registered windows, and always on the ImGui
     // thread — the one place the queued log lines can safely reach the Console window.
     GdxConsoleLogDrain();
+    gdx::lan::DevFrame();
 
-    if (sLanLobbyRequested.exchange(false)) {
-        auto section = mMenuEntries.find("Online");
-        if (section != mMenuEntries.end() && section->second.sidebars.count("LAN Lobby") != 0) {
-            mSearch[0] = '\0';
-            mActiveSection = section->first;
-            CVarSetString("gSettings.Menu.ActiveSection", mActiveSection.c_str());
-            CVarSetString(section->second.sidebarCvar, "LAN Lobby");
-            GdxSaveCvars();
-            mFocusSidebar = true;
-            if (!IsVisible()) {
-                ToggleVisibility();
-            }
-        }
+    if (sCloseRequested.exchange(false) && IsVisible()) {
+        ToggleVisibility();
     }
 }
 

@@ -12,8 +12,15 @@
  * dash, in percent minus 100: 10..200 is 110% to 300%, and 0 is GDX_SETTINGS_PAD_BOOST_DEFAULT. It is only set on
  * a Super pad, so one set of values has one encoding.
  *
- * Wind (port/gdx_wind.h) is per segment only: a point's strength in percent, 1..100, and the compass angle
- * 0..359 it blows toward, on the segment that starts there. A strength of 0 is no wind, and its angle is 0.
+ * Wind (port/gdx_wind.h): a point's strength in percent, 1..100, and the compass angle 0..359 it blows toward, on
+ * the segment that starts there. A strength of 0 is no wind, and its angle is 0. The track has a wind of its own,
+ * with the same two values, that blows on every segment without one.
+ *
+ * Road theme: which venue's road art a segment is drawn with, 1..GDX_SETTINGS_ROAD_THEME_MAX for venue 0..10 (venue
+ * + 1). 0 on a point is the track's theme, and 0 on the track is the art of the track's own venue.
+ *
+ * Backgrounds: the images on the horizon, up to GDX_SETTINGS_BACKGROUND_MAX of them, each a stock image
+ * 1..GDX_SETTINGS_BACKGROUND_IMAGE_MAX and the compass angle 0..359 it stands at. A track without any shows none.
  *
  * CPU aggression is a preset for the whole track, GDX_SETTINGS_AI_*: Track (0, stock), Calm, Normal, Fierce or
  * Brutal. Track keeps the player's AI aggression option. Calm, Fierce and Brutal multiply it, and Normal replaces
@@ -23,8 +30,9 @@
  * GXK1 block (little-endian), written by hand like GXB1:
  *
  *   0x00  magic           "GXK1"
- *   0x04  version         u16 = 1, 2 when any point has a dash pad value, 3 when there is any wind, 4 when the
- *                         track has a CPU aggression preset
+ *   0x04  version         u16 = 1, 2 when any point has a dash pad value, 3 when a point has wind, 4 when the
+ *                         track has a CPU aggression preset, 5 when the track has a wind, a road theme or a
+ *                         background, or a point has a road theme
  *   0x06  ringCount       u8, the ring the point entries belong to
  *   0x07  lavaMode        u8, GDX_SETTINGS_LAVA_*
  *   0x08  magnetStrength  u8, 0 or 20..240
@@ -35,15 +43,23 @@
  *         builds kept a wind for the whole track there, and calm points (strength 255) in the entries; both
  *         load as no wind, and an entry left with nothing else is dropped.
  *   0x10  version 4: u8 aiAggression, 1..4, then 3 spare bytes written 0 and ignored. Entries as version 3.
+ *   0x10  version 5: u8 aiAggression, 0..4
+ *   0x11             u8 windStrength, u16 windAngle: the track's wind
+ *   0x14             u8 roadTheme: the track's road theme
+ *   0x15             u8 backgroundCount, 0..6
+ *   0x16             2 spare bytes, written 0 and ignored
+ *   0x18             backgroundCount x { u8 image, u16 angle }, and the entries start after them
  *   0x10  entries         entryCount x { u8 kind, u8 index, u8 pitWidth, dirtWidth, iceWidth,
  *                                        magnetStrength, magnetRange }
  *                         version 2 adds u8 padKind, padWidth, padBoost to every entry
  *                         version 3 and 4 add those and u8 windStrength, u16 windAngle
+ *                         version 5 adds those and u8 roadTheme
  *   end-4 crc32           u32, CRC-32 over every byte before it
  *
  * kind 0 is a ring point. kind 1..4 is a node of fork kind-1. Entries are sparse, sorted by kind then index,
  * and never all zero, so one set of values has one encoding. A block is written with the lowest version that
- * holds its values, so builds without pads or wind still read a course that does not use them.
+ * holds its values, so builds without pads or wind still read a course that does not use them. Version 5 is
+ * written only for a value no older version holds, and a version 5 block without one is refused.
  *
  * GKS1 state file: same shape as GBS1 (gdx_course_branch_format.h), blocks bound to the CRC-32 of the course id.
  *
@@ -77,11 +93,16 @@ extern "C" {
 #define GDX_SETTINGS_ENTRY_BYTES 7     /* version 1 */
 #define GDX_SETTINGS_ENTRY_BYTES_V2 10 /* version 2, with the dash pad values */
 #define GDX_SETTINGS_ENTRY_BYTES_V3 13 /* version 3, with the wind */
+#define GDX_SETTINGS_ENTRY_BYTES_V5 14 /* version 5, with the road theme */
 #define GDX_SETTINGS_MAX_ENTRIES (GDX_SETTINGS_MAX_POINTS + GDX_BRANCH_MAX_FORKS * GDX_BRANCH_MAX_NODES)
 #define GDX_SETTINGS_BLOCK_HEADER_SIZE 16
 #define GDX_SETTINGS_BLOCK_HEADER_SIZE_V3 20
-#define GDX_SETTINGS_BLOCK_MAX_BYTES \
-    (GDX_SETTINGS_BLOCK_HEADER_SIZE_V3 + GDX_SETTINGS_MAX_ENTRIES * GDX_SETTINGS_ENTRY_BYTES_V3 + 4)
+#define GDX_SETTINGS_BLOCK_HEADER_SIZE_V5 24 /* before the backgrounds */
+#define GDX_SETTINGS_BACKGROUND_MAX 6        /* the race draws six horizon images at most */
+#define GDX_SETTINGS_BACKGROUND_BYTES 3
+#define GDX_SETTINGS_BLOCK_MAX_BYTES                                                                   \
+    (GDX_SETTINGS_BLOCK_HEADER_SIZE_V5 + GDX_SETTINGS_BACKGROUND_MAX * GDX_SETTINGS_BACKGROUND_BYTES + \
+     GDX_SETTINGS_MAX_ENTRIES * GDX_SETTINGS_ENTRY_BYTES_V5 + 4)
 
 #define GDX_SETTINGS_FILE_HEADER_SIZE 12
 #define GDX_SETTINGS_FILE_ENTRY_MAX (1 + GDX_BRANCH_COURSE_ID_MAX + 2 + GDX_SETTINGS_BLOCK_MAX_BYTES)
@@ -117,6 +138,11 @@ extern "C" {
 #define GDX_SETTINGS_WIND_MAX 100
 #define GDX_SETTINGS_WIND_ANGLE_MAX 359
 
+/* A venue's road art, venue + 1: 1 is Mute City and 11 the ending venue. */
+#define GDX_SETTINGS_ROAD_THEME_MAX 11
+/* The last stock horizon image (BG_SPRITE_* in the decomp's background code). */
+#define GDX_SETTINGS_BACKGROUND_IMAGE_MAX 55
+
 #define GDX_SETTINGS_AI_TRACK 0 /* not set: stock combat */
 #define GDX_SETTINGS_AI_CALM 1
 #define GDX_SETTINGS_AI_NORMAL 2
@@ -134,12 +160,23 @@ extern "C" {
 #define GDX_SETTINGS_ERR_BINDING (-24)  /* block is bound to a different CRC-32 */
 #define GDX_SETTINGS_ERR_LAYOUT (-25)   /* sizes, order or ids do not add up */
 
+/* One horizon image: a stock image 1..GDX_SETTINGS_BACKGROUND_IMAGE_MAX and the compass angle 0..359 it stands at. */
+typedef struct GdxBackgroundSlot {
+    uint8_t image;
+    uint16_t angle;
+} GdxBackgroundSlot;
+
 typedef struct GdxCourseSettings {
     uint8_t ringCount;
     uint8_t lavaMode;
     uint8_t magnetStrength;
     uint8_t magnetRange;
     uint8_t aiAggression; /* GDX_SETTINGS_AI_* */
+    uint8_t windStrength; /* the track's wind: 0 none, or 1..100 with windAngle 0..359 */
+    uint16_t windAngle;
+    uint8_t roadTheme;       /* the track's road theme: 0 its venue's own, or 1..GDX_SETTINGS_ROAD_THEME_MAX */
+    uint8_t backgroundCount; /* 0..GDX_SETTINGS_BACKGROUND_MAX; the slots past it are all zero */
+    GdxBackgroundSlot backgrounds[GDX_SETTINGS_BACKGROUND_MAX];
     GdxPointExtras ring[GDX_SETTINGS_MAX_POINTS];
     GdxPointExtras nodes[GDX_BRANCH_MAX_FORKS][GDX_BRANCH_MAX_NODES];
 } GdxCourseSettings;

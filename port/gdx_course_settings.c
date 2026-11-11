@@ -57,7 +57,7 @@ static int extras_has_wind(const GdxPointExtras* extras) {
 static int extras_empty(const GdxPointExtras* extras) {
     return (extras->pitWidth == 0) && (extras->dirtWidth == 0) && (extras->iceWidth == 0) &&
            (extras->magnetStrength == 0) && (extras->magnetRange == 0) && !extras_has_pad(extras) &&
-           !extras_has_wind(extras);
+           !extras_has_wind(extras) && (extras->roadTheme == 0);
 }
 
 /* strength 1..100 carries an angle; 0 has angle 0, so one set of values has one encoding. */
@@ -89,7 +89,36 @@ static int extras_ok(const GdxPointExtras* extras) {
                                               (extras->magnetStrength <= GDX_SETTINGS_STRENGTH_MAX))) &&
            ((extras->magnetRange == 0) ||
             ((extras->magnetRange >= GDX_SETTINGS_RANGE_MIN) && (extras->magnetRange <= GDX_SETTINGS_RANGE_MAX))) &&
-           pad_ok(extras) && wind_ok(extras->windStrength, extras->windAngle);
+           pad_ok(extras) && wind_ok(extras->windStrength, extras->windAngle) &&
+           (extras->roadTheme <= GDX_SETTINGS_ROAD_THEME_MAX);
+}
+
+/* The slots in use hold an image and an angle; the rest are zero, so one list has one encoding. */
+static int backgrounds_ok(const GdxCourseSettings* settings) {
+    int i;
+
+    if (settings->backgroundCount > GDX_SETTINGS_BACKGROUND_MAX) {
+        return 0;
+    }
+    for (i = 0; i < GDX_SETTINGS_BACKGROUND_MAX; i++) {
+        const GdxBackgroundSlot* slot = &settings->backgrounds[i];
+
+        if (i >= settings->backgroundCount) {
+            if ((slot->image != 0) || (slot->angle != 0)) {
+                return 0;
+            }
+        } else if ((slot->image < 1) || (slot->image > GDX_SETTINGS_BACKGROUND_IMAGE_MAX) ||
+                   (slot->angle > GDX_SETTINGS_WIND_ANGLE_MAX)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* The values of the whole track that only version 5 holds. */
+static int track_has_v5(const GdxCourseSettings* settings) {
+    return (settings->windStrength != 0) || (settings->windAngle != 0) || (settings->roadTheme != 0) ||
+           (settings->backgroundCount != 0);
 }
 
 int gdx_settings_is_empty(const GdxCourseSettings* settings) {
@@ -97,7 +126,7 @@ int gdx_settings_is_empty(const GdxCourseSettings* settings) {
     int j;
 
     if ((settings->lavaMode != 0) || (settings->magnetStrength != 0) || (settings->magnetRange != 0) ||
-        (settings->aiAggression != 0)) {
+        (settings->aiAggression != 0) || track_has_v5(settings)) {
         return 0;
     }
     for (i = 0; i < GDX_SETTINGS_MAX_POINTS; i++) {
@@ -134,6 +163,10 @@ int gdx_settings_validate(const GdxCourseSettings* settings) {
         ((settings->magnetRange < GDX_SETTINGS_RANGE_MIN) || (settings->magnetRange > GDX_SETTINGS_RANGE_MAX))) {
         return GDX_SETTINGS_ERR_VALUE;
     }
+    if (!wind_ok(settings->windStrength, settings->windAngle) ||
+        (settings->roadTheme > GDX_SETTINGS_ROAD_THEME_MAX) || !backgrounds_ok(settings)) {
+        return GDX_SETTINGS_ERR_VALUE;
+    }
     for (i = 0; i < GDX_SETTINGS_MAX_POINTS; i++) {
         if (!extras_ok(&settings->ring[i]) || ((i >= settings->ringCount) && !extras_empty(&settings->ring[i]))) {
             return GDX_SETTINGS_ERR_VALUE;
@@ -162,9 +195,12 @@ static size_t put_entry(unsigned char* out, int kind, int index, const GdxPointE
         out[8] = extras->padWidth;
         out[9] = extras->padBoost;
     }
-    if (entryBytes == GDX_SETTINGS_ENTRY_BYTES_V3) {
+    if (entryBytes >= GDX_SETTINGS_ENTRY_BYTES_V3) {
         out[10] = extras->windStrength;
         put_u16le(out + 11, extras->windAngle);
+    }
+    if (entryBytes == GDX_SETTINGS_ENTRY_BYTES_V5) {
+        out[13] = extras->roadTheme;
     }
     return entryBytes;
 }
@@ -197,13 +233,29 @@ float gdx_settings_ai_resolve(int aiAggression, float optionScale) {
     }
 }
 
-/* The lowest version that holds the values: 4 with a CPU aggression preset, 3 with any wind, 2 with any dash pad
- * value, else 1. A course that does not use them stays readable by older builds. */
+/* The lowest version that holds the values: 5 with a track wind, any road theme or a background, 4 with a CPU
+ * aggression preset, 3 with any point wind, 2 with any dash pad value, else 1. A course that does not use them
+ * stays readable by older builds. */
 static int settings_version(const GdxCourseSettings* settings) {
     int version = 1;
     int i;
     int j;
 
+    if (track_has_v5(settings)) {
+        return 5;
+    }
+    for (i = 0; i < settings->ringCount; i++) {
+        if (settings->ring[i].roadTheme != 0) {
+            return 5;
+        }
+    }
+    for (i = 0; i < GDX_BRANCH_MAX_FORKS; i++) {
+        for (j = 0; j < GDX_BRANCH_MAX_NODES; j++) {
+            if (settings->nodes[i][j].roadTheme != 0) {
+                return 5;
+            }
+        }
+    }
     if (settings->aiAggression != 0) {
         return 4;
     }
@@ -229,11 +281,18 @@ static int settings_version(const GdxCourseSettings* settings) {
 }
 
 static size_t entry_bytes(uint32_t version) {
+    if (version >= 5) {
+        return GDX_SETTINGS_ENTRY_BYTES_V5;
+    }
     return (version >= 3) ? GDX_SETTINGS_ENTRY_BYTES_V3
                           : (version == 2) ? GDX_SETTINGS_ENTRY_BYTES_V2 : GDX_SETTINGS_ENTRY_BYTES;
 }
 
-static size_t header_bytes(uint32_t version) {
+/* The bytes before the entries. Only version 5 has backgrounds. */
+static size_t header_bytes(uint32_t version, size_t backgrounds) {
+    if (version >= 5) {
+        return GDX_SETTINGS_BLOCK_HEADER_SIZE_V5 + (backgrounds * GDX_SETTINGS_BACKGROUND_BYTES);
+    }
     return (version >= 3) ? GDX_SETTINGS_BLOCK_HEADER_SIZE_V3 : GDX_SETTINGS_BLOCK_HEADER_SIZE;
 }
 
@@ -258,7 +317,7 @@ int gdx_settings_encode(const GdxCourseSettings* settings, uint32_t bindCrc, uns
     }
     version = settings_version(settings);
     entryBytes = entry_bytes((uint32_t) version);
-    pos = header_bytes((uint32_t) version);
+    pos = header_bytes((uint32_t) version, settings->backgroundCount);
     for (i = 0; i < settings->ringCount; i++) {
         if (!extras_empty(&settings->ring[i])) {
             pos += put_entry(out + pos, KIND_RING, i, &settings->ring[i], entryBytes);
@@ -287,8 +346,22 @@ int gdx_settings_encode(const GdxCourseSettings* settings, uint32_t bindCrc, uns
     if (version >= 3) {
         memset(out + 16, 0, 4);
     }
-    if (version == 4) {
+    if (version >= 4) {
         out[16] = settings->aiAggression;
+    }
+    if (version == 5) {
+        out[17] = settings->windStrength;
+        put_u16le(out + 18, settings->windAngle);
+        out[20] = settings->roadTheme;
+        out[21] = settings->backgroundCount;
+        out[22] = 0;
+        out[23] = 0;
+        for (i = 0; i < settings->backgroundCount; i++) {
+            unsigned char* slot = out + GDX_SETTINGS_BLOCK_HEADER_SIZE_V5 + (i * GDX_SETTINGS_BACKGROUND_BYTES);
+
+            slot[0] = settings->backgrounds[i].image;
+            put_u16le(slot + 1, settings->backgrounds[i].angle);
+        }
     }
     put_u32le(out + pos, gdx_course_registry_crc32(out, pos));
     return (int) (pos + 4);
@@ -303,6 +376,7 @@ static int decode_block(const unsigned char* data, size_t length, uint32_t bindC
     uint32_t entries;
     uint32_t i;
     int lastKey = -1;
+    int version5Value = 0; /* a version 5 block holds a value no older version does */
 
     if (data == NULL) {
         return GDX_SETTINGS_ERR_ARGS;
@@ -314,11 +388,11 @@ static int decode_block(const unsigned char* data, size_t length, uint32_t bindC
         return GDX_SETTINGS_ERR_MAGIC;
     }
     version = get_u16le(data + 4);
-    if ((version < 1) || (version > 4)) {
+    if ((version < 1) || (version > 5)) {
         return GDX_SETTINGS_ERR_VERSION;
     }
     entryBytes = entry_bytes(version);
-    headerBytes = header_bytes(version);
+    headerBytes = header_bytes(version, 0);
     if (length < headerBytes + 4) {
         return GDX_SETTINGS_ERR_TRUNCATED;
     }
@@ -329,6 +403,12 @@ static int decode_block(const unsigned char* data, size_t length, uint32_t bindC
     if (get_u32le(data + 12) != bindCrc) {
         return GDX_SETTINGS_ERR_BINDING;
     }
+    if (version == 5) {
+        if (data[21] > GDX_SETTINGS_BACKGROUND_MAX) {
+            return GDX_SETTINGS_ERR_VALUE;
+        }
+        headerBytes = header_bytes(version, data[21]);
+    }
     entries = get_u16le(data + 10);
     if (headerBytes + (size_t) entries * entryBytes != end) {
         return GDX_SETTINGS_ERR_LAYOUT;
@@ -337,11 +417,24 @@ static int decode_block(const unsigned char* data, size_t length, uint32_t bindC
     out->lavaMode = data[7];
     out->magnetStrength = data[8];
     out->magnetRange = data[9];
-    if (version == 4) {
+    if (version >= 4) {
         out->aiAggression = data[16];
-        if (out->aiAggression == 0) {
+        if ((version == 4) && (out->aiAggression == 0)) {
             return GDX_SETTINGS_ERR_LAYOUT; /* version 4 is only written for a preset */
         }
+    }
+    if (version == 5) {
+        out->windStrength = data[17];
+        out->windAngle = (uint16_t) get_u16le(data + 18);
+        out->roadTheme = data[20];
+        out->backgroundCount = data[21];
+        for (i = 0; i < out->backgroundCount; i++) {
+            const unsigned char* slot = data + GDX_SETTINGS_BLOCK_HEADER_SIZE_V5 + (i * GDX_SETTINGS_BACKGROUND_BYTES);
+
+            out->backgrounds[i].image = slot[0];
+            out->backgrounds[i].angle = (uint16_t) get_u16le(slot + 1);
+        }
+        version5Value = track_has_v5(out);
     }
     if (out->ringCount > GDX_SETTINGS_MAX_POINTS) {
         return GDX_SETTINGS_ERR_VALUE;
@@ -363,6 +456,10 @@ static int decode_block(const unsigned char* data, size_t length, uint32_t bindC
             extras.padKind = data[pos + 7];
             extras.padWidth = data[pos + 8];
             extras.padBoost = data[pos + 9];
+        }
+        if (version >= 5) {
+            extras.roadTheme = data[pos + 13];
+            version5Value |= (extras.roadTheme != 0);
         }
         if (version >= 3) {
             extras.windStrength = data[pos + 10];
@@ -389,6 +486,9 @@ static int decode_block(const unsigned char* data, size_t length, uint32_t bindC
         } else {
             return GDX_SETTINGS_ERR_LAYOUT;
         }
+    }
+    if ((version == 5) && !version5Value) {
+        return GDX_SETTINGS_ERR_LAYOUT; /* version 5 is only written for a value older versions cannot hold */
     }
     return gdx_settings_validate(out);
 }

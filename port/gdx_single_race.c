@@ -23,6 +23,7 @@
  * GP records, cup progress or points. The only state kept here is the per-race snapshot and the
  * lap-time table, both rebuilt at every race start, so Retry re-reads the options.
  */
+#include <limits.h>
 #include <time.h>
 
 #include "gdx_single_race.h"
@@ -49,6 +50,9 @@ static int sRacerCount;
 static int sRivalIndex;
 static unsigned int sRandState;
 static int sLapTimes[GDX_SINGLE_RACE_MAX_RACERS][GDX_SINGLE_RACE_MAX_LAPS];
+static int sPracticeLapsDone; /* laps of an unlimited Practice run, whose lap number wraps every three */
+static int sForcedLaps;       /* gdx_single_race_force_next, until the next race start takes it */
+static int sForcedRacers;
 
 static unsigned int SingleRace_NextRandom(void) {
     sRandState = sRandState * 1103515245u + 12345u;
@@ -83,10 +87,24 @@ void gdx_single_race_begin_race(int eligible) {
         }
     }
 
+    sPracticeLapsDone = 0;
     sActive = (eligible && enabled) ? 1 : 0;
     sLapSetting = 0;
     sRacerCount = SR_STOCK_RACERS;
     sRivalIndex = -1;
+
+    if (sForcedRacers > 0) {
+        int forcedLaps = sForcedLaps;
+        int forcedRacers = sForcedRacers;
+
+        sForcedLaps = sForcedRacers = 0;
+        if (eligible) {
+            sActive = 1;
+            sLapSetting = ((forcedLaps < 1) || (forcedLaps > GDX_SINGLE_RACE_MAX_LAPS)) ? SR_STOCK_LAPS : forcedLaps;
+            sRacerCount = (forcedRacers > SR_STOCK_RACERS) ? SR_STOCK_RACERS : forcedRacers;
+            return;
+        }
+    }
 
     if (!sActive) {
         return;
@@ -111,12 +129,28 @@ void gdx_single_race_begin_race(int eligible) {
     }
 }
 
+void gdx_single_race_force_next(int laps, int racers) {
+    sForcedLaps = laps;
+    sForcedRacers = racers;
+}
+
 int gdx_single_race_active(void) {
     return sActive;
 }
 
 int gdx_single_race_finite(void) {
     return (sActive && (sLapSetting != 0)) ? 1 : 0;
+}
+
+int gdx_single_race_practice_lap_done(void) {
+    if (sPracticeLapsDone < INT_MAX) {
+        sPracticeLapsDone++;
+    }
+    return sPracticeLapsDone;
+}
+
+int gdx_single_race_practice_laps_done(void) {
+    return sPracticeLapsDone;
 }
 
 int gdx_single_race_lap_count(void) {

@@ -2963,6 +2963,17 @@ void GdxMenu::RegisterMenu() {
                   .ModifiedMarker()
                   .SearchTerms("split time comparison lap delta"));
 
+    // Drawn in hud.c under #ifdef PORT. Practice laps are counted in port/gdx_single_race.c and Death Race laps
+    // in port/gdx_death_race.c, because the stock lap number wraps every three laps.
+    AddWidget("Enhancements", "Practice", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Count laps without a lap limit", .cVar = "gEnhancements.Hud.EndlessLapCounter",
+                          .type = GdxUI::WIDGET_CVAR_CHECKBOX }
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(false).Tooltip(
+                      "Shows the lap you are on in unlimited Practice and in an endless\n"
+                      "Death Race, counting up from 1. Off is the stock HUD, which hides it."))
+                  .ModifiedMarker()
+                  .SearchTerms("lap counter unlimited endless practice death race"));
+
     AddWidget("Enhancements", "Practice", SECTION_COLUMN_1, WidgetInfo{ .type = GdxUI::WIDGET_SEPARATOR });
 
     // Available in every race mode: pausing then suppresses all race HUD/pause overlays and

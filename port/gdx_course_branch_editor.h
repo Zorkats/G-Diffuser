@@ -13,6 +13,8 @@ void gdx_course_branch_editor_on_delete(int index);
 void gdx_course_branch_editor_on_rotate(int newStart);
 void gdx_course_branch_editor_on_reverse(void);
 void gdx_course_branch_editor_on_translate(float dx, float dz);
+/* The MOVE menu's TRACK row was confirmed: the ring moved as one, and the stored nodes follow it. */
+void gdx_course_branch_editor_track_moved(void);
 
 void gdx_course_branch_editor_rebuilt(void);
 void gdx_course_branch_editor_force_path_a(void);
@@ -61,6 +63,15 @@ int gdx_course_branch_editor_point_parts(int point);
 
 /* Applies a change the panel queued (gdx_course_edit_input_request_extra). Runs on the game thread. */
 void gdx_course_branch_editor_apply_extra(void);
+
+/* Changes to the track's horizon images (gdx_course_branch_edit.h). The panel queues them as track changes with one
+ * of these as which, and the native HORIZON menu calls horizon_change, which backs the course up for undo first.
+ * It returns 0, with the refusal sound, for a change that cannot be made. */
+#define GDX_BRANCH_EDITOR_HORIZON_IMAGE 100  /* + slot; the value is the image, and the slot at the count adds one */
+#define GDX_BRANCH_EDITOR_HORIZON_ANGLE 110  /* + slot; the value is the compass angle */
+#define GDX_BRANCH_EDITOR_HORIZON_REMOVE 120 /* the value is the slot */
+#define GDX_BRANCH_EDITOR_HORIZON_COPY 121   /* the value is a cup course, 0..23, whose list replaces the track's */
+int gdx_course_branch_editor_horizon_change(int which, int value);
 
 /* The WIND part (Parts tab, port/gdx_wind.h). The stock parts press calls this. A click places the picked row's
  * wind on the point's segment; new wind blows the camera's way. The settings panel sets the exact angle. */

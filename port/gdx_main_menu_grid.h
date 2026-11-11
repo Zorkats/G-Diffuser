@@ -2,11 +2,15 @@
  * Copyright (c) Zorkats
  *
  * The stock main menu shows eight mode signs in a 4x2 grid. The port adds a ninth card, G-NET, so the cards
- * sit in a 3x3 grid at three quarters of their size, in mode order:
+ * sit in a 3x3 grid at three quarters of their size, with G-NET in the middle:
  *
- *     GP RACE      TIME ATTACK   DEATH RACE
- *     VS BATTLE    COURSE EDIT   PRACTICE
- *     OPTIONS      CREATE MACH.  G-NET
+ *     GP RACE      TIME ATTACK   VS BATTLE
+ *     PRACTICE     G-NET         DEATH RACE
+ *     COURSE EDIT  OPTIONS       CREATE MACH.
+ *
+ * A card is named by its number, not by its place: 0 to 7 are the stock modes in ModeSelect order
+ * (decomp/include/fzx_game.h) and 8 is G-NET. Every function here takes and returns card numbers, and the bits
+ * of `available` are card numbers too.
  *
  * A card can be unavailable (Course Edit and Create Machine need the 64DD disk). The cursor skips it in the
  * direction it moves, as the stock menu does in its own grid.
@@ -20,7 +24,7 @@ extern "C" {
 
 #define GDX_MAIN_MENU_GRID_COLUMNS 3
 #define GDX_MAIN_MENU_GRID_CARDS 9
-/* The ninth card, after the eight stock modes. */
+/* The ninth card's number, after the eight stock modes. It sits in the middle of the grid. */
 #define GDX_MAIN_MENU_GNET_CARD 8
 /* Every card available. */
 #define GDX_MAIN_MENU_GRID_ALL ((1u << GDX_MAIN_MENU_GRID_CARDS) - 1u)
@@ -43,8 +47,8 @@ int gdx_main_menu_grid_top(int card);
 int gdx_main_menu_grid_move(int current, int direction, unsigned available);
 
 /* current, or the nearest available card in its row when it is unavailable (the left one on a tie), or the first
- * available card when its row has none. An out-of-range current is treated as unavailable. Returns 0 when nothing
- * is available. */
+ * available card in reading order when its row has none. An out-of-range current is treated as unavailable.
+ * Returns 0 when nothing is available. */
 int gdx_main_menu_grid_settle(int current, unsigned available);
 
 #ifdef __cplusplus

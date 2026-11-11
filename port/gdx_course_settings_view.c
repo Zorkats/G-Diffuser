@@ -150,6 +150,53 @@ int gdx_settings_view_wind_angle(int point) {
     return (extras != NULL) ? extras->windAngle : 0;
 }
 
+int gdx_settings_view_track_wind_strength(void) {
+    const GdxCourseSettings* settings = gdx_settings_active();
+
+    return (settings != NULL) ? settings->windStrength : 0;
+}
+
+int gdx_settings_view_track_wind_angle(void) {
+    const GdxCourseSettings* settings = gdx_settings_active();
+
+    return (settings != NULL) ? settings->windAngle : 0;
+}
+
+int gdx_settings_view_road_theme(int point) {
+    const GdxCourseSettings* settings = gdx_settings_active();
+    const GdxPointExtras* extras = view_point(point);
+
+    if ((extras != NULL) && (extras->roadTheme != 0)) {
+        return extras->roadTheme;
+    }
+    return (settings != NULL) ? settings->roadTheme : 0;
+}
+
+int gdx_settings_view_background_count(void) {
+    const GdxCourseSettings* settings = gdx_settings_active();
+
+    if (settings == NULL) {
+        return 0;
+    }
+    return (settings->backgroundCount > GDX_SETTINGS_BACKGROUND_MAX) ? GDX_SETTINGS_BACKGROUND_MAX
+                                                                    : settings->backgroundCount;
+}
+
+int gdx_settings_view_background(int slot, int* image, int* angle) {
+    const GdxCourseSettings* settings = gdx_settings_active();
+
+    if ((slot < 0) || (slot >= gdx_settings_view_background_count())) {
+        return 0;
+    }
+    if (image != NULL) {
+        *image = settings->backgrounds[slot].image;
+    }
+    if (angle != NULL) {
+        *angle = settings->backgrounds[slot].angle;
+    }
+    return 1;
+}
+
 float gdx_settings_view_ai_scale(void) {
     const GdxCourseSettings* settings = gdx_settings_active();
 
@@ -170,6 +217,9 @@ int gdx_settings_view_wind_any(void) {
 
     if (settings == NULL) {
         return 0;
+    }
+    if (settings->windStrength != 0) {
+        return 1;
     }
     for (i = 0; i < settings->ringCount; i++) {
         if (settings->ring[i].windStrength != 0) {

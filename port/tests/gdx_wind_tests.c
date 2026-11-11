@@ -37,6 +37,39 @@ static void test_resolve(void) {
     CHECK(gdx_wind_resolve(50, 90, 0, NULL) == 50, "the angle pointer may be NULL");
 }
 
+static void test_resolve_track(void) {
+    int angle = -1;
+
+    CHECK(gdx_wind_resolve_track(0, 0, 0, 0, 0, &angle) == 0, "no wind anywhere is no wind");
+    CHECK(gdx_wind_resolve_track(0, 0, 40, 120, 0, &angle) == 40 && angle == 120,
+          "a segment without a wind blows the track's");
+    CHECK(gdx_wind_resolve_track(70, 200, 40, 120, 0, &angle) == 70 && angle == 200,
+          "a segment's own wind replaces the track's");
+    CHECK(gdx_wind_resolve_track(0, 0, 40, 120, 1, &angle) == 0, "a tunnel blocks the track's wind");
+    CHECK(gdx_wind_resolve_track(70, 200, 40, 120, 1, &angle) == 0, "a tunnel blocks a segment's own wind under a track wind");
+    CHECK(gdx_wind_resolve_track(0, 90, 150, -15, 0, &angle) == GDX_WIND_STRENGTH_MAX && angle == 345,
+          "the track's wind is capped and wrapped like a segment's");
+    CHECK(gdx_wind_resolve_track(0, 0, 40, 120, 0, NULL) == 40, "the angle pointer may be NULL for the track's wind too");
+}
+
+static void test_track_rows(void) {
+    CHECK(gdx_wind_part_strength(GDX_WIND_PART_TRACK) == 0 && gdx_wind_part_strength(GDX_WIND_PART_TURN) == 0,
+          "the two track rows place no segment wind");
+    CHECK(gdx_wind_track_step(0) == 25 && gdx_wind_track_step(25) == 50 && gdx_wind_track_step(50) == 75 &&
+              gdx_wind_track_step(75) == 100 && gdx_wind_track_step(100) == 0,
+          "the Track row steps through the four strengths and back to none");
+    CHECK(gdx_wind_track_step(-4) == 25 && gdx_wind_track_step(1) == 25 && gdx_wind_track_step(30) == 50 &&
+              gdx_wind_track_step(99) == 100 && gdx_wind_track_step(180) == 0,
+          "a strength between two of them goes up to the next");
+    CHECK(gdx_wind_angle_snap(0) == 0 && gdx_wind_angle_snap(7) == 0 && gdx_wind_angle_snap(8) == 15 &&
+              gdx_wind_angle_snap(352) == 345 && gdx_wind_angle_snap(353) == 0 && gdx_wind_angle_snap(-8) == 345 &&
+              gdx_wind_angle_snap(725) == 0,
+          "an angle snaps to the nearest 15 degrees and wraps");
+    CHECK(gdx_wind_angle_turn(0) == 15 && gdx_wind_angle_turn(15) == 30 && gdx_wind_angle_turn(20) == 30 &&
+              gdx_wind_angle_turn(345) == 0 && gdx_wind_angle_turn(359) == 0 && gdx_wind_angle_turn(-15) == 0,
+          "the Turn row goes to the next 15 degrees clockwise and wraps");
+}
+
 static void test_direction(void) {
     float x;
     float z;
@@ -492,6 +525,8 @@ int main(void) {
     test_road_quad();
     test_road_texture();
     test_resolve();
+    test_resolve_track();
+    test_track_rows();
     test_direction();
     test_grip();
     test_strength_scale();

@@ -103,6 +103,8 @@ const u8* gGdxCourseChunkDrawMask = NULL;
 /* Control point of race segment 0, -1 when no rotation matched. */
 static s32 sSegmentRotation;
 static s32 sSegmentCount;
+/* Ring 2's point count while its chunks are built, else 0. */
+static s32 sRing2BuildCount;
 
 static f32 branch_abs(f32 v) {
     return (v < 0.0f) ? -v : v;
@@ -688,7 +690,9 @@ static void branch_build(s32 editor) {
         return;
     }
     memcpy(sRing1ChunkSave, gSegmentChunks, (ring1ChunkCount + 1) * sizeof(SegmentChunk));
+    sRing2BuildCount = ring2Count;
     buildResult = func_800A1954(&ring2Info);
+    sRing2BuildCount = 0;
     sBranch.ring2ChunkCount = gSegmentChunkCount;
     if (!(buildResult & 0x20000) && (sBranch.ring2ChunkCount >= 3) && (sBranch.ring2ChunkCount + 1 <= BRANCH_CHUNKS)) {
         memcpy(sRing2Chunks, gSegmentChunks, (sBranch.ring2ChunkCount + 1) * sizeof(SegmentChunk));
@@ -853,6 +857,34 @@ s32 gdx_course_branch_settings_point(const CourseSegment* segment) {
         return gdx_branch_view_settings_point(fork->setFork, index - fork->ring2Fork - 1);
     }
     return gdx_course_branch_control_point(segment->segmentIndex);
+}
+
+s32 gdx_course_branch_segment_road_theme(const CourseSegment* segment) {
+    u64 offset = (u64) segment - (u64) sBranch.ring2;
+    s32 index;
+    s32 f;
+
+    if ((sRing2BuildCount <= 0) || (offset >= sizeof(sBranch.ring2)) || (offset % sizeof(CourseSegment) != 0)) {
+        return gdx_settings_view_road_theme(gdx_course_branch_settings_point(segment));
+    }
+    /* The chunk build of ring 2: the ring is not live yet and its segments still carry ring 2 indices. */
+    index = (s32) (offset / sizeof(CourseSegment));
+    if (index >= sRing2BuildCount) {
+        return 0;
+    }
+    if (sBranch.ring2Source[index] >= 0) {
+        /* A stock point. The fork point is one, so path B's first segment wears the fork point's theme. */
+        return gdx_settings_view_road_theme(gdx_course_branch_control_point(sBranch.ring2Source[index]));
+    }
+    for (f = 0; f < sBranch.forkCount; f++) {
+        const BranchFork* fork = &sBranch.forks[f];
+
+        if ((index > fork->ring2Fork) && (index < fork->ring2Merge)) {
+            return gdx_settings_view_road_theme(
+                gdx_branch_view_settings_point(fork->setFork, index - fork->ring2Fork - 1));
+        }
+    }
+    return 0;
 }
 
 f32 gdx_course_branch_gadget_next_t(const CourseSegment* segment, f32 t) {

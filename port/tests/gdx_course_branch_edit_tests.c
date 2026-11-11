@@ -384,6 +384,39 @@ static void test_translate(void) {
     CHECK((fork != NULL) && (fork->nodes[2].pos[0] == 10900.0f) && (fork->nodes[2].pos[2] == 925.0f),
           "translate moves the nodes of every fork");
 
+    /* The TRACK row: a move on all three axes, and how far the stored nodes let it go. Fork 0's node is at
+     * (2900, 50, 925) and fork 1's at x 8900 to 10900, y 0, z 925. */
+    {
+        static const float kLo[3] = { -15000.0f, 0.0f, -15000.0f };
+        static const float kHi[3] = { 15000.0f, 100.0f, 15000.0f };
+        static const float kFar[3] = { 5000.0f, 80.0f, -20000.0f };
+        static const float kNear[3] = { -100.0f, -10.0f, 100.0f };
+        static const float kLoAbove[3] = { -15000.0f, 10.0f, -15000.0f };
+        static const float kDown[3] = { 0.0f, -5.0f, 0.0f };
+        static const float kUp[3] = { 0.0f, 5.0f, 0.0f };
+        float fit[3];
+
+        gdx_branch_edit_on_move(10.0f, 40.0f, -5.0f);
+        fork = fork_of(0);
+        CHECK((fork != NULL) && (fork->nodes[0].pos[0] == 2910.0f) && (fork->nodes[0].pos[1] == 90.0f) &&
+                  (fork->nodes[0].pos[2] == 920.0f),
+              "move carries a node on all three axes");
+        fork = fork_of(1);
+        CHECK((fork != NULL) && (fork->nodes[2].pos[1] == 40.0f), "move raises the nodes of every fork");
+        gdx_branch_edit_on_move(-10.0f, -40.0f, 5.0f);
+
+        gdx_branch_edit_fit_move(kFar, kLo, kHi, fit);
+        CHECK((fit[0] == 4100.0f) && (fit[1] == 50.0f) && (fit[2] == -15925.0f),
+              "fit cuts each axis at the first stored node to reach a bound");
+        gdx_branch_edit_fit_move(kNear, kLo, kHi, fit);
+        CHECK((fit[0] == -100.0f) && (fit[1] == 0.0f) && (fit[2] == 100.0f),
+              "fit keeps a move with room and stops one with none");
+        gdx_branch_edit_fit_move(kDown, kLoAbove, kHi, fit);
+        CHECK(fit[1] == 0.0f, "fit stops a node already out of bounds from going further, without turning back");
+        gdx_branch_edit_fit_move(kUp, kLoAbove, kHi, fit);
+        CHECK(fit[1] == 5.0f, "fit lets a node out of bounds move back in");
+    }
+
     /* In the B view the stored nodes are path A. */
     for (i = 0; i < sCount; i++) {
         sRing[i].pos[0] -= 100.0f;
@@ -624,6 +657,23 @@ static void test_extras(void) {
     gdx_branch_edit_set_track_setting(GDX_BRANCH_EDIT_TRACK_AI, GDX_SETTINGS_AI_CALM);
     CHECK(gdx_settings_view_ai_resolve(2.0f) == 1.0f, "a Calm preset halves the player's option for the race");
 
+    /* The track's wind. */
+    gdx_branch_edit_set_track_setting(GDX_BRANCH_EDIT_TRACK_WIND_ANGLE, 90);
+    CHECK(gdx_branch_edit_track_setting(GDX_BRANCH_EDIT_TRACK_WIND_ANGLE) == 0, "a track without wind has no wind direction");
+    gdx_branch_edit_set_track_setting(GDX_BRANCH_EDIT_TRACK_WIND_STRENGTH, 140);
+    gdx_branch_edit_set_track_setting(GDX_BRANCH_EDIT_TRACK_WIND_ANGLE, -30);
+    CHECK((gdx_branch_edit_track_setting(GDX_BRANCH_EDIT_TRACK_WIND_STRENGTH) == 100) &&
+              (gdx_branch_edit_track_setting(GDX_BRANCH_EDIT_TRACK_WIND_ANGLE) == 330) &&
+              (gdx_settings_view_track_wind_strength() == 100) && (gdx_settings_view_track_wind_angle() == 330) &&
+              gdx_settings_view_wind_any(),
+          "the track's wind is capped, wrapped and published for the race");
+    gdx_branch_edit_set_track_setting(GDX_BRANCH_EDIT_TRACK_WIND_STRENGTH, 0);
+    CHECK((gdx_branch_edit_track_setting(GDX_BRANCH_EDIT_TRACK_WIND_ANGLE) == 0) &&
+              (gdx_settings_view_track_wind_strength() == 0),
+          "taking the track's wind away clears its direction");
+    gdx_branch_edit_set_track_setting(GDX_BRANCH_EDIT_TRACK_WIND_STRENGTH, 50);
+    gdx_branch_edit_set_track_setting(GDX_BRANCH_EDIT_TRACK_WIND_ANGLE, 45);
+
     /* Undo holds the values. */
     gdx_branch_edit_state_save(state);
     CHECK(gdx_branch_edit_state_equal(state), "the saved state matches");
@@ -633,6 +683,12 @@ static void test_extras(void) {
     gdx_branch_edit_set_track_setting(GDX_BRANCH_EDIT_TRACK_AI, GDX_SETTINGS_AI_BRUTAL);
     CHECK(!gdx_branch_edit_state_equal(state), "a changed preset is a changed state");
     gdx_branch_edit_state_load(state);
+    gdx_branch_edit_set_track_setting(GDX_BRANCH_EDIT_TRACK_WIND_ANGLE, 60);
+    CHECK(!gdx_branch_edit_state_equal(state), "a turned track wind is a changed state");
+    gdx_branch_edit_state_load(state);
+    CHECK((gdx_branch_edit_track_setting(GDX_BRANCH_EDIT_TRACK_WIND_ANGLE) == 45) &&
+              (gdx_settings_view_track_wind_angle() == 45),
+          "undo brings the track's wind back and publishes it");
     CHECK((gdx_branch_edit_track_setting(GDX_BRANCH_EDIT_TRACK_AI) == GDX_SETTINGS_AI_CALM) &&
               (gdx_settings_view_ai_scale() == 0.5f),
           "undo brings the preset back and publishes it");
@@ -649,6 +705,10 @@ static void test_extras(void) {
               (gdx_branch_edit_track_setting(GDX_BRANCH_EDIT_TRACK_RANGE) == 120) &&
               (gdx_branch_edit_track_setting(GDX_BRANCH_EDIT_TRACK_AI) == GDX_SETTINGS_AI_CALM),
           "selecting the course brings the values back");
+    CHECK((gdx_branch_edit_track_setting(GDX_BRANCH_EDIT_TRACK_WIND_STRENGTH) == 50) &&
+              (gdx_branch_edit_track_setting(GDX_BRANCH_EDIT_TRACK_WIND_ANGLE) == 45) &&
+              (gdx_settings_view_track_wind_strength() == 50),
+          "and the track's wind with them");
 
     /* Each path keeps its own values through a swap. */
     gdx_branch_edit_clear();
@@ -732,6 +792,154 @@ static void test_wind_extras(void) {
 
     gdx_branch_edit_clear();
     gdx_branch_edit_commit("WIND.CRSD", NULL, sCount, 1u, reason, sizeof(reason));
+    gdx_settings_store_clear();
+}
+
+static void test_road_theme(void) {
+    static unsigned char state[GDX_BRANCH_EDIT_STATE_BYTES];
+    char reason[96];
+
+    make_ring(8);
+    gdx_branch_edit_clear();
+    gdx_branch_edit_sync(sCount);
+
+    CHECK((gdx_branch_edit_point_extra(3, GDX_BRANCH_EDIT_EXTRA_ROAD_THEME) == 0) &&
+              (gdx_branch_edit_track_setting(GDX_BRANCH_EDIT_TRACK_ROAD_THEME) == 0) &&
+              (gdx_settings_view_road_theme(3) == 0),
+          "a new track has no road theme");
+    gdx_branch_edit_set_point_extra(3, GDX_BRANCH_EDIT_EXTRA_ROAD_THEME, 4);
+    CHECK((gdx_branch_edit_point_extra(3, GDX_BRANCH_EDIT_EXTRA_ROAD_THEME) == 4) &&
+              (gdx_settings_view_road_theme(3) == 4) && (gdx_settings_view_road_theme(2) == 0),
+          "a point's theme is on its own segment, and the race reads it as soon as it changes");
+    gdx_branch_edit_set_track_setting(GDX_BRANCH_EDIT_TRACK_ROAD_THEME, 9);
+    CHECK((gdx_branch_edit_track_setting(GDX_BRANCH_EDIT_TRACK_ROAD_THEME) == 9) &&
+              (gdx_settings_view_road_theme(2) == 9) && (gdx_settings_view_road_theme(3) == 4),
+          "the track's theme is on every segment without one of its own");
+    gdx_branch_edit_set_point_extra(5, GDX_BRANCH_EDIT_EXTRA_ROAD_THEME, 99);
+    gdx_branch_edit_set_track_setting(GDX_BRANCH_EDIT_TRACK_ROAD_THEME, 99);
+    CHECK((gdx_branch_edit_point_extra(5, GDX_BRANCH_EDIT_EXTRA_ROAD_THEME) == GDX_SETTINGS_ROAD_THEME_MAX) &&
+              (gdx_branch_edit_track_setting(GDX_BRANCH_EDIT_TRACK_ROAD_THEME) == GDX_SETTINGS_ROAD_THEME_MAX),
+          "a theme stops at the last venue");
+    gdx_branch_edit_set_point_extra(5, GDX_BRANCH_EDIT_EXTRA_ROAD_THEME, -2);
+    gdx_branch_edit_set_track_setting(GDX_BRANCH_EDIT_TRACK_ROAD_THEME, 9);
+    CHECK((gdx_branch_edit_point_extra(5, GDX_BRANCH_EDIT_EXTRA_ROAD_THEME) == 0) &&
+              (gdx_settings_view_road_theme(5) == 9),
+          "0 or less takes a point's theme away, back to the track's");
+
+    /* A new point splits its segment, so it keeps the theme there. */
+    ring_insert(3, 1500.0f);
+    CHECK((gdx_branch_edit_point_extra(4, GDX_BRANCH_EDIT_EXTRA_ROAD_THEME) == 4) &&
+              (gdx_branch_edit_point_extra(3, GDX_BRANCH_EDIT_EXTRA_ROAD_THEME) == 4),
+          "an insert keeps the theme on both halves");
+    ring_delete(4);
+
+    gdx_branch_edit_state_save(state);
+    gdx_branch_edit_set_track_setting(GDX_BRANCH_EDIT_TRACK_ROAD_THEME, 0);
+    CHECK(!gdx_branch_edit_state_equal(state), "a theme change is a changed state");
+    gdx_branch_edit_state_load(state);
+    CHECK((gdx_branch_edit_track_setting(GDX_BRANCH_EDIT_TRACK_ROAD_THEME) == 9) &&
+              (gdx_branch_edit_point_extra(3, GDX_BRANCH_EDIT_EXTRA_ROAD_THEME) == 4),
+          "undo brings the themes back");
+
+    CHECK(gdx_branch_edit_commit("THEME.CRSD", sRing, sCount, 1u, reason, sizeof(reason)) == 0,
+          "a commit stores the themes");
+    gdx_branch_edit_clear();
+    gdx_branch_edit_select("THEME.CRSD", sCount);
+    CHECK((gdx_branch_edit_track_setting(GDX_BRANCH_EDIT_TRACK_ROAD_THEME) == 9) &&
+              (gdx_branch_edit_point_extra(3, GDX_BRANCH_EDIT_EXTRA_ROAD_THEME) == 4) &&
+              (gdx_branch_edit_point_extra(2, GDX_BRANCH_EDIT_EXTRA_ROAD_THEME) == 0),
+          "selecting the course brings the themes back");
+
+    gdx_branch_edit_clear();
+    gdx_branch_edit_commit("THEME.CRSD", NULL, sCount, 1u, reason, sizeof(reason));
+    gdx_settings_store_clear();
+}
+
+static void test_backgrounds(void) {
+    static unsigned char state[GDX_BRANCH_EDIT_STATE_BYTES];
+    static const int kImages[2] = { 7, 20 };
+    static const int kAngles[2] = { 90, 300 };
+    char reason[96];
+    int image = 0;
+    int angle = 0;
+    int image4 = 0;
+    int angle4 = 0;
+    int i;
+
+    make_ring(8);
+    gdx_branch_edit_clear();
+    gdx_branch_edit_sync(sCount);
+
+    CHECK((gdx_branch_edit_background_count() == 0) && !gdx_branch_edit_background(0, &image, &angle) &&
+              (gdx_settings_view_background_count() == 0),
+          "a new track has no horizon images");
+    CHECK(!gdx_branch_edit_set_background(1, 5, 0) && !gdx_branch_edit_set_background(-1, 5, 0) &&
+              (gdx_branch_edit_background_count() == 0),
+          "a slot past the end of the list is refused");
+    CHECK(gdx_branch_edit_set_background(0, 5, 120) && (gdx_branch_edit_background_count() == 1) &&
+              gdx_branch_edit_background(0, &image, &angle) && (image == 5) && (angle == 120),
+          "the slot at the count adds an image");
+    image = 0;
+    angle = 0;
+    CHECK((gdx_settings_view_background_count() == 1) && gdx_settings_view_background(0, &image, &angle) &&
+              (image == 5) && (angle == 120),
+          "the race reads the list as soon as it changes");
+    gdx_branch_edit_set_background(0, 99, 725);
+    gdx_branch_edit_background(0, &image, &angle);
+    CHECK((image == GDX_BRANCH_EDIT_BACKGROUND_IMAGE_MAX) && (angle == 5) &&
+              (gdx_branch_edit_background_count() == 1),
+          "an image stops at the last one, and an angle wraps");
+    gdx_branch_edit_set_background(0, 0, -90);
+    gdx_branch_edit_background(0, &image, &angle);
+    CHECK((image == 1) && (angle == 270), "an image starts at the first one, and an angle below 0 wraps up");
+
+    for (i = 1; i < GDX_BRANCH_EDIT_BACKGROUND_MAX; i++) {
+        gdx_branch_edit_set_background(i, i + 1, i * 60);
+    }
+    CHECK((gdx_branch_edit_background_count() == GDX_BRANCH_EDIT_BACKGROUND_MAX) &&
+              !gdx_branch_edit_set_background(GDX_BRANCH_EDIT_BACKGROUND_MAX, 3, 0) &&
+              (gdx_branch_edit_background_count() == GDX_BRANCH_EDIT_BACKGROUND_MAX),
+          "the list holds six images and no more");
+
+    CHECK(gdx_branch_edit_remove_background(1) && (gdx_branch_edit_background_count() == 5) &&
+              gdx_branch_edit_background(1, &image, &angle) && (image == 3) && (angle == 120) &&
+              gdx_branch_edit_background(4, &image4, &angle4) && (image4 == 6) && (angle4 == 300) &&
+              !gdx_branch_edit_background(5, &image, &angle),
+          "taking an image away moves the later ones up");
+    CHECK(!gdx_branch_edit_remove_background(5) && !gdx_branch_edit_remove_background(-1) &&
+              (gdx_branch_edit_background_count() == 5),
+          "a slot outside the list cannot be taken away");
+
+    gdx_branch_edit_state_save(state);
+    gdx_branch_edit_set_backgrounds(kImages, kAngles, 2);
+    CHECK(!gdx_branch_edit_state_equal(state) && (gdx_branch_edit_background_count() == 2) &&
+              gdx_branch_edit_background(1, &image, &angle) && (image == 20) && (angle == 300),
+          "a new list is a changed state");
+    gdx_branch_edit_state_load(state);
+    CHECK((gdx_branch_edit_background_count() == 5) && gdx_branch_edit_background(1, &image, &angle) &&
+              (image == 3) && (angle == 120),
+          "undo brings the list back");
+    gdx_branch_edit_remove_background(4);
+    CHECK(!gdx_branch_edit_state_equal(state), "a shorter list is a changed state");
+    gdx_branch_edit_set_background(4, image4, angle4);
+    CHECK(gdx_branch_edit_state_equal(state), "an image taken away and put back is the same state");
+
+    CHECK(gdx_branch_edit_commit("HORIZON.CRSD", sRing, sCount, 1u, reason, sizeof(reason)) == 0,
+          "a commit stores the list");
+    gdx_branch_edit_clear();
+    CHECK(gdx_branch_edit_background_count() == 0, "a cleared edit has no list");
+    gdx_branch_edit_select("HORIZON.CRSD", sCount);
+    CHECK((gdx_branch_edit_background_count() == 5) && gdx_branch_edit_background(0, &image, &angle) &&
+              (image == 1) && (angle == 270) && gdx_branch_edit_background(4, &image, &angle) && (image == 6) &&
+              (angle == 300),
+          "selecting the course brings the list back");
+
+    gdx_branch_edit_set_backgrounds(NULL, NULL, 0);
+    CHECK((gdx_branch_edit_background_count() == 0) && (gdx_settings_view_background_count() == 0),
+          "an empty list takes every image away");
+
+    gdx_branch_edit_clear();
+    gdx_branch_edit_commit("HORIZON.CRSD", NULL, sCount, 1u, reason, sizeof(reason));
     gdx_settings_store_clear();
 }
 
@@ -942,6 +1150,8 @@ int main(void) {
     test_first_values();
     test_extras();
     test_wind_extras();
+    test_road_theme();
+    test_backgrounds();
     test_reload_then_select_without_split();
     if (sFailures != 0) {
         printf("%d course branch edit test(s) failed\n", sFailures);

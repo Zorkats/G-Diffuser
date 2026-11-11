@@ -1,12 +1,14 @@
 /* port/gdx_wind.h -- wind on Course Edit tracks.
  *
  * Course Edit stores wind per segment: any control point can hold a wind for the segment that starts there
- * (gdx_course_settings.h). There is no wind for the whole track. This module holds what the race does with it:
+ * (gdx_course_settings.h). The track can hold one wind of its own too, which blows on every segment that has
+ * none. This module holds what the race does with it:
  *
  *   - Direction: a fixed compass angle, the way the wind blows. 0 is north, the top of the race map (world -Z),
  *     and 90 is east (world +X), clockwise. Your heading decides whether it is a tailwind, a headwind or a
  *     crosswind.
- *   - Where: only on the segments that have wind. Tunnels block it.
+ *   - Where: on the segments that have wind, and everywhere else the track's wind if it has one. Tunnels block
+ *     both.
  *   - Push: along the road surface. The part along your heading is halved, so a tailwind or headwind changes
  *     your speed without taking over the race. The side part stops growing near the side speed cap. Strength
  *     grows faster than its percent: 100% (Gale) pushes twice as hard as a straight ramp would, and its side
@@ -15,8 +17,9 @@
  *   - Streaks: squashed cloud puffs drift across each player's view in the wind's screen direction, toward the
  *     center for a tailwind and out from it for a headwind. The cloud art is the stock texture from the player's
  *     own ROM; no pixel data is kept in the repo.
- *   - Road arrows: a plate of chevrons painted on the road of each windy segment, pointing the way it blows, one
- *     chevron for each 25 percent. The art is drawn here in code.
+ *   - Road arrows: a plate of chevrons painted on the road of each segment with a wind of its own, pointing the
+ *     way it blows, one chevron for each 25 percent. The art is drawn here in code. The track's wind paints no
+ *     plates: the streaks show it.
  */
 #ifndef GDX_WIND_H
 #define GDX_WIND_H
@@ -43,6 +46,11 @@ extern "C" {
 /* The wind on a segment from its point's stored values: strength 0 (none) or 1..100. blocked is nonzero in a
  * tunnel. Returns the strength 0..100 and writes the angle, 0..359. */
 int gdx_wind_resolve(int pointStrength, int pointAngle, int blocked, int* angle);
+
+/* The same with the track's wind behind it: a segment with a wind of its own (pointStrength above 0) blows that
+ * one, and any other segment blows the track's. A tunnel blocks both. */
+int gdx_wind_resolve_track(int pointStrength, int pointAngle, int trackStrength, int trackAngle, int blocked,
+                           int* angle);
 
 /* The strength scale for a strength 0..100: 1 + (GDX_WIND_GALE_SCALE - 1) * strength / 100. */
 float gdx_wind_strength_scale(int strength);
@@ -92,10 +100,24 @@ void gdx_wind_view_shares(int angle, float forwardX, float forwardZ, float* side
 #define GDX_WIND_PART_STRONG 2
 #define GDX_WIND_PART_GALE 3
 #define GDX_WIND_PART_REMOVE 4 /* takes the segment's wind away */
-#define GDX_WIND_PART_ROWS 5
+#define GDX_WIND_PART_TRACK 5  /* steps the track's wind: none, Weak, Mid, Strong, Gale, none */
+#define GDX_WIND_PART_TURN 6   /* turns the track's wind one step clockwise */
+#define GDX_WIND_PART_ROWS 7
 
-/* The point strength a row places: 25, 50, 75 or 100, or 0 (no wind) for Remove and any row out of range. */
+/* The point strength a row places: 25, 50, 75 or 100, or 0 (no wind) for Remove, for the two track rows and for
+ * any row out of range. */
 int gdx_wind_part_strength(int row);
+
+/* The track's wind after one press of the Track row: none goes to 25, a strength goes up to the next of 25, 50, 75
+ * and 100, and 100 goes back to none. */
+int gdx_wind_track_step(int strength);
+
+/* The Turn row turns the track's wind this many degrees. */
+#define GDX_WIND_TURN_STEP 15
+/* The angle at the nearest step, 0..345. A new track wind starts on one. */
+int gdx_wind_angle_snap(int angle);
+/* The angle after one press of the Turn row: the next step clockwise, 0..345. */
+int gdx_wind_angle_turn(int angle);
 
 /* The compass angle 0..359 the ground direction (world x, z) points to, or -1 when it is shorter than
  * minLength. The inverse of gdx_wind_direction. */

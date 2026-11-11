@@ -15,8 +15,10 @@
 #include "gdx_course_edit_input.h"
 #include "gdx_course_edit_undo.h"
 #include "gdx_wind.h"
+#include "gdx_course_bounds.h"
 
 extern unk_807B3C20 D_802CB6D0;
+extern unk_807B3C20 D_807B6528; /* the ring as the last backup took it (func_xk2_800EF78C) */
 extern unk_80128690 D_80128690[GDX_COURSE_POINT_CAPACITY];
 extern unk_800D6CA0 D_800D6CA0;
 extern CourseInfo* gCurrentCourseInfo;
@@ -168,6 +170,45 @@ void gdx_course_branch_editor_on_translate(float dx, float dz) {
     gdx_branch_edit_on_translate(dx, dz);
 }
 
+/* The editor's X and Z limits for a control point (the point movers in course_edit/188850.c). */
+#define EDITOR_POINT_XZ_LIMIT 15000.0f
+
+/* The TRACK row moved every ring point by one offset from the backup the grab made. The stored nodes of the paths
+ * not showing take the same offset. The movers kept the ring inside the course's bounds but could not see those
+ * nodes, so where one would leave the bounds the offset is cut short and the ring is pulled back by the same
+ * amount: the track keeps its shape. */
+void gdx_course_branch_editor_track_moved(void) {
+    float delta[3];
+    float lo[3];
+    float hi[3];
+    float fit[3];
+    s32 i;
+
+    if (D_802CB6D0.controlPointCount < 1) {
+        return;
+    }
+    delta[0] = D_802CB6D0.unk_0000[0].pos.x - D_807B6528.unk_0000[0].pos.x;
+    delta[1] = D_802CB6D0.unk_0000[0].pos.y - D_807B6528.unk_0000[0].pos.y;
+    delta[2] = D_802CB6D0.unk_0000[0].pos.z - D_807B6528.unk_0000[0].pos.z;
+    lo[0] = -EDITOR_POINT_XZ_LIMIT;
+    lo[1] = gdx_course_edit_min_y();
+    lo[2] = -EDITOR_POINT_XZ_LIMIT;
+    hi[0] = EDITOR_POINT_XZ_LIMIT;
+    hi[1] = gdx_course_edit_max_y();
+    hi[2] = EDITOR_POINT_XZ_LIMIT;
+    gdx_branch_edit_fit_move(delta, lo, hi, fit);
+    if ((fit[0] != delta[0]) || (fit[1] != delta[1]) || (fit[2] != delta[2])) {
+        for (i = 0; i < D_802CB6D0.controlPointCount; i++) {
+            D_802CB6D0.unk_0000[i].pos.x += fit[0] - delta[0];
+            D_802CB6D0.unk_0000[i].pos.y += fit[1] - delta[1];
+            D_802CB6D0.unk_0000[i].pos.z += fit[2] - delta[2];
+        }
+        gdx_course_edit_flash_message("Move cut short: the other path is at the edge");
+        Audio_TriggerSystemSE(NA_SE_32);
+    }
+    gdx_branch_edit_on_move(fit[0], fit[1], fit[2]);
+}
+
 /* After func_xk2_800E5B6C rebuilt a valid editor ring: drop forks the ring no longer supports, then build
  * the second ring so the other path shows in the editor. */
 void gdx_course_branch_editor_rebuilt(void) {
@@ -252,6 +293,43 @@ static s32 editor_camera_wind_angle(void) {
     return (angle < 0) ? 0 : angle;
 }
 
+/* The WIND part's TRACK and TURN rows act on the whole track, so a press anywhere on the course counts. TRACK steps
+ * the track's wind through its strengths, and a new one blows the camera's way, on the nearest turn step. TURN
+ * turns it one step. The overlay draws the result at the first point (port/gdx_course_edit_mouse.cpp). */
+static void editor_track_wind_press(s32 turn) {
+    static const char* const kStepped[] = { "Track wind: off", "Track wind: Weak", "Track wind: Mid",
+                                            "Track wind: Strong", "Track wind: Gale" };
+    s32 strength = gdx_branch_edit_track_setting(GDX_BRANCH_EDIT_TRACK_WIND_STRENGTH);
+    s32 next;
+
+    if (gInCourseEditTestRun) {
+        Audio_TriggerSystemSE(NA_SE_32);
+        return;
+    }
+    if (turn) {
+        if (strength == 0) {
+            gdx_course_edit_flash_message("Turn: the track has no wind yet");
+            Audio_TriggerSystemSE(NA_SE_32);
+            return;
+        }
+        func_xk2_800EF78C();
+        gdx_branch_edit_set_track_setting(
+            GDX_BRANCH_EDIT_TRACK_WIND_ANGLE,
+            gdx_wind_angle_turn(gdx_branch_edit_track_setting(GDX_BRANCH_EDIT_TRACK_WIND_ANGLE)));
+        Audio_TriggerSystemSE(NA_SE_39);
+        return;
+    }
+    next = gdx_wind_track_step(strength);
+    func_xk2_800EF78C();
+    gdx_branch_edit_set_track_setting(GDX_BRANCH_EDIT_TRACK_WIND_STRENGTH, next);
+    if (strength == 0) {
+        gdx_branch_edit_set_track_setting(GDX_BRANCH_EDIT_TRACK_WIND_ANGLE,
+                                          gdx_wind_angle_snap(editor_camera_wind_angle()));
+    }
+    gdx_course_edit_flash_message(kStepped[next / 25]);
+    Audio_TriggerSystemSE(NA_SE_39);
+}
+
 void gdx_course_branch_editor_wind_place(void) {
     s32 point = D_800D6CA0.unk_0C;
     s32 strength;
@@ -259,6 +337,10 @@ void gdx_course_branch_editor_wind_place(void) {
     s32 own;
 
     if (gPartsStyleOption != TRACK_PART_STYLE_WIND) {
+        return;
+    }
+    if ((gWindTypeOption == GDX_WIND_PART_TRACK) || (gWindTypeOption == GDX_WIND_PART_TURN)) {
+        editor_track_wind_press(gWindTypeOption == GDX_WIND_PART_TURN);
         return;
     }
     if ((point < 0) || (point >= D_802CB6D0.controlPointCount) || gInCourseEditTestRun) {
@@ -277,6 +359,77 @@ void gdx_course_branch_editor_wind_place(void) {
         gdx_branch_edit_set_point_extra(point, GDX_BRANCH_EDIT_EXTRA_WIND_ANGLE, editor_camera_wind_angle());
     }
     Audio_TriggerSystemSE(NA_SE_39);
+}
+
+/* decomp/src/overlays/ovl_i3/background.c: a cup course's stock horizon list, as images and compass angles. */
+extern s32 Background_GdxStockList(s32 courseIndex, s32* images, s32* angles, s32 max);
+
+/* Whether a GDX_BRANCH_EDITOR_HORIZON_* change can be made to the list as it is. */
+static s32 editor_horizon_can(s32 which, s32 value) {
+    s32 count = gdx_branch_edit_background_count();
+    s32 images[GDX_BRANCH_EDIT_BACKGROUND_MAX];
+    s32 angles[GDX_BRANCH_EDIT_BACKGROUND_MAX];
+
+    if (which == GDX_BRANCH_EDITOR_HORIZON_COPY) {
+        return Background_GdxStockList(value, images, angles, GDX_BRANCH_EDIT_BACKGROUND_MAX) >= 0;
+    }
+    if (which == GDX_BRANCH_EDITOR_HORIZON_REMOVE) {
+        return (value >= 0) && (value < count);
+    }
+    if ((which >= GDX_BRANCH_EDITOR_HORIZON_ANGLE) &&
+        (which < GDX_BRANCH_EDITOR_HORIZON_ANGLE + GDX_BRANCH_EDIT_BACKGROUND_MAX)) {
+        return (which - GDX_BRANCH_EDITOR_HORIZON_ANGLE) < count;
+    }
+    if ((which >= GDX_BRANCH_EDITOR_HORIZON_IMAGE) &&
+        (which < GDX_BRANCH_EDITOR_HORIZON_IMAGE + GDX_BRANCH_EDIT_BACKGROUND_MAX)) {
+        return (which - GDX_BRANCH_EDITOR_HORIZON_IMAGE) <= count;
+    }
+    return 0;
+}
+
+/* Makes a GDX_BRANCH_EDITOR_HORIZON_* change. A new image stands a sixth of a turn past the last one, so a list
+ * built by adding images spreads around the track. The race reads the list when it starts. */
+static s32 editor_horizon_apply(s32 which, s32 value) {
+    s32 count = gdx_branch_edit_background_count();
+    s32 images[GDX_BRANCH_EDIT_BACKGROUND_MAX];
+    s32 angles[GDX_BRANCH_EDIT_BACKGROUND_MAX];
+    int image = 1;
+    int angle = 0;
+    s32 slot;
+
+    if (!editor_horizon_can(which, value)) {
+        return 0;
+    }
+    if (which == GDX_BRANCH_EDITOR_HORIZON_COPY) {
+        count = Background_GdxStockList(value, images, angles, GDX_BRANCH_EDIT_BACKGROUND_MAX);
+        gdx_branch_edit_set_backgrounds(images, angles, count);
+        return 1;
+    }
+    if (which == GDX_BRANCH_EDITOR_HORIZON_REMOVE) {
+        return gdx_branch_edit_remove_background(value);
+    }
+    if (which >= GDX_BRANCH_EDITOR_HORIZON_ANGLE) {
+        slot = which - GDX_BRANCH_EDITOR_HORIZON_ANGLE;
+        gdx_branch_edit_background(slot, &image, &angle);
+        return gdx_branch_edit_set_background(slot, image, value);
+    }
+    slot = which - GDX_BRANCH_EDITOR_HORIZON_IMAGE;
+    if (slot == count) {
+        angle = (count * 60) % 360;
+    } else {
+        gdx_branch_edit_background(slot, &image, &angle);
+    }
+    return gdx_branch_edit_set_background(slot, value, angle);
+}
+
+int gdx_course_branch_editor_horizon_change(int which, int value) {
+    if (gInCourseEditTestRun || !editor_horizon_can(which, value)) {
+        Audio_TriggerSystemSE(NA_SE_32);
+        return 0;
+    }
+    gdx_course_edit_undo_set_pending_label(GDX_COURSE_EDIT_UNDO_LABEL_OPTION);
+    func_xk2_800EF78C();
+    return editor_horizon_apply(which, value);
 }
 
 void gdx_course_branch_editor_apply_extra(void) {
@@ -314,8 +467,23 @@ void gdx_course_branch_editor_apply_extra(void) {
         gdx_course_edit_undo_set_pending_label(GDX_COURSE_EDIT_UNDO_LABEL_OPTION);
         func_xk2_800EF78C();
     }
+    if (request.is_track && (request.which >= GDX_BRANCH_EDITOR_HORIZON_IMAGE)) {
+        editor_horizon_apply(request.which, request.value);
+        return;
+    }
     if (request.is_track) {
+        /* A track the panel gives wind to starts blowing the camera's way, as a segment does. */
+        s32 newWind = (request.which == GDX_BRANCH_EDIT_TRACK_WIND_STRENGTH) && (request.value > 0) &&
+                      (gdx_branch_edit_track_setting(GDX_BRANCH_EDIT_TRACK_WIND_STRENGTH) == 0);
+
         gdx_branch_edit_set_track_setting(request.which, request.value);
+        if (newWind) {
+            gdx_branch_edit_set_track_setting(GDX_BRANCH_EDIT_TRACK_WIND_ANGLE, editor_camera_wind_angle());
+        }
+        /* The chunks carry the road theme they were built with. */
+        if (request.which == GDX_BRANCH_EDIT_TRACK_ROAD_THEME) {
+            D_xk2_800F7040 = 3;
+        }
     } else {
         /* A segment the panel gives wind to starts blowing the camera's way. */
         s32 newWind = (request.which == GDX_BRANCH_EDIT_EXTRA_WIND_STRENGTH) && (request.value > 0) &&
@@ -326,10 +494,12 @@ void gdx_course_branch_editor_apply_extra(void) {
             gdx_branch_edit_set_point_extra(request.point, GDX_BRANCH_EDIT_EXTRA_WIND_ANGLE,
                                             editor_camera_wind_angle());
         }
-        /* A width or a pad kind changes the strips and plates the effects were built with. */
+        /* A width or a pad kind changes the strips and plates the effects were built with, and a road theme the
+           chunks. */
         if ((request.which == GDX_BRANCH_EDIT_EXTRA_PIT_WIDTH) || (request.which == GDX_BRANCH_EDIT_EXTRA_DIRT_WIDTH) ||
             (request.which == GDX_BRANCH_EDIT_EXTRA_ICE_WIDTH) || (request.which == GDX_BRANCH_EDIT_EXTRA_PAD_KIND) ||
-            (request.which == GDX_BRANCH_EDIT_EXTRA_PAD_WIDTH)) {
+            (request.which == GDX_BRANCH_EDIT_EXTRA_PAD_WIDTH) ||
+            (request.which == GDX_BRANCH_EDIT_EXTRA_ROAD_THEME)) {
             D_xk2_800F7040 = 3;
         }
     }

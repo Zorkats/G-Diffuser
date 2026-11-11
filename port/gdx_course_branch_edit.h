@@ -37,17 +37,25 @@ extern "C" {
 #define GDX_BRANCH_EDIT_EXTRA_PAD_KIND 5  /* GDX_SETTINGS_PAD_*; any kind but Super clears the boost */
 #define GDX_BRANCH_EDIT_EXTRA_PAD_WIDTH 6
 #define GDX_BRANCH_EDIT_EXTRA_PAD_BOOST 7 /* Super pads only */
-/* 0 (no wind) or 1..100, capped; 0 clears the angle. Wind is per segment only. */
+/* The segment's own wind: 0 (none) or 1..100, capped; 0 clears the angle. */
 #define GDX_BRANCH_EDIT_EXTRA_WIND_STRENGTH 8
 #define GDX_BRANCH_EDIT_EXTRA_WIND_ANGLE 9 /* 0..359, wraps; only on a point with a strength of 1..100 */
-#define GDX_BRANCH_EDIT_EXTRA_COUNT 10
+/* The road theme of the segment that starts at the point: 0 (the track's) or 1..GDX_SETTINGS_ROAD_THEME_MAX,
+ * a venue + 1, capped. */
+#define GDX_BRANCH_EDIT_EXTRA_ROAD_THEME 10
+#define GDX_BRANCH_EDIT_EXTRA_COUNT 11
 
 /* The values of the whole track. */
 #define GDX_BRANCH_EDIT_TRACK_LAVA 0
 #define GDX_BRANCH_EDIT_TRACK_STRENGTH 1
 #define GDX_BRANCH_EDIT_TRACK_RANGE 2
 #define GDX_BRANCH_EDIT_TRACK_AI 3 /* GDX_SETTINGS_AI_*, capped */
-#define GDX_BRANCH_EDIT_TRACK_COUNT 4
+/* The track's wind, on every segment without one: 0 (none) or 1..100, capped; 0 clears the angle. */
+#define GDX_BRANCH_EDIT_TRACK_WIND_STRENGTH 4
+#define GDX_BRANCH_EDIT_TRACK_WIND_ANGLE 5 /* 0..359, wraps; only with a strength of 1..100 */
+/* The track's road theme, on every segment without one: 0 (its venue's own road) or a venue + 1, capped. */
+#define GDX_BRANCH_EDIT_TRACK_ROAD_THEME 6
+#define GDX_BRANCH_EDIT_TRACK_COUNT 7
 
 typedef struct GdxBranchEditPoint {
     float pos[3];
@@ -90,6 +98,20 @@ void gdx_branch_edit_set_point_extra(int point, int which, int value);
 int gdx_branch_edit_track_setting(int which);
 void gdx_branch_edit_set_track_setting(int which, int value);
 
+/* The track's horizon images, in the order the race lists them: up to GDX_BRANCH_EDIT_BACKGROUND_MAX slots, each one
+ * stock image 1..GDX_BRANCH_EDIT_BACKGROUND_IMAGE_MAX at a compass angle 0..359 (0 north, 90 east). A track with none
+ * keeps the stock horizon. background returns 1 and fills image and angle (either may be NULL) for a slot in the list.
+ * set_background changes a slot, or adds one when slot is the count; it caps the image, wraps the angle and returns 0
+ * for any other slot and for a full list. remove_background moves the later slots up. set_backgrounds replaces the
+ * whole list with count images, capped. Each refreshes the active settings. */
+#define GDX_BRANCH_EDIT_BACKGROUND_MAX 6
+#define GDX_BRANCH_EDIT_BACKGROUND_IMAGE_MAX 55
+int gdx_branch_edit_background_count(void);
+int gdx_branch_edit_background(int slot, int* image, int* angle);
+int gdx_branch_edit_set_background(int slot, int image, int angle);
+int gdx_branch_edit_remove_background(int slot);
+void gdx_branch_edit_set_backgrounds(const int* images, const int* angles, int count);
+
 /* Fork whose segments F..M-1 include segment, or -1. */
 int gdx_branch_edit_fork_at(int segment);
 
@@ -115,6 +137,12 @@ void gdx_branch_edit_on_rotate(int newStart, int ringCount);
 void gdx_branch_edit_on_reverse(int ringCount);
 /* The whole ring moved by (dx, dz), so the stored nodes move with it. Center course does this. */
 void gdx_branch_edit_on_translate(float dx, float dz);
+/* The same with a height: the MOVE menu's TRACK row moves the whole track on all three axes. */
+void gdx_branch_edit_on_move(float dx, float dy, float dz);
+/* The part of a whole-track move the stored nodes can take. fit is delta, cut short on each axis where it would
+ * carry a stored node below lo or above hi. A move is only ever cut, never turned around, so a node already out
+ * of bounds stops a move further out and allows any move back in. With no stored nodes fit is delta. */
+void gdx_branch_edit_fit_move(const float delta[3], const float lo[3], const float hi[3], float fit[3]);
 
 /* Called after every editor rebuild. Removes forks the ring no longer supports (a ring change the hooks
  * did not see, a fork that now touches point 0, too many points) and refreshes the active set.

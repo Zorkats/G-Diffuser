@@ -121,6 +121,30 @@ static void testPixelBytesKeepTheirOrder(void) {
     }
 }
 
+/* Glyph order in the composed texture is 6, 7, 8, 9, 0, twelve rows of eight pixels each. */
+static size_t composedSource(const unsigned char* out, int glyph, int row, int col) {
+    size_t at = (size_t) (((glyph * 12) + row) * 8 + col) * 2;
+
+    return ((size_t) out[at] << 8) | out[at + 1];
+}
+
+/* The 2026-11-09 revision of the digit design: 7 gets a full dark border and a lighter top right, 0
+ * gets a lighter bottom, and the inner gaps of 6, 8, 9 and 0 share one shade. A sample of each. */
+static void testFinalRevisionSources(void) {
+    unsigned char out[GDX_LAP_DIGITS_SIZE];
+
+    buildIndexAtlas();
+    CHECK(gdx_lap_digits_compose(sEntry, (unsigned long) sStubSize, out) == 1);
+    CHECK(composedSource(out, 1, 1, 6) == 12);  /* 7, top right */
+    CHECK(composedSource(out, 1, 5, 2) == 42);  /* 7, left edge of the stem */
+    CHECK(composedSource(out, 1, 7, 4) == 252); /* 7, right edge of the stem */
+    CHECK(composedSource(out, 4, 7, 3) == 251); /* 0, bottom */
+    CHECK(composedSource(out, 4, 4, 1) == 36);  /* 0, left side */
+    CHECK(composedSource(out, 0, 3, 3) == 220); /* 6, upper gap */
+    CHECK(composedSource(out, 2, 6, 4) == 340); /* 8, lower gap */
+    CHECK(composedSource(out, 3, 6, 3) == 242); /* 9, tail */
+}
+
 static void testWrongEntriesAreRejected(void) {
     unsigned char out[GDX_LAP_DIGITS_SIZE];
 
@@ -162,6 +186,7 @@ static void testApply(void) {
 int main(void) {
     testEveryPixelComesFromTheAtlas();
     testPixelBytesKeepTheirOrder();
+    testFinalRevisionSources();
     testWrongEntriesAreRejected();
     testApply();
 

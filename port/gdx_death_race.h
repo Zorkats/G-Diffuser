@@ -60,8 +60,11 @@ int gdx_death_race_course(void);
 /* 1 only for course 54 with endless laps, else 0. */
 int gdx_death_race_stock_setup(void);
 /* Reports the player's completed laps. Returns 1 only when a limit is set, completedLaps has reached
- * it, and the outcome is RUNNING. That call sets OUT_OF_LAPS. Returns 0 otherwise. */
-int gdx_death_race_check_laps(int completedLaps);
+ * it, and the outcome is RUNNING. Returns 0 otherwise. rivalsStanding is the number of rivals that can
+ * still race: not retired, and not already spinning out or falling to their end. That call sets CLEARED
+ * when rivalsStanding is 0 or less, because the last rival is destroyed and only its explosion is still
+ * playing, and OUT_OF_LAPS when a rival is left. */
+int gdx_death_race_check_laps(int completedLaps, int rivalsStanding);
 /* Sets CLEARED, but only while the outcome is RUNNING. */
 void gdx_death_race_cleared(void);
 /* Current outcome. */

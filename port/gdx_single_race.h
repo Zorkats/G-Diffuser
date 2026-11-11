@@ -24,11 +24,21 @@ void gdx_single_race_migrate_settings(void);
  * for this race. Every other entry point reports the snapshot taken here. */
 void gdx_single_race_begin_race(int eligible);
 
+/* The next race start runs under Single Race rules with this lap count and field, whatever the options
+ * say: the race of a G-NET room. One race only; a start that is not eligible drops it. */
+void gdx_single_race_force_next(int laps, int racers);
+
 /* Non-zero while the race in progress runs under Single Race rules. */
 int gdx_single_race_active(void);
 
 /* Non-zero while an active Single Race has a finite lap count (1 to 99). */
 int gdx_single_race_finite(void);
+
+/* Laps the player has completed in a Practice run without a lap limit, counted here because the stock
+ * lap number wraps every three laps. The first adds one and returns the new count; begin_race clears
+ * it. Counts with or without Single Race rules. */
+int gdx_single_race_practice_lap_done(void);
+int gdx_single_race_practice_laps_done(void);
 
 /* Lap count for the race in progress: the chosen count for a finite Single Race, otherwise 3. */
 int gdx_single_race_lap_count(void);

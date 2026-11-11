@@ -166,6 +166,7 @@ add_library(gdiffuser_game OBJECT ${GAME_SOURCES}
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_snapshot_mfs.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_branch_editor.c" # Course Edit forks: editor hooks and tools
     "${CMAKE_CURRENT_SOURCE_DIR}/gdx_det_layout.c"         # GDX_DET_LOG probe fields; needs the decomp Racer layout
+    "${CMAKE_CURRENT_SOURCE_DIR}/gdx_net_race_bridge.c"    # O3 remote racers: writes a pose into a Racer slot
     "${CMAKE_CURRENT_SOURCE_DIR}/gdx_split_gp.c"           # MP2 split-screen Grand Prix rules
     "${CMAKE_CURRENT_SOURCE_DIR}/gdx_main_menu_grid.c"     # O2-9 main menu 3x3 card grid
     "${CMAKE_CURRENT_SOURCE_DIR}/gdx_gnet_sign.c"          # O2-9 G-NET card composer
@@ -376,6 +377,7 @@ gdx_add_main_target(G-Diffuser
     gdx_steering_curve.c       # Per-port steering exponent, called from racer.c
     gdx_xcup_random.c          # X Cup random courses, called from course.c, cpu.c and background.c
     n64_gfx_bridge.cpp
+    gdx_host_placement.c       # Registered buffers placed where no N64 address can name them
     gdx_interp.cpp
     n64_gfx_convert.cpp
     gdx_vi_convert.c
@@ -446,6 +448,15 @@ gdx_add_main_target(G-Diffuser
     net/gdx_net_socket.cpp         # O2 non-blocking UDP socket (Winsock / POSIX)
     net/gdx_net_channel.cpp        # O2 reliable and unreliable messages over one UDP peer
     net/gdx_net_lobby.cpp          # O2 lobby messages, LAN discovery packets and the chat filter
+    net/gdx_net_room.cpp           # O3 room state machine: vote, lottery, pick, lock-in and the phase timers
+    gdx_net_machine_select.c       # O3 lock-in screen: when the stock machine screens belong to the room
+    gdx_net_race_box.c             # O3 room race: the quit box every racer has (continue, return to room, leave the room)
+    gdx_net_room_screen.c          # O3 room screen of the main menu: pages, cursor and the texts to draw
+    gdx_net_text.c                 # O3 room screens: text the two stock fonts can draw, wrapping and the timer
+    gdx_net_track_choice.c         # O3 vote and pick: when the stock course select belongs to the room, and its lines
+    gdx_net_room_view.cpp          # O3 room screen: the flat copy of the room session and its actions
+    net/gdx_net_race.cpp           # O3 remote racers: pose buffer, the guess of where a machine is now and the dev echo
+    gdx_net_race_dev.c             # O3 remote racers: the GDX_NET_PUPPET_ECHO, GDX_NET_DEV_AUTOPILOT, GDX_NET_DEV_CONTACTS and GDX_NET_DEV_TRACE developer switches
     net/gdx_net_lobby_session.cpp  # O2 lobby host, joining client and LAN room browser
     gdx_lan_lobby.cpp              # O2 lobby worker thread that owns the socket
     gdx_lan_lobby_page.cpp         # Online > LAN Lobby menu page
@@ -1372,6 +1383,18 @@ endif()
 if(NOT MSVC)
     target_link_libraries(gdx_wind_tests PRIVATE m)
 endif()
+# Host placement test: compiles gdx_host_placement.c UNMODIFIED and allocates real placed buffers.
+add_executable(gdx_host_placement_tests
+    tests/gdx_host_placement_tests.c
+    gdx_host_placement.c
+    gdx_dev_gates.c)   # port_log.h reads the developer-gate cache
+target_include_directories(gdx_host_placement_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_host_placement_tests PRIVATE /W3)
+    target_compile_definitions(gdx_host_placement_tests PRIVATE _CRT_SECURE_NO_WARNINGS=1)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_host_placement_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
 # Test drive test: compiles gdx_test_drive.c UNMODIFIED.
 add_executable(gdx_test_drive_tests
     tests/gdx_test_drive_tests.c
@@ -1596,11 +1619,83 @@ if(MSVC)
 elseif(GDX_PORT_WARN_FLAGS)
     target_compile_options(gdx_net_channel_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
 endif()
+# Online O3 room state machine: seats, vote, lottery, pick, lock-in and every phase timer on a fake
+# clock. No network and no socket.
+add_executable(gdx_net_room_tests
+    tests/gdx_net_room_tests.cpp
+    net/gdx_net_room.cpp
+    net/gdx_net_lobby.cpp)
+target_compile_features(gdx_net_room_tests PRIVATE cxx_std_17)
+if(MSVC)
+    target_compile_options(gdx_net_room_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_net_room_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# Online O3 lock-in screen: when it opens, waits and leaves, and its timer and counter text. The room and
+# the menu are four functions the test supplies, so no socket, thread or game code is linked.
+add_executable(gdx_net_machine_select_tests
+    tests/gdx_net_machine_select_tests.c
+    gdx_net_machine_select.c)
+target_include_directories(gdx_net_machine_select_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_net_machine_select_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_net_machine_select_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# Online O3 room race: the quit box every racer has. Its rows on a host and on a client, what opens and
+# closes it, the cursor, and what each row does. The room and the race are the five functions the test supplies.
+add_executable(gdx_net_race_box_tests
+    tests/gdx_net_race_box_tests.c
+    gdx_net_race_box.c)
+target_include_directories(gdx_net_race_box_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_net_race_box_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_net_race_box_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# Online O3 room screen: every page and seat, what each button does, a room of 14 and a list of 32 rooms,
+# the number fields and the text pieces. The room session is the functions the test supplies.
+add_executable(gdx_net_room_screen_tests
+    tests/gdx_net_room_screen_tests.c
+    gdx_net_room_screen.c
+    gdx_net_track_choice.c
+    gdx_net_text.c)
+target_include_directories(gdx_net_room_screen_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_net_room_screen_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_net_room_screen_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# Online O3 vote and pick on the stock course select: when the screen is the room's, what each state of the
+# room makes of it, the one ballot or pick it sends and every line it draws. The room session and the menu are
+# the functions the test supplies.
+add_executable(gdx_net_track_choice_tests
+    tests/gdx_net_track_choice_tests.c
+    gdx_net_track_choice.c
+    gdx_net_text.c)
+target_include_directories(gdx_net_track_choice_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_net_track_choice_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_net_track_choice_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# Online O3 remote racers: the pose buffer on a simulated link (a bracketed pose, lost poses at both
+# delays, hold, snap), the lap bookkeeping at the line and the one-copy echo. No network and no game code.
+add_executable(gdx_net_race_tests
+    tests/gdx_net_race_tests.cpp
+    net/gdx_net_race.cpp)
+target_compile_features(gdx_net_race_tests PRIVATE cxx_std_17)
+if(MSVC)
+    target_compile_options(gdx_net_race_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_net_race_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
 # Online O2 LAN lobby: wire format, chat filter, host, client and room browser on a fake network. The
 # socket file is linked only for FormatAddress; no socket is opened.
 add_executable(gdx_net_lobby_tests
     tests/gdx_net_lobby_tests.cpp
     net/gdx_net_lobby.cpp
+    net/gdx_net_room.cpp
     net/gdx_net_lobby_session.cpp
     net/gdx_net_channel.cpp
     net/gdx_net_socket.cpp)
@@ -1750,6 +1845,7 @@ if(GDX_BUILD_JP AND NOT ANDROID)
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_snapshot_mfs.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_course_branch_editor.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_det_layout.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/gdx_net_race_bridge.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_split_gp.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_main_menu_grid.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/gdx_gnet_sign.c"
@@ -1842,6 +1938,7 @@ if(GDX_BUILD_JP AND NOT ANDROID)
         gdx_bg_sprites.c       # same for gdx_bg_sprites_apply()
         gdx_game_text.c        # same for gdx_game_text_apply()
         n64_gfx_bridge.cpp
+        gdx_host_placement.c
         gdx_interp.cpp
         n64_gfx_convert.cpp
         gdx_vi_convert.c
@@ -1916,6 +2013,15 @@ if(GDX_BUILD_JP AND NOT ANDROID)
         net/gdx_net_socket.cpp
         net/gdx_net_channel.cpp
         net/gdx_net_lobby.cpp
+        net/gdx_net_room.cpp
+        gdx_net_machine_select.c
+        gdx_net_race_box.c
+        gdx_net_room_screen.c
+        gdx_net_text.c
+        gdx_net_track_choice.c
+        gdx_net_room_view.cpp
+        net/gdx_net_race.cpp
+        gdx_net_race_dev.c
         net/gdx_net_lobby_session.cpp
         gdx_lan_lobby.cpp
         gdx_lan_lobby_page.cpp

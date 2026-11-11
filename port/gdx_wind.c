@@ -22,6 +22,14 @@ int gdx_wind_resolve(int pointStrength, int pointAngle, int blocked, int* angle)
     return (pointStrength > GDX_WIND_STRENGTH_MAX) ? GDX_WIND_STRENGTH_MAX : pointStrength;
 }
 
+int gdx_wind_resolve_track(int pointStrength, int pointAngle, int trackStrength, int trackAngle, int blocked,
+                           int* angle) {
+    if (pointStrength > 0) {
+        return gdx_wind_resolve(pointStrength, pointAngle, blocked, angle);
+    }
+    return gdx_wind_resolve(trackStrength, trackAngle, blocked, angle);
+}
+
 float gdx_wind_strength_scale(int strength) {
     if (strength <= 0) {
         return 1.0f;
@@ -282,12 +290,30 @@ int gdx_wind_streak_rect(int view, int i, float viewWidth, float viewHeight, Gdx
 }
 
 int gdx_wind_part_strength(int row) {
-    static const int kStrengths[GDX_WIND_PART_ROWS] = { 25, 50, 75, 100, 0 };
+    static const int kStrengths[GDX_WIND_PART_ROWS] = { 25, 50, 75, 100, 0, 0, 0 };
 
     if ((row < 0) || (row >= GDX_WIND_PART_ROWS)) {
         return 0;
     }
     return kStrengths[row];
+}
+
+int gdx_wind_track_step(int strength) {
+    if (strength <= 0) {
+        return 25;
+    }
+    if (strength >= GDX_WIND_STRENGTH_MAX) {
+        return 0;
+    }
+    return ((strength / 25) + 1) * 25;
+}
+
+int gdx_wind_angle_snap(int angle) {
+    return wrap_angle(((wrap_angle(angle) + (GDX_WIND_TURN_STEP / 2)) / GDX_WIND_TURN_STEP) * GDX_WIND_TURN_STEP);
+}
+
+int gdx_wind_angle_turn(int angle) {
+    return wrap_angle(((wrap_angle(angle) / GDX_WIND_TURN_STEP) + 1) * GDX_WIND_TURN_STEP);
 }
 
 int gdx_wind_angle_of(float x, float z, float minLength) {

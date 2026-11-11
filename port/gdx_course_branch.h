@@ -29,6 +29,9 @@ CourseSegment* gdx_course_branch_gadget_segment(s32 courseIndex, s32 index);
 s32 gdx_course_branch_gadget_source(s32 index);
 s32 gdx_course_branch_gadget_part(s32 index, s32 part, s32 fallback);
 s32 gdx_course_branch_settings_point(const CourseSegment* segment);
+/* The road theme of the segment (gdx_settings_view_road_theme). Unlike the settings point, it also answers
+ * for ring 2 while that ring's chunks are built, before the ring is live. */
+s32 gdx_course_branch_segment_road_theme(const CourseSegment* segment);
 f32 gdx_course_branch_gadget_next_t(const CourseSegment* segment, f32 t);
 s32 gdx_course_branch_gadget_chunk(const CourseSegment* segment, f32 t);
 s32 gdx_course_branch_gadget_chunk_visible(s32 encoded);

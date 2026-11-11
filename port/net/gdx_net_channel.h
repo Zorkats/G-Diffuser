@@ -36,7 +36,9 @@ constexpr size_t kReliableWindow = 64;   // ids a sender may have unacked, and t
 constexpr size_t kInboxCap = 128;        // delivered messages waiting for PopMessage
 constexpr size_t kUnreliableOutCap = 64; // unreliable messages waiting for the next Update
 
-constexpr uint16_t kProtocolVersion = 1;
+// 2 since the room protocol of milestone O3 (gdx_net_lobby.h). A peer on version 1 is refused with
+// VersionMismatch.
+constexpr uint16_t kProtocolVersion = 2;
 
 enum class Role : uint8_t {
     Client,

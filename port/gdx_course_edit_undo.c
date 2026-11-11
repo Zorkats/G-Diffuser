@@ -181,9 +181,10 @@ static void text_put_index(char* text, int* pos, int value) {
 // Move tool names by gMoveOption. Entries 0 to 4 name the active point, and the tail follows it.
 static const char* const kMoveLabelHead[] = {
     "Move point", "Move point", "Width point", "Bank point", "Center point", "Delete points", "Line up points",
+    "Move track",
 };
 static const char* const kMoveLabelTail[] = {
-    " (x and z)", " (height)", "", "", "", "", "",
+    " (x and z)", " (height)", "", "", "", "", "", "",
 };
 // Point menu names by gPointOption, used under CREATE_OPTION_COURSE.
 static const char* const kPointLabelName[] = {
@@ -244,6 +245,9 @@ static int derive_context_text(char* text, const GdxCourseEditUndoSnapshot* snap
         return 1;
     } else if (gCreateOption == CREATE_OPTION_BGM) {
         text_put(text, &pos, "Option: music");
+        return 1;
+    } else if (gCreateOption == CREATE_OPTION_HORIZON) {
+        text_put(text, &pos, "Option: horizon");
         return 1;
     } else {
         return 0;

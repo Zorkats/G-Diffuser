@@ -68,6 +68,8 @@ constexpr float kStripMaxWidth = 220.0f;
 
 // Move options 0..4 are the point drag tools, 5 is Delete, and 6 is line up.
 constexpr int kToolCount = 7;
+// Move option 7 is the TRACK row. It has no tool key and the mouse does not drive it.
+constexpr int kTrackTool = 7;
 
 // How long a refusal message stays in the strip.
 constexpr auto kFlashDuration = std::chrono::seconds(2);
@@ -272,7 +274,7 @@ void GdxCourseEditDrawHintStrip(void) {
     }
     // Point mode shows the tool lines. COURSE (0), DESIGN (2) and PARTS (3) show how a click picks a segment.
     const bool pointMode = gCreateOption == 1 /* CREATE_OPTION_POINT */;
-    if (pointMode && (gMoveOption < 0 || gMoveOption >= kToolCount)) {
+    if (pointMode && (gMoveOption < 0 || (gMoveOption >= kToolCount && gMoveOption != kTrackTool))) {
         return;
     }
 
@@ -313,7 +315,12 @@ void GdxCourseEditDrawHintStrip(void) {
         if (FlashActive()) {
             ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "%s", sFlashText);
         }
-        if (pointMode) {
+        if (pointMode && gMoveOption == kTrackTool) {
+            ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.35f, 1.0f), "Move track");
+            ImGui::TextUnformatted("Controller Z: take hold of the whole track");
+            ImGui::TextUnformatted("Stick: slide it. Stick with Z held: raise or lower");
+            ImGui::TextDisabled("A: confirm. B: cancel. The mouse does not move it");
+        } else if (pointMode) {
             const int key = gMoveOption + 1;
             ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.35f, 1.0f), "[%s]", gdx_course_edit_mouse_key_name(key));
             ImGui::SameLine();

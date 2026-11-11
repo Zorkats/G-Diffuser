@@ -87,14 +87,14 @@ int gdx_death_race_stock_setup(void) {
     return sCourse == GDX_DEATH_RACE_STOCK_COURSE && sLaps == 0;
 }
 
-int gdx_death_race_check_laps(int completedLaps) {
+int gdx_death_race_check_laps(int completedLaps, int rivalsStanding) {
     if (sLaps == 0 || sOutcome != GDX_DEATH_RACE_RUNNING) {
         return 0;
     }
     if (completedLaps < sLaps) {
         return 0;
     }
-    sOutcome = GDX_DEATH_RACE_OUT_OF_LAPS;
+    sOutcome = (rivalsStanding <= 0) ? GDX_DEATH_RACE_CLEARED : GDX_DEATH_RACE_OUT_OF_LAPS;
     return 1;
 }
 

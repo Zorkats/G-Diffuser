@@ -9,27 +9,46 @@
 #define FIRST_TOP 38
 #define ROW_PITCH 66
 
+/* The card in each place of the grid, row by row, and the place of each card. Cards 0 to 7 are the stock modes in
+ * ModeSelect order (decomp/include/fzx_game.h) and card 8 is G-NET:
+ *     GP RACE (0)       TIME ATTACK (1)   VS BATTLE (3)
+ *     PRACTICE (5)      G-NET (8)         DEATH RACE (2)
+ *     COURSE EDIT (4)   OPTIONS (6)       CREATE MACHINE (7) */
+static const signed char sCardAtPlace[GDX_MAIN_MENU_GRID_CARDS] = { 0, 1, 3, 5, 8, 2, 4, 6, 7 };
+static const signed char sPlaceOfCard[GDX_MAIN_MENU_GRID_CARDS] = { 0, 1, 5, 2, 6, 3, 7, 8, 4 };
+
 static int card_ok(int card) {
     return card >= 0 && card < GDX_MAIN_MENU_GRID_CARDS;
 }
 
+static int card_available(int card, unsigned available) {
+    return (available >> (unsigned) card) & 1u;
+}
+
+/* The card at a row and column when the player can pick it, or -1. */
 static int available_at(int row, int column, unsigned available) {
+    int card;
+
     if (row < 0 || row >= ROWS || column < 0 || column >= GDX_MAIN_MENU_GRID_COLUMNS) {
-        return 0;
+        return -1;
     }
-    return (available >> (unsigned) (row * GDX_MAIN_MENU_GRID_COLUMNS + column)) & 1u;
+    card = sCardAtPlace[row * GDX_MAIN_MENU_GRID_COLUMNS + column];
+    return card_available(card, available) ? card : -1;
 }
 
 /* The available card of `row` nearest to `column`, the left one on a tie, or -1. */
 static int nearest_in_row(int row, int column, unsigned available) {
     int distance;
+    int card;
 
     for (distance = 0; distance < GDX_MAIN_MENU_GRID_COLUMNS; distance++) {
-        if (available_at(row, column - distance, available)) {
-            return row * GDX_MAIN_MENU_GRID_COLUMNS + column - distance;
+        card = available_at(row, column - distance, available);
+        if (card >= 0) {
+            return card;
         }
-        if (available_at(row, column + distance, available)) {
-            return row * GDX_MAIN_MENU_GRID_COLUMNS + column + distance;
+        card = available_at(row, column + distance, available);
+        if (card >= 0) {
+            return card;
         }
     }
     return -1;
@@ -39,14 +58,14 @@ int gdx_main_menu_grid_left(int card) {
     if (!card_ok(card)) {
         card = 0;
     }
-    return FIRST_LEFT + (card % GDX_MAIN_MENU_GRID_COLUMNS) * COLUMN_PITCH;
+    return FIRST_LEFT + (sPlaceOfCard[card] % GDX_MAIN_MENU_GRID_COLUMNS) * COLUMN_PITCH;
 }
 
 int gdx_main_menu_grid_top(int card) {
     if (!card_ok(card)) {
         card = 0;
     }
-    return FIRST_TOP + (card / GDX_MAIN_MENU_GRID_COLUMNS) * ROW_PITCH;
+    return FIRST_TOP + (sPlaceOfCard[card] / GDX_MAIN_MENU_GRID_COLUMNS) * ROW_PITCH;
 }
 
 int gdx_main_menu_grid_move(int current, int direction, unsigned available) {
@@ -58,15 +77,16 @@ int gdx_main_menu_grid_move(int current, int direction, unsigned available) {
     if (!card_ok(current)) {
         return current;
     }
-    row = current / GDX_MAIN_MENU_GRID_COLUMNS;
-    column = current % GDX_MAIN_MENU_GRID_COLUMNS;
+    row = sPlaceOfCard[current] / GDX_MAIN_MENU_GRID_COLUMNS;
+    column = sPlaceOfCard[current] % GDX_MAIN_MENU_GRID_COLUMNS;
     switch (direction) {
         case GDX_MAIN_MENU_GRID_LEFT:
         case GDX_MAIN_MENU_GRID_RIGHT:
             step = (direction == GDX_MAIN_MENU_GRID_LEFT) ? -1 : 1;
             for (column += step; column >= 0 && column < GDX_MAIN_MENU_GRID_COLUMNS; column += step) {
-                if (available_at(row, column, available)) {
-                    return row * GDX_MAIN_MENU_GRID_COLUMNS + column;
+                found = available_at(row, column, available);
+                if (found >= 0) {
+                    return found;
                 }
             }
             return current;
@@ -86,21 +106,22 @@ int gdx_main_menu_grid_move(int current, int direction, unsigned available) {
 }
 
 int gdx_main_menu_grid_settle(int current, unsigned available) {
-    int card;
+    int place;
     int found;
 
     if (card_ok(current)) {
-        if ((available >> (unsigned) current) & 1u) {
+        if (card_available(current, available)) {
             return current;
         }
-        found = nearest_in_row(current / GDX_MAIN_MENU_GRID_COLUMNS, current % GDX_MAIN_MENU_GRID_COLUMNS, available);
+        place = sPlaceOfCard[current];
+        found = nearest_in_row(place / GDX_MAIN_MENU_GRID_COLUMNS, place % GDX_MAIN_MENU_GRID_COLUMNS, available);
         if (found >= 0) {
             return found;
         }
     }
-    for (card = 0; card < GDX_MAIN_MENU_GRID_CARDS; card++) {
-        if ((available >> (unsigned) card) & 1u) {
-            return card;
+    for (place = 0; place < GDX_MAIN_MENU_GRID_CARDS; place++) {
+        if (card_available(sCardAtPlace[place], available)) {
+            return sCardAtPlace[place];
         }
     }
     return 0;

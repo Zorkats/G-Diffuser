@@ -268,7 +268,7 @@ static void test_race_rules(void) {
     check(gdx_death_race_laps() == 0, "rules: no race means zero laps");
     check(gdx_death_race_outcome() == GDX_DEATH_RACE_RUNNING, "rules: no race means RUNNING");
     check(gdx_death_race_stock_setup() == 0, "rules: no race is not stock setup");
-    check(gdx_death_race_check_laps(5) == 0, "rules: no race never finishes on laps");
+    check(gdx_death_race_check_laps(5, 1) == 0, "rules: no race never finishes on laps");
 
     /* Laps are clamped to 0..99. */
     gdx_death_race_begin(0, 0);
@@ -309,11 +309,11 @@ static void test_race_rules(void) {
 
     /* A limit of 3 finishes on the third completed lap, and not before. */
     gdx_death_race_begin(0, 3);
-    check(gdx_death_race_check_laps(2) == 0, "rules: two laps of three do not finish the race");
+    check(gdx_death_race_check_laps(2, 1) == 0, "rules: two laps of three do not finish the race");
     check(gdx_death_race_outcome() == GDX_DEATH_RACE_RUNNING, "rules: a race short of the limit stays RUNNING");
-    check(gdx_death_race_check_laps(3) == 1, "rules: the third lap of three finishes the race");
+    check(gdx_death_race_check_laps(3, 1) == 1, "rules: the third lap of three finishes the race");
     check(gdx_death_race_outcome() == GDX_DEATH_RACE_OUT_OF_LAPS, "rules: finishing on the limit is OUT_OF_LAPS");
-    check(gdx_death_race_check_laps(4) == 0, "rules: a finished race is not reported again");
+    check(gdx_death_race_check_laps(4, 1) == 0, "rules: a finished race is not reported again");
     check(gdx_death_race_show_loser() == 1, "rules: an out-of-laps race shows the loser");
     check(gdx_death_race_show_winner() == 0, "rules: an out-of-laps race shows no winner");
     check(gdx_death_race_may_record() == 0, "rules: an out-of-laps race may not be recorded");
@@ -322,9 +322,27 @@ static void test_race_rules(void) {
           "rules: a clear after OUT_OF_LAPS does not change the outcome");
     gdx_death_race_end();
 
+    /* The last rival is destroyed but its explosion is still playing when the player finishes the laps:
+       that is a full clear, not a loss. */
+    gdx_death_race_begin(0, 3);
+    check(gdx_death_race_check_laps(2, 0) == 0, "rules: no rival standing short of the limit does not finish");
+    check(gdx_death_race_outcome() == GDX_DEATH_RACE_RUNNING, "rules: short of the limit stays RUNNING with no rival");
+    check(gdx_death_race_check_laps(3, 0) == 1, "rules: the last lap with no rival standing finishes the race");
+    check(gdx_death_race_outcome() == GDX_DEATH_RACE_CLEARED, "rules: the last lap with no rival standing is CLEARED");
+    check(gdx_death_race_show_winner() == 1, "rules: that clear shows the winner");
+    check(gdx_death_race_show_loser() == 0, "rules: that clear shows no loser");
+    check(gdx_death_race_may_record() == 1, "rules: that clear may be recorded");
+    gdx_death_race_end();
+
+    /* One rival still racing on the last lap is a loss, however many were destroyed. */
+    gdx_death_race_begin(0, 3);
+    check(gdx_death_race_check_laps(3, 1) == 1, "rules: the last lap with one rival standing finishes the race");
+    check(gdx_death_race_outcome() == GDX_DEATH_RACE_OUT_OF_LAPS, "rules: one rival standing is OUT_OF_LAPS");
+    gdx_death_race_end();
+
     /* Endless laps never finish on laps. */
     gdx_death_race_begin(0, 0);
-    check(gdx_death_race_check_laps(1000) == 0, "rules: endless laps never finish on laps");
+    check(gdx_death_race_check_laps(1000, 1) == 0, "rules: endless laps never finish on laps");
     check(gdx_death_race_outcome() == GDX_DEATH_RACE_RUNNING, "rules: an endless race stays RUNNING on laps");
     gdx_death_race_end();
 
@@ -337,7 +355,7 @@ static void test_race_rules(void) {
     check(gdx_death_race_show_winner() == 1, "rules: a clear under a limit shows the winner");
     check(gdx_death_race_show_loser() == 0, "rules: a clear shows no loser");
     check(gdx_death_race_may_record() == 1, "rules: a clear may be recorded");
-    check(gdx_death_race_check_laps(3) == 0, "rules: a cleared race does not finish on laps");
+    check(gdx_death_race_check_laps(3, 1) == 0, "rules: a cleared race does not finish on laps");
     gdx_death_race_cleared();
     check(gdx_death_race_outcome() == GDX_DEATH_RACE_CLEARED, "rules: a second clear keeps CLEARED");
     gdx_death_race_end();
@@ -382,15 +400,15 @@ static void test_lap_count(void) {
 
     /* The decomp flow: one check per completed lap, fed by lap_done. */
     gdx_death_race_begin(0, 2);
-    check(gdx_death_race_check_laps(gdx_death_race_lap_done()) == 0, "laps: the first of two laps does not finish");
-    check(gdx_death_race_check_laps(gdx_death_race_lap_done()) == 1, "laps: the second of two laps finishes");
+    check(gdx_death_race_check_laps(gdx_death_race_lap_done(), 1) == 0, "laps: the first of two laps does not finish");
+    check(gdx_death_race_check_laps(gdx_death_race_lap_done(), 1) == 1, "laps: the second of two laps finishes");
     check(gdx_death_race_outcome() == GDX_DEATH_RACE_OUT_OF_LAPS, "laps: the limit finishes the race out of laps");
     gdx_death_race_end();
 
     /* Endless laps: every lap is counted, and none finishes the race. */
     gdx_death_race_begin(0, 0);
     for (i = 0; i < 5; i++) {
-        finished += gdx_death_race_check_laps(gdx_death_race_lap_done());
+        finished += gdx_death_race_check_laps(gdx_death_race_lap_done(), 1);
     }
     check(finished == 0, "laps: endless laps never finish the race");
     check(gdx_death_race_laps_done() == 5, "laps: endless laps are still counted");

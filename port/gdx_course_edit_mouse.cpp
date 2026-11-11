@@ -35,6 +35,7 @@
 #include <imgui.h>
 #include "gdx_course_gadget_budget.h"
 #include "gdx_course_branch_edit.h" // GDX_BRANCH_EDIT_MAX_POINTS
+#include "gdx_wind.h"
 
 #include "libultraship/bridge/consolevariablebridge.h" // CVarGetInteger
 #include "port_log.h"                                    // gdx_port_logf
@@ -1817,6 +1818,71 @@ void CourseEditDrawForkMarks(void) {
     }
 }
 
+// The track's wind (port/gdx_wind.h): an arrow at the first point that blows the way the wind does, with its
+// strength. Drawn in the editor screens whether or not the mouse drive is on, like the fork marks, since it is all
+// the controller shows of the WIND part's TRACK and TURN rows.
+void CourseEditDrawTrackWind(void) {
+    constexpr float kWorldProbe = 300.0f; // how far along the wind the second projected point sits
+    constexpr float kArrowLength = 34.0f;
+    constexpr float kHeadLength = 10.0f;
+    constexpr float kHeadHalfWidth = 5.0f;
+    std::shared_ptr<Fast::Fast3dWindow> wnd = CourseEditMouseWindow();
+    if (!CourseEditEditorActive() || CourseEditMouseInSubMenu() || gCreateOption < 0 || gCreateOption > 3 ||
+        wnd == nullptr || wnd->GetGui()->GetMenuOrMenubarVisible()) {
+        return;
+    }
+    const int strength = gdx_branch_edit_track_setting(GDX_BRANCH_EDIT_TRACK_WIND_STRENGTH);
+    Vec3f pos = {};
+    ImVec2 at(0.0f, 0.0f);
+    if (strength <= 0 || !gdx_course_edit_native_point_position(0, &pos) || !CourseEditWorldToWindow(pos, &at)) {
+        return;
+    }
+    float windX = 0.0f;
+    float windZ = 0.0f;
+    gdx_wind_direction(gdx_branch_edit_track_setting(GDX_BRANCH_EDIT_TRACK_WIND_ANGLE), &windX, &windZ);
+
+    const ImU32 fill = IM_COL32(120, 215, 255, 255);
+    const ImU32 edge = IM_COL32(10, 30, 50, 230);
+    ImDrawList* draw = ImGui::GetForegroundDrawList();
+    // The arrow points where a spot downwind of the point lands on screen, so it follows the camera.
+    Vec3f probe = pos;
+    probe.x += windX * kWorldProbe;
+    probe.z += windZ * kWorldProbe;
+    ImVec2 ahead(0.0f, 0.0f);
+    bool haveWay = CourseEditWorldToWindow(probe, &ahead);
+    float wayX = ahead.x - at.x;
+    float wayY = ahead.y - at.y;
+    const float length = std::sqrt((wayX * wayX) + (wayY * wayY));
+    haveWay = haveWay && length > 1.0f;
+    if (haveWay) {
+        wayX /= length;
+        wayY /= length;
+        const ImVec2 tip(at.x + wayX * kArrowLength, at.y + wayY * kArrowLength);
+        const ImVec2 neck(tip.x - wayX * kHeadLength, tip.y - wayY * kHeadLength);
+        const ImVec2 left(neck.x - wayY * kHeadHalfWidth, neck.y + wayX * kHeadHalfWidth);
+        const ImVec2 right(neck.x + wayY * kHeadHalfWidth, neck.y - wayX * kHeadHalfWidth);
+
+        draw->AddLine(at, neck, edge, 5.0f);
+        draw->AddTriangleFilled(ImVec2(tip.x + wayX * 2.0f, tip.y + wayY * 2.0f),
+                                ImVec2(left.x - wayY * 2.0f - wayX, left.y + wayX * 2.0f - wayY),
+                                ImVec2(right.x + wayY * 2.0f - wayX, right.y - wayX * 2.0f - wayY), edge);
+        draw->AddLine(at, neck, fill, 2.5f);
+        draw->AddTriangleFilled(tip, left, right, fill);
+    }
+    draw->AddCircleFilled(at, 4.0f, fill);
+    draw->AddCircle(at, 4.0f, edge, 0, 1.5f);
+
+    char label[24];
+    snprintf(label, sizeof label, "WIND %d%%", strength);
+    const ImVec2 size = ImGui::CalcTextSize(label);
+    // The label sits on the side the arrow does not, so the two never cross.
+    const ImVec2 corner(at.x - size.x * 0.5f - (haveWay ? wayX * 22.0f : 0.0f),
+                        at.y - size.y * 0.5f - (haveWay ? wayY * 16.0f : -14.0f));
+    draw->AddRectFilled(ImVec2(corner.x - 3.0f, corner.y - 1.0f), ImVec2(corner.x + size.x + 3.0f, corner.y + size.y + 1.0f),
+                        IM_COL32(10, 30, 50, 200), 3.0f);
+    draw->AddText(corner, IM_COL32(235, 248, 255, 255), label);
+}
+
 // Shift-drag selection rectangle in window pixels, the same space as the press and release samples. Drawn on the
 // foreground list so it sits above the editor windows, and only while a box select is in progress.
 void CourseEditDrawSelectionBox(void) {
@@ -1854,6 +1920,7 @@ public:
             ImGui::End();
         }
         CourseEditDrawForkMarks();
+        CourseEditDrawTrackWind();
         GdxCourseEditDrawHintStrip();
         CourseEditDrawSelectionBox();
         CourseEditDrawDeleteHover();

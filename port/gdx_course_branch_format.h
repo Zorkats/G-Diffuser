@@ -146,6 +146,10 @@ typedef struct GdxPointExtras {
      * wind blows toward, 0 unless windStrength is 1..100. GXK1 version 3 stores them; GXB1 does not, so a fork's
      * first segment never has wind. */
     uint8_t windStrength;
+    /* The road art of the segment that starts here: 0 is the track's, 1..GDX_SETTINGS_ROAD_THEME_MAX a venue's
+     * (venue + 1). GXK1 version 5 stores it; GXB1 does not, so a fork's first segment has the track's. It sits
+     * here to fill the byte before windAngle. */
+    uint8_t roadTheme;
     uint16_t windAngle;
 } GdxPointExtras;
 
