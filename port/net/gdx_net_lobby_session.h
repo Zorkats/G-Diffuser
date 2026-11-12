@@ -49,6 +49,7 @@
 
 #include "gdx_net_channel.h"
 #include "gdx_net_lobby.h"
+#include "gdx_net_peer_links.h"
 #include "gdx_net_room.h"
 #include "gdx_net_socket.h"
 #include "gdx_net_track_flow.h"
@@ -66,6 +67,19 @@
 namespace gdx::net::lobby {
 
 using DatagramSend = std::function<void(const NetAddress& to, const uint8_t* data, size_t len)>;
+
+// How the other machines' poses reached this copy in the race being run (decision 66). A pose counts for the path it
+// came by first: a later copy of the same tick, or an older tick, counts nowhere.
+enum PosePath : uint8_t { kPathHost = 0, kPathDirect = 1, kPathRelay = 2 };
+constexpr size_t kPosePaths = 3;
+struct PosePathStats {
+    uint16_t raceIndex = 0;
+    std::array<std::array<uint32_t, kPosePaths>, kGridSlots> first{}; // [race slot][PosePath]
+    // The age of those poses on arrival, summed: the host clock now, as the clock sync has it, minus the host clock
+    // at the pose's tick. Only poses that arrived once the clock had a sample.
+    std::array<std::array<uint64_t, kPosePaths>, kGridSlots> ageSumMs{};
+    std::array<std::array<uint32_t, kPosePaths>, kGridSlots> aged{};
+};
 
 constexpr size_t kLogCap = 200;           // lines kept for the view
 constexpr size_t kPendingPeerCap = 16;    // addresses mid-handshake at once
@@ -447,6 +461,12 @@ private:
     // The O7.3 checks of a Join: the proof, the ban list, and a Friends room's list. Ok, or why not.
     bool AdmitKey(const Peer& peer, const JoinRequest& join, uint32_t nowMs, RejectReason& why) const;
     void SendKeys();
+    // Direct member links (decisions 63, 67, 68, 71): tells each member, once both have sent Paths, how to reach
+    // every other one, and what changed since it was last told.
+    void SyncPeers(uint32_t nowMs);
+    // The pair's secret, made the first time it is asked for. Pairs are keyed by link serial, so an id that is
+    // reused after a member left gets a new one.
+    const Bytes32& PairSecret(uint64_t a, uint64_t b);
 
     std::string build_;
     LocalProfile me_;
@@ -491,6 +511,15 @@ private:
     std::vector<Bytes32> banned_;
     std::vector<IpBytes> bannedIps_; // BanPrefix of each banned member's address
     std::array<Bytes32, kMaxPlayers> keys_{}; // each member's friend key by id; all zero for none
+    uint64_t nextSerial_ = 1;                  // the next joined link's serial
+    struct PairKey {
+        uint64_t low = 0;
+        uint64_t high = 0;
+        Bytes32 secret{};
+    };
+    std::vector<PairKey> pairSecrets_;
+    std::vector<uint64_t> peersSeen_; // the serials of the joined links SyncPeers last looked at
+    bool peersDirty_ = false;
 };
 
 // Signs a host's Nonce for the client (friends::JoinProofSign with the profile's seed): fills this copy's friend
@@ -676,6 +705,26 @@ public:
         allowLoopback_ = allow;
     }
 
+    // Direct member links (decisions 61 to 73). What the host may tell other members about reaching this copy: its
+    // relay address, LAN addresses and gEnhancements.Online.DirectLinks. Sent once joined and again on every change.
+    // With direct off this copy neither sends nor takes direct datagrams.
+    void SetPaths(const PathsInfo& paths);
+    const PathsInfo& Paths() const {
+        return paths_;
+    }
+    // Where datagrams for a peer's relay address go: this copy's TURN allocation. Relay endpoints are used only
+    // with a sender set and a relay address in Paths.
+    using RelaySend = std::function<void(const NetAddress& to, const uint8_t* data, size_t len)>;
+    void SetRelaySend(RelaySend send);
+    // A datagram this copy's TURN allocation delivered, from a peer's relay address.
+    void ReceiveRelay(const NetAddress& from, const uint8_t* data, size_t len, uint32_t nowMs);
+    const links::PeerLinks& Links() const {
+        return links_;
+    }
+    const PosePathStats& PathStats() const {
+        return pathStats_;
+    }
+
 private:
     // Fills plan_ from the successor the host named, as the host is lost at nowMs. false when the successor's
     // address is not one this client sends to (decision 60): the plan stays None.
@@ -693,6 +742,13 @@ private:
     // This copy named the room's custom track, by the winning ballot or the pick.
     bool OwnsTrack() const;
     void SyncTrack(uint32_t nowMs);
+    // Sends Paths when joined and the host was last told otherwise.
+    void SyncPaths();
+    void ApplyLocalPaths();
+    void TakeLinkDatagram(links::Route route, const NetAddress& from, const uint8_t* data, size_t len,
+                          uint32_t nowMs);
+    // A pose of the grid's race for the game, and its count by path.
+    void TakeIn(const StatePose& pose, PosePath path, uint32_t nowMs);
 
     std::string build_;
     LocalProfile me_;
@@ -743,6 +799,15 @@ private:
     Bytes32 expectKey_{};
     bool expectingKey_ = false;
     std::vector<MemberKey> keys_;
+    std::shared_ptr<RelaySend> relaySend_; // shared with the links' sender, which must not hold this object
+    links::PeerLinks links_;
+    PathsInfo paths_;
+    PathsInfo pathsTold_;
+    bool pathsSent_ = false;
+    uint32_t lastNowMs_ = 0;
+    PosePathStats pathStats_;
+    std::array<uint32_t, kGridSlots> newestTick_{};
+    std::array<bool, kGridSlots> haveTick_{};
 };
 
 // Sends a probe to every target each kProbeEveryMs and keeps the rooms that answer, dropped after

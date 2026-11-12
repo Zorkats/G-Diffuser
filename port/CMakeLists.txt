@@ -467,6 +467,7 @@ gdx_add_main_target(G-Diffuser
     net/gdx_net_race.cpp           # O3 remote racers: pose buffer, the guess of where a machine is now and the dev echo
     gdx_net_race_dev.c             # O3 remote racers: the GDX_NET_PUPPET_ECHO, GDX_NET_DEV_AUTOPILOT, GDX_NET_DEV_CONTACTS and GDX_NET_DEV_TRACE developer switches
     net/gdx_net_lobby_session.cpp  # O2 lobby host, joining client and LAN room browser
+    net/gdx_net_peer_links.cpp     # Direct member links: the GDXP datagram, punch first, best path
     gdx_net_track_cache.cpp        # O4.3 downloaded custom tracks, verified, under online/cache/tracks
     gdx_net_own_tracks.cpp         # O4.7 the Edit Cup tracks a room can race: identity and title per slot
     gdx_net_room_course.cpp        # O4.8 a room's custom track raced from memory: course image, forks, settings
@@ -479,6 +480,8 @@ gdx_add_main_target(G-Diffuser
     net/gdx_net_directory.cpp      # O5.5 room directory client: rules, encoders, strict reader, failover
     net/gdx_net_listing.cpp        # O5.10 a hosted room's listing: register, heartbeat, takeover
     net/gdx_net_stun.cpp           # O5.6 STUN Binding client
+    net/gdx_net_hash.cpp           # TURN relay: SHA-1, MD5 and HMAC-SHA1 for the long-term credential
+    net/gdx_net_turn.cpp           # TURN relay: Allocate, Refresh, ChannelBind and ChannelData (decision 72)
     net/gdx_net_portmap.cpp        # O5.7 PCP and NAT-PMP port mapping, reachability checks
     net/gdx_net_gather.cpp         # O5.8 the addresses a host lists its room under
     net/gdx_net_host_info.cpp      # O5.8 system lookups: names, local addresses, default gateway
@@ -1736,6 +1739,7 @@ add_executable(gdx_net_lobby_tests
     net/gdx_net_lottery.cpp
     net/gdx_net_succession.cpp
     net/gdx_net_lobby_session.cpp
+    net/gdx_net_peer_links.cpp
     net/gdx_net_friends.cpp
     net/gdx_net_channel.cpp
     net/gdx_net_socket.cpp
@@ -1780,6 +1784,7 @@ foreach(gdx_net_test IN ITEMS
         gdx_net_track_choice_tests
         gdx_net_race_tests
         gdx_net_lobby_tests
+        gdx_net_peer_links_tests
         gdx_net_loopback_tests
         gdx_net_track_pack_tests
         gdx_net_track_cache_tests
@@ -1793,6 +1798,8 @@ foreach(gdx_net_test IN ITEMS
         gdx_net_friends_tests
         gdx_net_friend_store_tests
         gdx_net_stun_tests
+        gdx_net_hash_tests
+        gdx_net_turn_tests
         gdx_net_portmap_tests
         gdx_net_allowlist_tests
         gdx_net_directory_tests
@@ -1963,6 +1970,7 @@ add_executable(gdx_net_upload_tests
     net/gdx_net_lottery.cpp
     net/gdx_net_succession.cpp
     net/gdx_net_lobby_session.cpp
+    net/gdx_net_peer_links.cpp
     net/gdx_net_friends.cpp
     net/gdx_net_channel.cpp
     net/gdx_net_socket.cpp
@@ -2024,6 +2032,35 @@ if(MSVC)
 elseif(GDX_PORT_WARN_FLAGS)
     target_compile_options(gdx_net_succession_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
 endif()
+# TURN relay client (G-NET decisions 69 and 72): the RFC 5769 samples and a fake TURN server. The socket file is
+# linked for NetAddress only; no socket is opened.
+add_executable(gdx_net_turn_tests
+    tests/gdx_net_turn_tests.cpp
+    net/gdx_net_turn.cpp
+    net/gdx_net_hash.cpp
+    net/gdx_net_socket.cpp)
+target_include_directories(gdx_net_turn_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/net")
+target_compile_features(gdx_net_turn_tests PRIVATE cxx_std_17)
+if(MSVC)
+    target_link_libraries(gdx_net_turn_tests PRIVATE ws2_32)
+    target_compile_options(gdx_net_turn_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_net_turn_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# Direct member links (G-NET decisions 61 to 68): the GDXP datagram, punch first and the best path, on a fake
+# clock and network.
+add_executable(gdx_net_peer_links_tests
+    tests/gdx_net_peer_links_tests.cpp
+    net/gdx_net_peer_links.cpp
+    net/gdx_net_lobby.cpp)
+target_include_directories(gdx_net_peer_links_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/net")
+target_compile_features(gdx_net_peer_links_tests PRIVATE cxx_std_17)
+target_link_libraries(gdx_net_peer_links_tests PRIVATE monocypher)
+if(MSVC)
+    target_compile_options(gdx_net_peer_links_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_net_peer_links_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
 # O6.4 lottery commitment: commit and reveal, the draw seed and the payload decoders.
 add_executable(gdx_net_lottery_tests
     tests/gdx_net_lottery_tests.cpp
@@ -2036,9 +2073,10 @@ elseif(GDX_PORT_WARN_FLAGS)
     target_compile_options(gdx_net_lottery_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
 endif()
 # O5 and O7 codecs with no socket: room and friend codes, the friend key, join proof and friend list, the
-# STUN binding client, NAT-PMP and PCP port mapping with the reachability rule, and the signed version
-# allowlist. Each test is one module and its own test file; the crypto ones link libultraship's Monocypher.
-foreach(gdx_net_codec IN ITEMS codes friends stun portmap allowlist)
+# STUN binding client, NAT-PMP and PCP port mapping with the reachability rule, the signed version allowlist,
+# and the TURN credential's hashes. Each test is one module and its own test file; the crypto ones link
+# libultraship's Monocypher.
+foreach(gdx_net_codec IN ITEMS codes friends stun portmap allowlist hash)
     set(gdx_net_codec_sources tests/gdx_net_${gdx_net_codec}_tests.cpp net/gdx_net_${gdx_net_codec}.cpp)
     if(gdx_net_codec STREQUAL "portmap")
         list(APPEND gdx_net_codec_sources net/gdx_net_stun.cpp)
@@ -2377,6 +2415,8 @@ if(GDX_BUILD_JP AND NOT ANDROID)
         net/gdx_net_open_rooms.cpp
         net/gdx_net_portmap.cpp
         net/gdx_net_stun.cpp
+        net/gdx_net_hash.cpp
+        net/gdx_net_turn.cpp
         gdx_net_online.cpp
         gdx_net_friend_store.cpp
         gdx_net_track_cache.cpp
@@ -2393,6 +2433,7 @@ if(GDX_BUILD_JP AND NOT ANDROID)
         net/gdx_net_race.cpp
         gdx_net_race_dev.c
         net/gdx_net_lobby_session.cpp
+        net/gdx_net_peer_links.cpp
         gdx_lan_lobby.cpp
         gdx_lan_lobby_page.cpp
         gdx_menu_words.c

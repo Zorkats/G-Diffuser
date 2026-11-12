@@ -15,6 +15,7 @@
 #include "net/gdx_net_https.h"
 #include "net/gdx_net_listing.h"
 #include "net/gdx_net_open_rooms.h"
+#include "net/gdx_net_turn.h"
 
 #include "libultraship/bridge/consolevariablebridge.h"
 #include "ship/Context.h"
@@ -119,6 +120,10 @@ bool DevDirectory(std::string& origin) {
 bool LocalTestDirectory() {
     std::string origin;
     return DevDirectory(origin);
+}
+
+bool DirectLinks() {
+    return CVarGetInteger("gEnhancements.Online.DirectLinks", 1) != 0;
 }
 
 namespace {
@@ -711,6 +716,235 @@ void MemberReach::Release(uint32_t now) {
     } else {
         AbandonInfo(*impl_->info);
     }
+}
+
+// ---- MemberRelay (decisions 69, 70, 72) ----
+
+namespace {
+
+// The relay credentials and the server they name, fetched on a helper thread.
+struct GrantSlot {
+    std::mutex lock;
+    bool done = false;
+    directory::Error error = directory::Error::None;
+    uint32_t retryAfterSeconds = 0;
+    net::turn::Credentials credentials;
+    std::optional<net::NetAddress> server; // the first IPv4 address of the grant's servers, in its order
+};
+
+void FetchGrant(const std::shared_ptr<GrantSlot>& slot, std::vector<std::string> bases) {
+    Spawn([slot, bases = std::move(bases)]() {
+        const directory::Answer<directory::TurnGrant> answer = MakeClient(bases).TurnCredentials();
+        std::optional<net::NetAddress> server;
+        for (const std::string& text : answer.value.servers) {
+            for (const net::NetAddress& a : net::host_info::Resolve(text, kStunPort)) {
+                if (a.IsV4()) {
+                    server = a;
+                    break;
+                }
+            }
+            if (server) {
+                break;
+            }
+        }
+        std::lock_guard<std::mutex> guard(slot->lock);
+        slot->error = answer.error;
+        slot->retryAfterSeconds = answer.retryAfterSeconds;
+        slot->credentials.username = answer.value.username;
+        slot->credentials.password = answer.value.password;
+        slot->server = server;
+        slot->done = true;
+    });
+}
+
+} // namespace
+
+struct MemberRelay::Impl {
+    enum class Stage : uint8_t { Fetch, Allocate, Wait, Off };
+
+    RelayOptions options;
+    net::gather::Send send;
+    Deliver deliver;
+    Stage stage = Stage::Fetch;
+    std::shared_ptr<GrantSlot> grant;
+    std::optional<net::turn::Client> turn;
+    net::NetAddress server;
+    // The worker's clock is 32 bits of milliseconds; the TURN client's is 64.
+    uint64_t clock = 0;
+    uint32_t lastNow = 0;
+    bool clockStarted = false;
+    uint32_t deliverNow = 0; // the time of the datagram being received, for Deliver
+    uint64_t retryAt = 0;
+    uint32_t retryMs = kRelayRetryFirstMs;
+    bool ready = false;
+    bool released = false;
+
+    uint64_t Tick(uint32_t now) {
+        if (!clockStarted) {
+            clockStarted = true;
+            clock = now;
+        } else {
+            clock += static_cast<uint32_t>(now - lastNow);
+        }
+        lastNow = now;
+        return clock;
+    }
+
+    void Fetch() {
+        grant = std::make_shared<GrantSlot>();
+        FetchGrant(grant, options.bases);
+        stage = Stage::Fetch;
+    }
+
+    void Retry(uint64_t waitMs, const char* why) {
+        gdx_port_logf("[online] relay: %s; trying again in %u s\n", why, static_cast<unsigned>(waitMs / 1000));
+        stage = Stage::Wait;
+        retryAt = clock + waitMs;
+        retryMs = (std::min)(retryMs * 2, kRelayRetryMaxMs);
+    }
+
+    // The fetch finished: start the allocation, or wait, or give up for the session.
+    void TakeGrant() {
+        directory::Error error;
+        uint32_t retryAfter;
+        net::turn::Credentials credentials;
+        std::optional<net::NetAddress> at;
+        {
+            std::lock_guard<std::mutex> guard(grant->lock);
+            if (!grant->done) {
+                return;
+            }
+            error = grant->error;
+            retryAfter = grant->retryAfterSeconds;
+            credentials = std::move(grant->credentials);
+            at = grant->server;
+        }
+        grant.reset();
+        if (error == directory::Error::TurnUnavailable || error == directory::Error::BadConfig) {
+            gdx_port_logf("[online] relay: the room directory has none (%s); playing on without one\n",
+                          directory::ErrorName(error));
+            stage = Stage::Off;
+            return;
+        }
+        if (error == directory::Error::RateLimited) {
+            Retry((std::max)(static_cast<uint64_t>(retryAfter) * 1000, static_cast<uint64_t>(retryMs)),
+                  "the room directory is busy");
+            return;
+        }
+        if (error != directory::Error::None) {
+            Retry(retryMs, directory::ErrorName(error));
+            return;
+        }
+        if (!at) {
+            Retry(retryMs, "no relay server resolved to an IPv4 address");
+            return;
+        }
+        server = *at;
+        net::turn::TransactionId seed{};
+        RandomBytes(seed.data(), seed.size());
+        turn->Start(credentials, seed, clock);
+        stage = Stage::Allocate;
+        gdx_port_logf("[online] relay: allocating at %s\n", net::host_info::LogText(server).c_str());
+    }
+
+    void Allocate() {
+        turn->Update(clock);
+        if (turn->state() == net::turn::Client::State::Ready) {
+            if (!ready) {
+                ready = true;
+                retryMs = kRelayRetryFirstMs;
+                gdx_port_logf("[online] relay: ready at %s, lifetime %u s\n",
+                              net::host_info::LogText(turn->relayed()).c_str(),
+                              static_cast<unsigned>(turn->lifetimeS()));
+            }
+            return;
+        }
+        if (turn->state() == net::turn::Client::State::Failed) {
+            const char* why = net::turn::FailureName(turn->failure());
+            ready = false;
+            turn->Close();
+            Retry(retryMs, why);
+        }
+    }
+};
+
+MemberRelay::MemberRelay(RelayOptions options, net::gather::Send send, Deliver deliver)
+    : impl_(std::make_unique<Impl>()) {
+    Impl* m = impl_.get();
+    m->options = std::move(options);
+    m->send = std::move(send);
+    m->deliver = std::move(deliver);
+    m->turn.emplace([m](const uint8_t* data, size_t len) { m->send(m->server, data, len); },
+                    [m](const net::NetAddress& peer, const uint8_t* data, size_t len) {
+                        if (m->deliver) {
+                            m->deliver(peer, data, len, m->deliverNow);
+                        }
+                    });
+    m->Fetch();
+}
+
+MemberRelay::~MemberRelay() = default;
+
+void MemberRelay::Update(uint32_t now) {
+    Impl& m = *impl_;
+    if (m.released) {
+        return;
+    }
+    m.Tick(now);
+    switch (m.stage) {
+        case Impl::Stage::Fetch:
+            m.TakeGrant();
+            break;
+        case Impl::Stage::Allocate:
+            m.Allocate();
+            break;
+        case Impl::Stage::Wait:
+            if (m.clock >= m.retryAt) {
+                m.Fetch();
+            }
+            break;
+        case Impl::Stage::Off:
+            break;
+    }
+}
+
+bool MemberRelay::Receive(const net::NetAddress& from, const uint8_t* data, size_t len, uint32_t now) {
+    Impl& m = *impl_;
+    if (m.released || m.stage != Impl::Stage::Allocate || from != m.server) {
+        return false;
+    }
+    m.deliverNow = now;
+    return m.turn->Receive(data, len, m.Tick(now));
+}
+
+void MemberRelay::SetPeers(const std::vector<net::NetAddress>& peers, uint32_t now) {
+    if (!impl_->released) {
+        impl_->turn->SetPeers(peers, impl_->Tick(now));
+    }
+}
+
+bool MemberRelay::SendTo(const net::NetAddress& peer, const uint8_t* data, size_t len) {
+    return !impl_->released && impl_->stage == Impl::Stage::Allocate && impl_->turn->SendTo(peer, data, len);
+}
+
+std::optional<net::NetAddress> MemberRelay::Relayed() const {
+    const Impl& m = *impl_;
+    if (m.released || m.stage != Impl::Stage::Allocate || m.turn->state() != net::turn::Client::State::Ready) {
+        return std::nullopt;
+    }
+    return m.turn->relayed();
+}
+
+void MemberRelay::Release() {
+    Impl& m = *impl_;
+    if (m.released) {
+        return;
+    }
+    m.released = true;
+    if (m.stage == Impl::Stage::Allocate) {
+        m.turn->Close(); // a Refresh of lifetime 0, so the server frees the address now
+    }
+    m.stage = Impl::Stage::Off;
 }
 
 // ---- CodeLookup ----

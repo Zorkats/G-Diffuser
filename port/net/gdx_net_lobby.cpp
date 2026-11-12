@@ -1653,6 +1653,123 @@ bool DecodeReach(const uint8_t* data, size_t len, bool& out) {
     return true;
 }
 
+namespace {
+
+void WriteEndpoint(Writer& w, const PeerEndpoint& e) {
+    w.Ip(e.ip);
+    w.U16(e.port);
+}
+
+PeerEndpoint ReadEndpoint(Reader& r) {
+    PeerEndpoint e;
+    e.ip = r.Ip();
+    e.port = r.U16();
+    return e;
+}
+
+// None, or an address a copy may send to. Loopback passes: a room of copies on one machine.
+bool EndpointOk(const PeerEndpoint& e) {
+    return e.None() || DialableIp(e.ip, e.port, true);
+}
+
+void WriteLan(Writer& w, const std::vector<PeerEndpoint>& lan) {
+    const size_t n = lan.size() > kPeerLanMax ? kPeerLanMax : lan.size();
+    w.U8(static_cast<uint8_t>(n));
+    for (size_t i = 0; i < n; i++) {
+        WriteEndpoint(w, lan[i]);
+    }
+}
+
+// At most kPeerLanMax endpoints, none of them "none".
+bool ReadLan(Reader& r, std::vector<PeerEndpoint>& out) {
+    const size_t n = r.U8();
+    if (!r.Ok() || n > kPeerLanMax) {
+        return false;
+    }
+    std::vector<PeerEndpoint> lan;
+    for (size_t i = 0; i < n; i++) {
+        const PeerEndpoint e = ReadEndpoint(r);
+        if (!r.Ok() || e.None() || !EndpointOk(e)) {
+            return false;
+        }
+        lan.push_back(e);
+    }
+    out = std::move(lan);
+    return true;
+}
+
+} // namespace
+
+std::vector<uint8_t> EncodePeers(const std::vector<PeerEntry>& peers) {
+    Writer w;
+    const size_t n = peers.size() > kPeersPerMessage ? kPeersPerMessage : peers.size();
+    w.U8(static_cast<uint8_t>(n));
+    for (size_t i = 0; i < n; i++) {
+        const PeerEntry& e = peers[i];
+        w.U8(e.id);
+        w.B32(e.secret);
+        WriteEndpoint(w, e.pub);
+        WriteEndpoint(w, e.relay);
+        WriteLan(w, e.lan);
+    }
+    return w.Take();
+}
+
+bool DecodePeers(const uint8_t* data, size_t len, std::vector<PeerEntry>& out) {
+    Reader r(data, len);
+    const size_t count = r.U8();
+    if (!r.Ok() || count == 0 || count > kPeersPerMessage) {
+        return false;
+    }
+    std::vector<PeerEntry> peers;
+    peers.reserve(count);
+    for (size_t i = 0; i < count; i++) {
+        PeerEntry e;
+        e.id = r.U8();
+        e.secret = r.B32();
+        e.pub = ReadEndpoint(r);
+        e.relay = ReadEndpoint(r);
+        if (!r.Ok() || !ReadLan(r, e.lan) || e.id == kHostId || e.id >= kMaxPlayers ||
+            (!peers.empty() && e.id <= peers.back().id) || !EndpointOk(e.pub) || !EndpointOk(e.relay)) {
+            return false;
+        }
+        const bool anyPath = !e.pub.None() || !e.relay.None() || !e.lan.empty();
+        if (e.Forget() == anyPath) { // a forget names no path; a link names at least one
+            return false;
+        }
+        peers.push_back(std::move(e));
+    }
+    if (!r.Done()) {
+        return false;
+    }
+    out = std::move(peers);
+    return true;
+}
+
+std::vector<uint8_t> EncodePaths(const PathsInfo& paths) {
+    Writer w;
+    WriteEndpoint(w, paths.relay);
+    WriteLan(w, paths.lan);
+    w.U8(paths.direct ? 1 : 0);
+    return w.Take();
+}
+
+bool DecodePaths(const uint8_t* data, size_t len, PathsInfo& out) {
+    Reader r(data, len);
+    PathsInfo paths;
+    paths.relay = ReadEndpoint(r);
+    if (!r.Ok() || !EndpointOk(paths.relay) || !ReadLan(r, paths.lan)) {
+        return false;
+    }
+    const uint8_t direct = r.U8();
+    if (!r.Done() || direct > 1) {
+        return false;
+    }
+    paths.direct = direct == 1;
+    out = std::move(paths);
+    return true;
+}
+
 bool IsDiscovery(const uint8_t* data, size_t len) {
     return data != nullptr && len >= 5 && data[0] == kDiscoveryMagic[0] && data[1] == kDiscoveryMagic[1] &&
            data[2] == kDiscoveryMagic[2] && data[3] == kDiscoveryMagic[3];

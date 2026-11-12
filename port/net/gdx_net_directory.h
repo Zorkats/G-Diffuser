@@ -14,7 +14,7 @@
 // Failover, per call, through the base URLs in order. A transport failure moves on to the next base, for reads and
 // writes alike. A 5xx moves on for a read only. A write may have been applied before the error (CONTRACT.md §6), and
 // a retry would then answer code_taken or bad_secret for a write that succeeded. A 4xx answer, and any 2xx answer, is
-// final.
+// final. Relay credentials (CONTRACT.md §5.9) are a POST that writes nothing, so they fail over like a read.
 
 #pragma once
 
@@ -68,6 +68,22 @@ struct Record {
     Draft draft;
     uint32_t ttl = 0;
 };
+
+// Relay credentials for Cloudflare's TURN service (CONTRACT.md §5.9).
+constexpr uint32_t kTurnTtlSeconds = 7200;
+constexpr size_t kTurnServersMax = 8;
+constexpr size_t kTurnTextMax = 512;
+
+struct TurnGrant {
+    std::string username;
+    std::string password;
+    uint32_t ttl = 0;
+    std::vector<std::string> servers; // "host:port", UDP, in the directory's order
+};
+
+// A server of a grant, "host:port" (CONTRACT.md §5.9): a host of 1 to 253 letters, digits, '.' and '-', not starting
+// with either of the last two, and a port of 1 to 65535 with no leading zero. On failure host and port are left alone.
+bool SplitTurnServer(std::string_view text, std::string& host, uint16_t& port);
 
 // The takeover secret: 32 random bytes from the host's CSPRNG (CONTRACT.md §8). The caller creates it.
 using Secret = std::array<uint8_t, 32>;
@@ -201,6 +217,8 @@ enum class Error : uint8_t {
     CodeTaken,
     RateLimited,
     Internal,         // a write may already be applied (CONTRACT.md §6): report it, never retry it elsewhere
+    TurnUpstream,     // 502: Cloudflare gave the directory no relay credentials (CONTRACT.md §5.9); try again later
+    TurnUnavailable,  // 503: the directory has no relay configured; play on without one
 };
 
 // The token for logs and tests: "code_taken", "unreachable" and so on.
@@ -239,6 +257,9 @@ public:
     Answer<std::optional<Record>> QuickRace(uint16_t protocol) const;
     // Value: the rooms the key hosts, of any type (CONTRACT.md §5.7).
     Answer<std::vector<Record>> HostRooms(std::string_view hostKey, uint16_t protocol) const;
+    // Value: credentials for the relay (CONTRACT.md §5.9). A base that answers 502 or 503 is passed over for the
+    // next; when none gives credentials, the error is the last of those two any base gave, else Unreachable.
+    Answer<TurnGrant> TurnCredentials() const;
 
 private:
     // Signs body for path and sends it as a write. Invalid when there is no signer or it refuses.

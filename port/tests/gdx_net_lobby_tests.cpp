@@ -83,16 +83,24 @@ public:
             if (!Alive(from) || (filter_ && filter_(from, to, len))) {
                 return;
             }
-            queue_.push_back({ from, to, std::vector<uint8_t>(data, data + len) });
+            const NetAddress source = source_ ? source_(from, to) : from;
+            const int wait = delay_ ? delay_(from, to) : 0;
+            queue_.push_back({ source, to, std::vector<uint8_t>(data, data + len), wait });
             sent_++;
         };
     }
 
-    // Delivers what is queued now; anything sent during delivery waits for the next Step.
+    // Delivers what is due now; anything sent during delivery waits for the next Step.
     void Step() {
         std::vector<Datagram> now;
         now.swap(queue_);
-        for (const Datagram& d : now) {
+        std::vector<Datagram> later;
+        for (Datagram& d : now) {
+            if (d.wait > 0) {
+                d.wait--;
+                later.push_back(std::move(d));
+                continue;
+            }
             const bool broadcast = d.to.Ipv4() == 0xFFFFFFFFu;
             for (Endpoint& e : endpoints_) {
                 if (!e.alive || e.addr.port != d.to.port || (!broadcast && e.addr.ip != d.to.ip)) {
@@ -104,6 +112,8 @@ public:
                 e.deliver(d.from, d.bytes.data(), d.bytes.size());
             }
         }
+        later.insert(later.end(), queue_.begin(), queue_.end());
+        queue_.swap(later);
     }
 
     size_t Sent() const {
@@ -117,6 +127,18 @@ public:
         filter_ = std::move(filter);
     }
 
+    // The Steps a datagram waits before it is delivered: 0 is the next Step.
+    using Delay = std::function<int(const NetAddress& from, const NetAddress& to)>;
+    void SetDelay(Delay delay) {
+        delay_ = std::move(delay);
+    }
+
+    // The source address a datagram arrives from: a copy on a LAN reaches a neighbour from its LAN address.
+    using Source = std::function<NetAddress(const NetAddress& from, const NetAddress& to)>;
+    void SetSource(Source source) {
+        source_ = std::move(source);
+    }
+
 private:
     struct Endpoint {
         NetAddress addr;
@@ -128,6 +150,7 @@ private:
         NetAddress from;
         NetAddress to;
         std::vector<uint8_t> bytes;
+        int wait = 0;
     };
 
     bool Alive(const NetAddress& addr) const {
@@ -143,6 +166,8 @@ private:
     std::vector<Datagram> queue_;
     size_t sent_ = 0;
     Filter filter_;
+    Delay delay_;
+    Source source_;
 };
 
 LocalProfile Profile(const std::string& name, uint32_t colour, uint8_t machine) {
@@ -1693,7 +1718,7 @@ void TestMachineRecordBounds() {
 
 void TestCustomTrackWire() {
     std::printf("codec: custom tracks, machine records, hack identity, boost length\n");
-    CHECK(kLobbyVersion == kProtocolVersion && kProtocolVersion == 9); // O5.1, O5.3, O6.1, O7.3 and R4 bumped it
+    CHECK(kLobbyVersion == kProtocolVersion && kProtocolVersion == 10); // O5.1, O5.3, O6.1, O7.3, R4 and direct links bumped it
     CHECK(static_cast<uint8_t>(Phase::Assets) == 9 && kPhaseCount == 10);
     CHECK(std::string(PhaseName(Phase::Assets)) == "Getting the track");
     CHECK(static_cast<uint8_t>(RejectReason::Hack) == 7 && RejectReasonText(RejectReason::Hack)[0] != '\0');
@@ -3723,11 +3748,19 @@ void TestRacePoses() {
     lan.net.SetFilter([&](const NetAddress& from, const NetAddress& to, size_t len) {
         return from == lan.hostAddr && to == boAddr && len > 700;
     });
-    lan.host->SendPoses(0, field);
+    // A newer tick: a copy of one already taken never reaches the game a second time.
+    std::vector<StatePose> next;
+    for (const StatePose& pose : field) {
+        next.push_back(PoseOf(pose.slot, 11));
+    }
+    lan.host->SendPoses(0, next);
     run(3);
     lan.net.SetFilter(nullptr);
-    CHECK(clientGot(bo) == std::vector<StatePose>(field.begin() + kStatePoses, field.end()));
-    CHECK(clientGot(wim) == field);
+    CHECK(clientGot(bo) == std::vector<StatePose>(next.begin() + kStatePoses, next.end()));
+    CHECK(clientGot(wim) == next);
+    lan.host->SendPoses(0, next);
+    run(3);
+    CHECK(clientGot(bo).size() == kStatePoses && clientGot(wim).empty());
 
     // What a race costs: sixty sends of the whole field, with one pose back from each player.
     size_t down = 0;
@@ -4462,6 +4495,372 @@ void TestHostLeavesMidRace() {
     CHECK(!next.Closed() && next.Roster().size() == 2 && next.Refused() == 0 && bo.Refused() == 0);
 }
 
+// ---------------------------------------------------------------------------------------------------------
+// Direct member links (decisions 61 to 68)
+
+int RaceSlotIn(const Grid& grid, uint8_t id) {
+    for (size_t i = 0; i < grid.humans.size(); i++) {
+        if (grid.humans[i].id == id) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+// A pose of the slot at the tick, stamped with the host clock now, as the race code stamps it.
+StatePose PoseAt(uint8_t slot, uint32_t tick, uint32_t hostMs) {
+    StatePose pose = PoseOf(slot, tick);
+    pose.timeMs = hostMs;
+    return pose;
+}
+
+// Two members race with the host 100 ms from each and 60 ms from each other. Ana is behind a NAT that drops
+// what comes in until she has sent to its source. The link opens, the poses go both ways, the copy that comes
+// first is the one the game gets, and when the direct path breaks the host relay carries on alone.
+void TestDirectLinksRace() {
+    std::printf("members race over direct links, and the host relay stays\n");
+    Lan lan;
+    LobbyClient& ana = lan.AddClient("Ana");
+    LobbyClient& bo = lan.AddClient("Bo");
+    const NetAddress hostAddr = lan.hostAddr;
+    const NetAddress anaAddr = lan.clientAddrs[0];
+    std::vector<NetAddress> anaSentTo;
+    bool cut = false;
+    size_t linkDatagrams = 0;
+    lan.net.SetFilter([&](const NetAddress& from, const NetAddress& to, size_t) {
+        if (from == hostAddr || to == hostAddr) {
+            return false;
+        }
+        linkDatagrams++;
+        if (cut) {
+            return true;
+        }
+        if (from == anaAddr && std::find(anaSentTo.begin(), anaSentTo.end(), to) == anaSentTo.end()) {
+            anaSentTo.push_back(to);
+        }
+        return to == anaAddr && std::find(anaSentTo.begin(), anaSentTo.end(), from) == anaSentTo.end();
+    });
+    lan.Settle();
+    const uint8_t anaId = ana.LocalId();
+    const uint8_t boId = bo.LocalId();
+    CHECK(anaId != kSystemId && boId != kSystemId && anaId != boId);
+    // The host told each about the other once both sent Paths, and the punches opened the pair at once.
+    CHECK(ana.Links().PeerCount() == 1 && ana.Links().Known(boId) && bo.Links().Known(anaId));
+    links::PathKind best = links::PathKind::Relay;
+    CHECK(ana.Links().Open(boId, lan.now, best) && best == links::PathKind::Public);
+    CHECK(bo.Links().Open(anaId, lan.now + lan.skew[1], best) && best == links::PathKind::Public);
+
+    DriveTo(lan, Phase::Racing);
+    const Grid grid = lan.host->RaceGrid();
+    const int anaSlot = RaceSlotIn(grid, anaId);
+    const int boSlot = RaceSlotIn(grid, boId);
+    CHECK(anaSlot > 0 && boSlot > 0);
+    if (anaSlot <= 0 || boSlot <= 0) {
+        return;
+    }
+    lan.net.SetDelay([&](const NetAddress& from, const NetAddress& to) {
+        return from == hostAddr || to == hostAddr ? 5 : 3; // 96 ms and 64 ms at 16 ms a Step
+    });
+    lan.Tick(20);
+
+    std::map<uint8_t, size_t> boGot;
+    std::map<uint8_t, size_t> anaGot;
+    const auto drain = [&] {
+        std::vector<StatePose> poses;
+        uint16_t race = 0;
+        bo.TakePoses(race, poses);
+        for (const StatePose& pose : poses) {
+            boGot[pose.slot]++;
+        }
+        ana.TakePoses(race, poses);
+        for (const StatePose& pose : poses) {
+            anaGot[pose.slot]++;
+        }
+    };
+    drain();
+    boGot.clear();
+    anaGot.clear();
+    const uint32_t sends = 60;
+    for (uint32_t i = 0; i < sends; i++) {
+        ana.SendPoses(grid.raceIndex, { PoseAt(static_cast<uint8_t>(anaSlot), 1000 + i, lan.now) });
+        bo.SendPoses(grid.raceIndex, { PoseAt(static_cast<uint8_t>(boSlot), 1000 + i, lan.now) });
+        lan.Tick();
+        drain();
+    }
+    lan.Tick(30);
+    drain();
+    // Every pose reached the other game once, and each came first by the direct link: 64 ms against 192.
+    CHECK(boGot[static_cast<uint8_t>(anaSlot)] == sends && anaGot[static_cast<uint8_t>(boSlot)] == sends);
+    const PosePathStats& seenByBo = bo.PathStats();
+    const size_t a = static_cast<size_t>(anaSlot);
+    CHECK(seenByBo.raceIndex == grid.raceIndex && seenByBo.first[a][kPathDirect] == sends);
+    CHECK(seenByBo.first[a][kPathHost] == 0 && seenByBo.first[a][kPathRelay] == 0);
+    CHECK(seenByBo.aged[a][kPathDirect] == sends);
+    const uint64_t directAge = seenByBo.aged[a][kPathDirect] > 0
+                                   ? seenByBo.ageSumMs[a][kPathDirect] / seenByBo.aged[a][kPathDirect]
+                                   : 0;
+    CHECK(directAge >= 48 && directAge <= 112);
+    CHECK(ana.PathStats().first[static_cast<size_t>(boSlot)][kPathDirect] == sends);
+    CHECK(bo.Links().Stats().posesReceived[static_cast<size_t>(links::PathKind::Public)] == sends);
+    CHECK(ana.Links().Stats().refused == 0 && bo.Links().Stats().refused == 0);
+    CHECK(ana.Refused() == 0 && bo.Refused() == 0 && lan.host->Refused() == 0);
+
+    // The direct path breaks. Nothing is lost: the host's copies arrive, now first, and the link closes.
+    cut = true;
+    for (uint32_t i = 0; i < sends; i++) {
+        ana.SendPoses(grid.raceIndex, { PoseAt(static_cast<uint8_t>(anaSlot), 2000 + i, lan.now) });
+        lan.Tick();
+        drain();
+    }
+    lan.Tick(30);
+    drain();
+    CHECK(boGot[static_cast<uint8_t>(anaSlot)] == 2 * sends);
+    CHECK(bo.PathStats().first[a][kPathHost] == sends && bo.PathStats().first[a][kPathDirect] == sends);
+    const uint64_t hostAge = bo.PathStats().aged[a][kPathHost] > 0
+                                 ? bo.PathStats().ageSumMs[a][kPathHost] / bo.PathStats().aged[a][kPathHost]
+                                 : 0;
+    CHECK(hostAge > directAge + 64);
+    lan.Tick(static_cast<int>(links::kSilenceMs / 16) + 2);
+    CHECK(!bo.Links().Open(anaId, lan.now + lan.skew[1], best));
+
+    // A datagram made without the pair's secret is refused, and nothing reaches the game.
+    cut = false;
+    std::vector<StatePose> none;
+    RaceState forged;
+    forged.raceIndex = grid.raceIndex;
+    forged.poses = { PoseAt(static_cast<uint8_t>(anaSlot), 5000, lan.now) };
+    const std::vector<uint8_t> body = EncodeState(forged);
+    const std::vector<uint8_t> datagram =
+        links::BuildDatagram(Bytes32{ 9 }, links::kKindPoses, grid.raceIndex, anaId, boId, body.data(), body.size());
+    const uint32_t refusedBefore = bo.Links().Stats().refused;
+    bo.Receive(anaAddr, datagram.data(), datagram.size(), lan.now + lan.skew[1]);
+    drain();
+    CHECK(bo.Links().Stats().refused == refusedBefore + 1 && boGot[static_cast<uint8_t>(anaSlot)] == 2 * sends);
+    CHECK(bo.Refused() == 0 && linkDatagrams > 0);
+
+    // The link opens again. The race ends; Bo hears it a second before Ana, whose poses still come direct in
+    // that second. Bo's game gets none of them: the links keep to the phases the host relays poses in.
+    lan.Tick(20);
+    CHECK(bo.Links().Open(anaId, lan.now + lan.skew[1], best));
+    lan.net.SetDelay([&](const NetAddress& from, const NetAddress& to) {
+        return from == hostAddr && to == anaAddr ? 60 : 0;
+    });
+    FinishReport retired;
+    retired.raceIndex = grid.raceIndex;
+    retired.kind = ResultKind::Retired;
+    CHECK(lan.host->Finish(retired, lan.now));
+    ana.Finish(retired);
+    bo.Finish(retired);
+    for (int i = 0; i < 20 && bo.Room(lan.now + lan.skew[1]).phase != Phase::Results; i++) {
+        lan.Tick();
+    }
+    CHECK(bo.Room(lan.now + lan.skew[1]).phase == Phase::Results && ana.Room(lan.now).phase == Phase::Racing);
+    drain();
+    const uint32_t direct = bo.Links().Stats().posesReceived[static_cast<size_t>(links::PathKind::Public)];
+    for (uint32_t i = 0; i < 10; i++) {
+        ana.SendPoses(grid.raceIndex, { PoseAt(static_cast<uint8_t>(anaSlot), 6000 + i, lan.now) });
+        lan.Tick();
+    }
+    drain();
+    CHECK(ana.Room(lan.now).phase == Phase::Racing);
+    CHECK(bo.Links().Stats().posesReceived[static_cast<size_t>(links::PathKind::Public)] > direct);
+    CHECK(boGot[static_cast<uint8_t>(anaSlot)] == 2 * sends);
+}
+
+// Bo is behind a NAT that gives each destination its own outside port, so nothing he sends to Ana comes from
+// the address the host listed. The pair never opens; the race runs on the host relay, and Ana's punches stop.
+// Cy, watching, has direct links off: the host never tells anyone his address, and nobody sends him a link
+// datagram.
+void TestDirectLinksBlocked() {
+    std::printf("a pair that cannot open, and a member with direct links off\n");
+    Lan lan;
+    LobbyClient& ana = lan.AddClient("Ana");
+    LobbyClient& bo = lan.AddClient("Bo");
+    LobbyClient& cy = lan.AddClient("Cy", Seat::Watch); // a watcher: three racers keep DriveTo on the pick path
+    PathsInfo off;
+    off.direct = false;
+    cy.SetPaths(off);
+    const NetAddress hostAddr = lan.hostAddr;
+    const NetAddress boAddr = lan.clientAddrs[1];
+    const NetAddress cyAddr = lan.clientAddrs[2];
+    size_t toCy = 0;
+    size_t fromCy = 0;
+    lan.net.SetFilter([&](const NetAddress& from, const NetAddress& to, size_t) {
+        if (from == hostAddr || to == hostAddr) {
+            return false;
+        }
+        toCy += to == cyAddr ? 1 : 0;
+        fromCy += from == cyAddr ? 1 : 0;
+        return from == boAddr || to == boAddr;
+    });
+    lan.Settle();
+    const uint8_t anaId = ana.LocalId();
+    const uint8_t boId = bo.LocalId();
+    const uint8_t cyId = cy.LocalId();
+    CHECK(ana.Links().Known(boId) && !ana.Links().Known(cyId) && !bo.Links().Known(cyId));
+    CHECK(cy.Links().PeerCount() == 0);
+    DriveTo(lan, Phase::Racing);
+    const Grid grid = lan.host->RaceGrid();
+    const int boSlot = RaceSlotIn(grid, boId);
+    CHECK(boSlot > 0);
+    if (boSlot <= 0) {
+        return;
+    }
+    // Long past the windows the entry and the race opened.
+    for (int i = 0; i < 2 * static_cast<int>(links::kPunchWindowMs / 16); i++) {
+        if (i % 4 == 0) {
+            bo.SendPoses(grid.raceIndex, { PoseAt(static_cast<uint8_t>(boSlot), 3000 + static_cast<uint32_t>(i), lan.now) });
+        }
+        lan.Tick();
+    }
+    links::PathKind best = links::PathKind::Relay;
+    CHECK(!ana.Links().Open(boId, lan.now, best));
+    const size_t b = static_cast<size_t>(boSlot);
+    CHECK(ana.PathStats().first[b][kPathDirect] == 0 && ana.PathStats().first[b][kPathHost] > 0);
+    const uint32_t punches = ana.Links().Stats().punchesSent;
+    CHECK(punches > 0 && punches <= 2 * (links::kPunchWindowMs / links::kPunchIntervalMs) + 2);
+    lan.Tick(200);
+    CHECK(ana.Links().Stats().punchesSent == punches); // no window is open
+    CHECK(toCy == 0 && fromCy == 0 && cy.Links().Stats().punchesSent == 0);
+    CHECK(ana.Refused() == 0 && bo.Refused() == 0 && cy.Refused() == 0 && lan.host->Refused() == 0);
+
+    // Cy turns direct links on: now the others hear of him and link to him.
+    PathsInfo on;
+    cy.SetPaths(on);
+    lan.Tick(60);
+    CHECK(ana.Links().Known(cyId) && cy.Links().Known(anaId) && cy.Links().Known(boId));
+    CHECK(ana.Links().Open(cyId, lan.now, best) && best == links::PathKind::Public);
+    // And off again: the host tells the others to forget him.
+    cy.SetPaths(off);
+    lan.Tick(30);
+    CHECK(!ana.Links().Known(cyId) && !bo.Links().Known(cyId) && cy.Links().PeerCount() == 0);
+}
+
+// Ana and Bo share one public address, behind one router, and each told the host its LAN address. The host
+// gives each the other's LAN address, and the pair links over the LAN. Cy, elsewhere, never hears of them.
+void TestDirectLinksLan() {
+    std::printf("two members behind one router link over their LAN\n");
+    Lan lan;
+    const uint32_t shared = Ip(203, 0, 113, 5);
+    lan.clientAt = Addr(shared, 50010);
+    LobbyClient& ana = lan.AddClient("Ana");
+    lan.clientAt = Addr(shared, 50011);
+    LobbyClient& bo = lan.AddClient("Bo");
+    LobbyClient& cy = lan.AddClient("Cy");
+    const NetAddress anaLan = Addr(Ip(10, 0, 0, 2), 24302);
+    const NetAddress boLan = Addr(Ip(10, 0, 0, 3), 24302);
+    const NetAddress anaPub = lan.clientAddrs[0];
+    const NetAddress boPub = lan.clientAddrs[1];
+    lan.net.Add(anaLan, [&lan](const NetAddress& from, const uint8_t* d, size_t n) {
+        lan.clients[0]->Receive(from, d, n, lan.now + lan.skew[0]);
+    });
+    lan.net.Add(boLan, [&lan](const NetAddress& from, const uint8_t* d, size_t n) {
+        lan.clients[1]->Receive(from, d, n, lan.now + lan.skew[1]);
+    });
+    // On the LAN a copy's datagrams come from its LAN address.
+    lan.net.SetSource([&](const NetAddress& from, const NetAddress& to) {
+        if (to == boLan && from == anaPub) {
+            return anaLan;
+        }
+        if (to == anaLan && from == boPub) {
+            return boLan;
+        }
+        return from;
+    });
+    PathsInfo anaPaths;
+    anaPaths.lan = { links::EndpointOf(anaLan) };
+    ana.SetPaths(anaPaths);
+    PathsInfo boPaths;
+    boPaths.lan = { links::EndpointOf(boLan), links::EndpointOf(Addr(Ip(169, 254, 0, 9), 24302)) };
+    bo.SetPaths(boPaths);
+    CHECK(bo.Paths().lan.size() == 1); // a link-local address is not one the host would take
+    PathsInfo cyPaths;
+    cyPaths.lan = { links::EndpointOf(Addr(Ip(10, 0, 0, 4), 24302)) };
+    cy.SetPaths(cyPaths);
+    lan.Settle();
+    const uint8_t anaId = ana.LocalId();
+    const uint8_t boId = bo.LocalId();
+    const uint8_t cyId = cy.LocalId();
+    links::PathKind best = links::PathKind::Relay;
+    CHECK(ana.Links().Open(boId, lan.now, best) && best == links::PathKind::Lan);
+    CHECK(bo.Links().Open(anaId, lan.now + lan.skew[1], best) && best == links::PathKind::Lan);
+    // Cy links to both by their public address only.
+    CHECK(cy.Links().Open(anaId, lan.now + lan.skew[2], best) && best == links::PathKind::Public);
+    CHECK(ana.Links().Open(cyId, lan.now, best) && best == links::PathKind::Public);
+    CHECK(ana.Refused() == 0 && bo.Refused() == 0 && cy.Refused() == 0 && lan.host->Refused() == 0);
+}
+
+// A member's Paths the host will not take, the Peers a raw member is sent, and a stray link datagram.
+void TestDirectLinksRefusals() {
+    std::printf("the host and a member refuse link messages that break the rules\n");
+    Lan lan;
+    RawPeer raw(lan, 40, kProtocolVersion);
+    raw.Run(20);
+    JoinRequest join;
+    join.build = kBuild;
+    join.name = "Raw";
+    join.colour = 0x445566;
+    join.machine = 2;
+    raw.Send(kMsgJoin, EncodeJoin(join));
+    raw.Run(10);
+    LobbyClient& ana = lan.AddClient("Ana");
+    PathsInfo anaPaths;
+    anaPaths.lan = { links::EndpointOf(Addr(Ip(10, 0, 0, 2), 24302)) };
+    anaPaths.relay = links::EndpointOf(Addr(Ip(198, 51, 100, 7), 40001));
+    ana.SetPaths(anaPaths);
+    raw.Run(90);
+    const uint8_t rawId = 1;
+    CHECK(FindIn(lan.host->Roster(), rawId) != nullptr && ana.LocalId() == 2);
+    // Ana sent Paths; Raw has not, so neither hears of the other.
+    CHECK(ana.Links().PeerCount() == 0 && raw.Count(kMsgPeers) == 0);
+    const uint32_t refused = lan.host->Refused();
+    std::vector<uint8_t> bad = EncodePaths(PathsInfo());
+    bad.back() = 2; // direct is 0 or 1
+    raw.Send(kMsgPaths, bad);
+    raw.Run(10);
+    CHECK(lan.host->Refused() == refused + 1 && ana.Links().PeerCount() == 0);
+    // A good Paths: Ana hears of Raw, and Raw is told Ana's public address. Not her LAN one: she is not behind
+    // Raw's address. Nor her relay one: Raw has none to send from.
+    raw.Send(kMsgPaths, EncodePaths(PathsInfo()));
+    raw.Run(20);
+    CHECK(lan.host->Refused() == refused + 1 && ana.Links().Known(rawId) && raw.Count(kMsgPeers) == 1);
+    std::vector<PeerEntry> told;
+    const Message* last = raw.Last(kMsgPeers);
+    CHECK(last != nullptr && DecodePeers(last->payload.data(), last->payload.size(), told) && told.size() == 1 &&
+          told[0].id == 2 && told[0].pub == links::EndpointOf(lan.clientAddrs[0]) && told[0].lan.empty() &&
+          told[0].relay.None() && !told[0].Forget());
+    const Bytes32 secret = told.empty() ? Bytes32{} : told[0].secret;
+    // The same Paths again changes nothing and sends nothing.
+    raw.Send(kMsgPaths, EncodePaths(PathsInfo()));
+    raw.Run(20);
+    CHECK(raw.Count(kMsgPeers) == 1);
+    // Raw turns direct links off: Ana is told to forget it, and Raw to forget Ana.
+    PathsInfo off;
+    off.direct = false;
+    raw.Send(kMsgPaths, EncodePaths(off));
+    raw.Run(20);
+    CHECK(!ana.Links().Known(rawId) && raw.Count(kMsgPeers) == 2);
+    last = raw.Last(kMsgPeers);
+    CHECK(last != nullptr && DecodePeers(last->payload.data(), last->payload.size(), told) && told.size() == 1 &&
+          told[0].id == 2 && told[0].Forget());
+    // On again, now with a relay: a pair keeps its secret while both stay in the room, and the relays meet.
+    PathsInfo relayed;
+    relayed.relay = links::EndpointOf(Addr(Ip(198, 51, 100, 8), 40002));
+    raw.Send(kMsgPaths, EncodePaths(relayed));
+    raw.Run(20);
+    last = raw.Last(kMsgPeers);
+    CHECK(raw.Count(kMsgPeers) == 3 && last != nullptr &&
+          DecodePeers(last->payload.data(), last->payload.size(), told) && told.size() == 1 &&
+          told[0].secret == secret && told[0].relay == anaPaths.relay && !told[0].pub.None());
+    CHECK(ana.Refused() == 0);
+    // A copy that has not joined takes no link datagram, and counts nothing for one.
+    LobbyClient late(kBuild, Profile("Late", 1, 1), Seat::Race, lan.hostAddr, 0x9999u,
+                     lan.net.SenderFor(Addr(Ip(192, 168, 1, 41), 50041)), TrackStore());
+    const std::vector<uint8_t> punch = links::BuildDatagram(secret, links::kKindPunch, 0, rawId, 2, nullptr, 0);
+    late.Receive(lan.clientAddrs[0], punch.data(), punch.size(), lan.now);
+    CHECK(late.Links().Stats().refused == 0 && late.Refused() == 0);
+}
+
 // Between races the room goes over at once. With nobody to host it, Leave is a close.
 void TestHostLeavesBetweenRaces() {
     std::printf("the host leaves between races (D28.5)\n");
@@ -4984,6 +5383,166 @@ void TestReachAndBanCodecs() {
     CHECK(DecodeHandoverTokens(bytes.data(), bytes.size(), tokensOut) && tokensOut == tokens);
 }
 
+// Protocol 10 (decisions 62, 63, 67, 68, 73): Peers, host to one member, and Paths, member to host.
+void TestPeersAndPathsCodecs() {
+    std::printf("peers and paths codecs (protocol 10)\n");
+    CHECK(kLobbyVersion == 10);
+    CHECK(kPeersPerMessage >= 1 && 1 + kPeersPerMessage * kPeerEntryMaxBytes <= gdx::net::kMaxMessagePayload);
+
+    const auto endpoint = [](int a, int b, int c, int d, uint16_t port) {
+        PeerEndpoint e;
+        e.ip = MappedV4(Ip(a, b, c, d));
+        e.port = port;
+        return e;
+    };
+    Bytes32 secretA{};
+    secretA.fill(0x11);
+    Bytes32 secretB{};
+    secretB.fill(0x22);
+
+    PeerEntry ana; // direct on, behind the same router: public, relay and LAN
+    ana.id = 1;
+    ana.secret = secretA;
+    ana.pub = endpoint(203, 0, 113, 7, 24302);
+    ana.relay = endpoint(198, 51, 100, 9, 40001);
+    ana.lan = { endpoint(192, 168, 1, 20, 24302), endpoint(10, 0, 0, 5, 24302) };
+    PeerEntry bo; // direct off: the relay only
+    bo.id = 3;
+    bo.secret = secretB;
+    bo.relay = endpoint(198, 51, 100, 10, 40002);
+    PeerEntry gone; // forget member 4
+    gone.id = 4;
+    const std::vector<PeerEntry> peers = { ana, bo, gone };
+
+    std::vector<uint8_t> bytes = EncodePeers(peers);
+    std::vector<PeerEntry> got;
+    CHECK(bytes.size() == 1 + 3 * (1 + 32 + 2 * kPeerEndpointBytes + 1) + 2 * kPeerEndpointBytes);
+    CHECK(DecodePeers(bytes.data(), bytes.size(), got) && got == peers);
+    CHECK(got[2].Forget() && !got[0].Forget());
+    CheckEdges(bytes, [](const uint8_t* d, size_t n) {
+        std::vector<PeerEntry> o;
+        return DecodePeers(d, n, o);
+    });
+
+    // An IPv6 public endpoint passes as it is.
+    {
+        PeerEntry six = ana;
+        six.pub.ip = IpBytes{ 0x20, 0x01, 0x0d, 0xb8, 0, 1, 0, 2, 0, 0, 0, 0, 0, 0, 0, 9 };
+        bytes = EncodePeers({ six });
+        CHECK(DecodePeers(bytes.data(), bytes.size(), got) && got.size() == 1 && got[0] == six);
+    }
+    // Loopback passes: copies on one machine.
+    {
+        PeerEntry local = bo;
+        local.relay = PeerEndpoint();
+        local.pub = endpoint(127, 0, 0, 1, 24303);
+        bytes = EncodePeers({ local });
+        CHECK(DecodePeers(bytes.data(), bytes.size(), got) && got[0] == local);
+    }
+
+    // Each refusal leaves the output alone.
+    const auto refuses = [&](const std::vector<PeerEntry>& list) {
+        const std::vector<uint8_t> e = EncodePeers(list);
+        std::vector<PeerEntry> o = { ana };
+        return !DecodePeers(e.data(), e.size(), o) && o.size() == 1 && o[0] == ana;
+    };
+    CHECK(refuses({})); // nothing to say
+    PeerEntry bad = ana;
+    bad.id = kHostId;
+    CHECK(refuses({ bad })); // the host is not a peer
+    bad.id = static_cast<uint8_t>(kMaxPlayers);
+    CHECK(refuses({ bad })); // past the last id
+    CHECK(refuses({ bo, ana })); // not ascending
+    CHECK(refuses({ ana, ana })); // twice
+    bad = ana;
+    bad.pub = PeerEndpoint();
+    bad.relay = PeerEndpoint();
+    bad.lan.clear();
+    CHECK(refuses({ bad })); // a secret with no way to reach it
+    bad = gone;
+    bad.relay = bo.relay;
+    CHECK(refuses({ bad })); // a forget that names a path
+    bad = ana;
+    bad.pub.port = 0;
+    CHECK(refuses({ bad })); // an address with no port
+    bad = ana;
+    bad.pub = endpoint(224, 0, 0, 1, 24302);
+    CHECK(refuses({ bad })); // multicast
+    bad = ana;
+    bad.relay = endpoint(255, 255, 255, 255, 24302);
+    CHECK(refuses({ bad })); // broadcast
+    bad = ana;
+    bad.lan = { endpoint(169, 254, 3, 4, 24302) };
+    CHECK(refuses({ bad })); // link-local
+    bad = ana;
+    bad.lan = { PeerEndpoint() };
+    CHECK(refuses({ bad })); // an empty LAN entry
+    {
+        // A LAN count past kPeerLanMax: the encoder cuts it, a forged count is refused.
+        PeerEntry many = ana;
+        many.lan.clear();
+        for (size_t i = 0; i < kPeerLanMax + 2; i++) {
+            many.lan.push_back(endpoint(192, 168, 1, static_cast<int>(i + 1), 24302));
+        }
+        bytes = EncodePeers({ many });
+        CHECK(DecodePeers(bytes.data(), bytes.size(), got) && got[0].lan.size() == kPeerLanMax);
+        const size_t lanCountAt = 1 + 1 + 32 + 2 * kPeerEndpointBytes;
+        bytes[lanCountAt] = static_cast<uint8_t>(kPeerLanMax + 1);
+        bytes.insert(bytes.end(), kPeerEndpointBytes, 1);
+        CHECK(!DecodePeers(bytes.data(), bytes.size(), got));
+    }
+    {
+        // The encoder writes at most kPeersPerMessage entries, and the largest of them still fit; a forged count
+        // past it is refused.
+        std::vector<PeerEntry> full;
+        for (size_t i = 0; i < kPeersPerMessage + 2; i++) {
+            PeerEntry e = ana;
+            e.id = static_cast<uint8_t>(i + 1);
+            e.lan.assign(kPeerLanMax, endpoint(192, 168, 1, 9, 24302));
+            full.push_back(e);
+        }
+        bytes = EncodePeers(full);
+        CHECK(bytes.size() == 1 + kPeersPerMessage * kPeerEntryMaxBytes);
+        CHECK(DecodePeers(bytes.data(), bytes.size(), got) && got.size() == kPeersPerMessage);
+        bytes[0] = static_cast<uint8_t>(kPeersPerMessage + 1);
+        CHECK(!DecodePeers(bytes.data(), bytes.size(), got));
+    }
+
+    // Paths.
+    PathsInfo paths;
+    paths.relay = endpoint(198, 51, 100, 9, 40001);
+    paths.lan = { endpoint(192, 168, 1, 20, 24302) };
+    paths.direct = false;
+    bytes = EncodePaths(paths);
+    PathsInfo pathsGot;
+    CHECK(bytes.size() == kPeerEndpointBytes + 1 + kPeerEndpointBytes + 1);
+    CHECK(DecodePaths(bytes.data(), bytes.size(), pathsGot) && pathsGot == paths);
+    CheckEdges(bytes, [](const uint8_t* d, size_t n) {
+        PathsInfo o;
+        return DecodePaths(d, n, o);
+    });
+    PathsInfo none; // no relay, no LAN, direct on
+    bytes = EncodePaths(none);
+    CHECK(bytes.size() == kPeerEndpointBytes + 2 && DecodePaths(bytes.data(), bytes.size(), pathsGot) &&
+          pathsGot == none);
+    const auto pathsRefused = [&](const std::vector<uint8_t>& e) {
+        PathsInfo o = paths;
+        return !DecodePaths(e.data(), e.size(), o) && o == paths;
+    };
+    bytes = EncodePaths(paths);
+    bytes.back() = 2;
+    CHECK(pathsRefused(bytes)); // direct is 0 or 1
+    PathsInfo badPaths = paths;
+    badPaths.relay.port = 0;
+    CHECK(pathsRefused(EncodePaths(badPaths))); // a relay address with no port
+    badPaths = paths;
+    badPaths.lan = { endpoint(0, 1, 2, 3, 24302) };
+    CHECK(pathsRefused(EncodePaths(badPaths))); // this network
+    bytes = EncodePaths(paths);
+    bytes[kPeerEndpointBytes] = static_cast<uint8_t>(kPeerLanMax + 1);
+    CHECK(pathsRefused(bytes)); // a LAN count past the cap
+}
+
 // Decision 51: in a directory room a reachable member is elected before an earlier one that is not; in a LAN room
 // join order alone decides. Reach moves it later, and a member that comes back to a promoted host says it again.
 void TestReachableSuccessor() {
@@ -5130,6 +5689,7 @@ int main() {
     TestExpectedHostKey();
     TestKeysAfterHandover();
     TestReachAndBanCodecs();
+    TestPeersAndPathsCodecs();
     TestReachableSuccessor();
     TestBansAfterHandover();
     TestVoteFlow();
@@ -5153,6 +5713,10 @@ int main() {
     TestNothingToFollow();
     TestHostLeavesMidRace();
     TestHostLeavesBetweenRaces();
+    TestDirectLinksRace();
+    TestDirectLinksBlocked();
+    TestDirectLinksLan();
+    TestDirectLinksRefusals();
     TestBrowser();
     std::printf("%d checks, %d failed\n", gChecks, gFails);
     return gFails == 0 ? 0 : 1;

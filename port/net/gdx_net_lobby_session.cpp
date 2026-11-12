@@ -240,6 +240,11 @@ struct LobbyHost::Peer {
     bool nonceSent = false; // O7.3: the Nonce this link's Join must sign
     uint32_t nonceRoom = 0;
     Bytes32 nonce{};
+    // Direct member links: this link's serial once joined, the Paths it sent, and the Peers entries it was told.
+    uint64_t serial = 0;
+    PathsInfo paths;
+    bool pathsKnown = false;
+    std::vector<PeerEntry> told; // ascending by id
 };
 
 LobbyHost::LobbyHost(std::string build, LocalProfile me, uint16_t port, const RoomConfig& config, DatagramSend send,
@@ -529,9 +534,136 @@ void LobbyHost::Update(uint32_t nowMs) {
     Dispatch(out);
     SyncTrack(nowMs);
     SyncTokens();
+    SyncPeers(nowMs);
     if (leaving_ && !closed_ && !RaceOn()) {
         HandOver(nowMs);
     }
+}
+
+const Bytes32& LobbyHost::PairSecret(uint64_t a, uint64_t b) {
+    const uint64_t low = std::min(a, b);
+    const uint64_t high = std::max(a, b);
+    for (const PairKey& key : pairSecrets_) {
+        if (key.low == low && key.high == high) {
+            return key.secret;
+        }
+    }
+    // From the OS source, not the token source: a test that scripts its tokens keeps the same sequence.
+    PairKey key;
+    key.low = low;
+    key.high = high;
+    for (size_t i = 0; i < key.secret.size(); i += 8) {
+        const uint64_t word = OsToken();
+        for (size_t b8 = 0; b8 < 8; b8++) {
+            key.secret[i + b8] = static_cast<uint8_t>(word >> (8 * b8));
+        }
+    }
+    if (IsZero32(key.secret)) {
+        key.secret[0] = 1; // all zero means forget on the wire
+    }
+    pairSecrets_.push_back(key);
+    return pairSecrets_.back().secret;
+}
+
+// Decisions 63, 67 and 68. A member hears of another only once both sent Paths, so a copy with direct links off
+// never has its public address told before the host knows it is off. The public address goes only between two
+// copies with direct links on; LAN addresses only between two of those behind the same public address; a relay
+// address only between two copies that both have one.
+void LobbyHost::SyncPeers(uint32_t nowMs) {
+    (void)nowMs;
+    std::vector<Peer*> linked;
+    for (const std::unique_ptr<Peer>& peer : peers_) {
+        if (peer->joined && !peer->rejecting && !peer->dead && peer->id != kHostId && peer->id < kMaxPlayers) {
+            if (peer->serial == 0) {
+                peer->serial = nextSerial_++;
+                peersDirty_ = true;
+            }
+            if (peer->pathsKnown) {
+                linked.push_back(peer.get());
+            }
+        }
+    }
+    std::sort(linked.begin(), linked.end(), [](const Peer* a, const Peer* b) { return a->id < b->id; });
+    std::vector<uint64_t> seen;
+    for (const Peer* peer : linked) {
+        seen.push_back(peer->serial);
+    }
+    if (!peersDirty_ && seen == peersSeen_) {
+        return;
+    }
+    peersSeen_ = seen;
+    peersDirty_ = false;
+
+    for (Peer* x : linked) {
+        std::vector<PeerEntry> want;
+        for (const Peer* y : linked) {
+            if (y == x) {
+                continue;
+            }
+            const bool direct = x->paths.direct && y->paths.direct;
+            PeerEntry entry;
+            entry.id = y->id;
+            if (direct && DialableIp(y->addr.ip, y->addr.port, true)) {
+                entry.pub = links::EndpointOf(y->addr);
+            }
+            if (direct && x->addr.ip == y->addr.ip) {
+                entry.lan = y->paths.lan;
+            }
+            if (!x->paths.relay.None() && !y->paths.relay.None()) {
+                entry.relay = y->paths.relay;
+            }
+            if (entry.pub.None() && entry.relay.None() && entry.lan.empty()) {
+                continue;
+            }
+            entry.secret = PairSecret(x->serial, y->serial);
+            want.push_back(entry);
+        }
+        // What changed: a new or different entry, or a forget for a member still here that lost every path. A
+        // member who left is not forgotten here: the roster tells every copy that.
+        std::vector<PeerEntry> send;
+        for (const PeerEntry& entry : want) {
+            const auto was = std::find_if(x->told.begin(), x->told.end(),
+                                          [&](const PeerEntry& e) { return e.id == entry.id; });
+            if (was == x->told.end() || !(*was == entry)) {
+                send.push_back(entry);
+            }
+        }
+        for (const PeerEntry& entry : x->told) {
+            const bool wanted = std::any_of(want.begin(), want.end(), [&](const PeerEntry& e) { return e.id == entry.id; });
+            const bool here = std::any_of(linked.begin(), linked.end(), [&](const Peer* p) { return p->id == entry.id; });
+            if (!wanted && here) {
+                PeerEntry forget;
+                forget.id = entry.id;
+                send.push_back(forget);
+            }
+        }
+        std::sort(send.begin(), send.end(), [](const PeerEntry& a, const PeerEntry& b) { return a.id < b.id; });
+        bool sent = true;
+        for (size_t at = 0; at < send.size(); at += kPeersPerMessage) {
+            const size_t end = std::min(send.size(), at + kPeersPerMessage);
+            const std::vector<PeerEntry> part(send.begin() + static_cast<std::ptrdiff_t>(at),
+                                              send.begin() + static_cast<std::ptrdiff_t>(end));
+            const std::vector<uint8_t> bytes = EncodePeers(part);
+            if (x->channel->SendReliable(kMsgPeers, bytes.data(), bytes.size()) != QueueResult::Ok) {
+                sent = false;
+                break;
+            }
+        }
+        if (sent) {
+            x->told = want;
+        } else {
+            peersDirty_ = true; // a full send queue: the whole diff again next tick
+        }
+    }
+
+    // A pair whose either side left keeps no secret.
+    pairSecrets_.erase(std::remove_if(pairSecrets_.begin(), pairSecrets_.end(),
+                                      [&](const PairKey& key) {
+                                          const bool low = std::find(seen.begin(), seen.end(), key.low) != seen.end();
+                                          const bool high = std::find(seen.begin(), seen.end(), key.high) != seen.end();
+                                          return !low || !high;
+                                      }),
+                       pairSecrets_.end());
 }
 
 // A successor that lost only its own link to a living host promotes all the same, and nobody comes back to
@@ -653,6 +785,16 @@ void LobbyHost::HandleMessage(Peer& peer, const Message& msg, uint32_t nowMs) {
         ok = DecodeReach(data, len, reachable);
         if (ok) {
             machine_.SetReachable(id, reachable);
+        }
+        break;
+    }
+    case kMsgPaths: {
+        PathsInfo paths;
+        ok = DecodePaths(data, len, paths);
+        if (ok && (!peer.pathsKnown || !(peer.paths == paths))) {
+            peer.paths = std::move(paths);
+            peer.pathsKnown = true;
+            peersDirty_ = true;
         }
         break;
     }
@@ -1326,7 +1468,14 @@ LobbyClient::LobbyClient(std::string build, LocalProfile me, Seat seat, NetAddre
                          DatagramSend send, TrackStore store)
     : build_(std::move(build)), me_(std::move(me)), seat_(seat), host_(host),
       channel_(ClientConfig(nonce), [send, host](const uint8_t* bytes, size_t n) { send(host, bytes, n); }),
-      flow_(std::move(store)) {
+      flow_(std::move(store)), relaySend_(std::make_shared<RelaySend>()),
+      links_([send, relay = relaySend_](links::Route route, const NetAddress& to, const uint8_t* bytes, size_t n) {
+          if (route == links::Route::Direct) {
+              send(to, bytes, n);
+          } else if (*relay) {
+              (*relay)(to, bytes, n);
+          }
+      }) {
     channel_.SetHeaderEstimateBytes(HeaderBytesFor(host));
 }
 
@@ -1336,17 +1485,132 @@ void LobbyClient::Start(uint32_t nowMs) {
     }
 }
 
+namespace {
+
+// Endpoints the host's decoder takes: a dialable address, or none.
+PeerEndpoint Usable(const PeerEndpoint& endpoint) {
+    return !endpoint.None() && DialableIp(endpoint.ip, endpoint.port, true) ? endpoint : PeerEndpoint();
+}
+
+// The phases the host relays poses in (LobbyHost::RaceOn). The links keep to them as this copy last heard them.
+bool PosePhase(Phase phase) {
+    return phase == Phase::GridSync || phase == Phase::Countdown || phase == Phase::Racing;
+}
+
+} // namespace
+
 void LobbyClient::Receive(const NetAddress& from, const uint8_t* data, size_t len, uint32_t nowMs) {
-    if (state_ == State::Closed || from != host_ || IsDiscovery(data, len)) {
+    if (state_ == State::Closed) {
+        return;
+    }
+    if (links::IsLinkDatagram(data, len)) {
+        TakeLinkDatagram(links::Route::Direct, from, data, len, nowMs);
+        return;
+    }
+    if (from != host_ || IsDiscovery(data, len)) {
         return;
     }
     channel_.Receive(data, len, nowMs);
+}
+
+void LobbyClient::ReceiveRelay(const NetAddress& from, const uint8_t* data, size_t len, uint32_t nowMs) {
+    if (state_ != State::Closed && links::IsLinkDatagram(data, len)) {
+        TakeLinkDatagram(links::Route::Relay, from, data, len, nowMs);
+    }
+}
+
+void LobbyClient::TakeLinkDatagram(links::Route route, const NetAddress& from, const uint8_t* data, size_t len,
+                                   uint32_t nowMs) {
+    if (state_ != State::Joined) {
+        return;
+    }
+    std::vector<StatePose> poses;
+    // The links checked the MAC, the race and that every pose is the sender's own slot in it.
+    if (!links_.Receive(route, from, data, len, nowMs, poses) || poses.empty() || !haveGrid_ ||
+        !PosePhase(room_.phase)) {
+        return;
+    }
+    const int own = OwnSlot();
+    const PosePath path = route == links::Route::Relay ? kPathRelay : kPathDirect;
+    for (const StatePose& pose : poses) {
+        if (pose.slot != own) {
+            TakeIn(pose, path, nowMs);
+        }
+    }
+}
+
+// Only a pose newer than the newest one of its slot goes to the game, so the copy that came second by the
+// other path is dropped here, where it can still be counted.
+void LobbyClient::TakeIn(const StatePose& pose, PosePath path, uint32_t nowMs) {
+    if (posesRace_ != grid_.raceIndex) {
+        posesIn_.clear();
+        posesRace_ = grid_.raceIndex;
+    }
+    if (pathStats_.raceIndex != grid_.raceIndex) {
+        pathStats_ = PosePathStats();
+        pathStats_.raceIndex = grid_.raceIndex;
+        haveTick_.fill(false);
+    }
+    const size_t slot = pose.slot;
+    if (slot >= kGridSlots) {
+        return;
+    }
+    if (haveTick_[slot] && static_cast<int32_t>(pose.tick - newestTick_[slot]) <= 0) {
+        return;
+    }
+    haveTick_[slot] = true;
+    newestTick_[slot] = pose.tick;
+    PushPose(posesIn_, pose);
+    pathStats_.first[slot][path]++;
+    if (clock_.Ready()) {
+        const int32_t age = static_cast<int32_t>(nowMs + clock_.OffsetMs() - pose.timeMs);
+        pathStats_.ageSumMs[slot][path] += static_cast<uint64_t>(std::max<int32_t>(age, 0));
+        pathStats_.aged[slot][path]++;
+    }
+}
+
+void LobbyClient::SetPaths(const PathsInfo& paths) {
+    paths_ = PathsInfo();
+    paths_.direct = paths.direct;
+    paths_.relay = Usable(paths.relay);
+    for (const PeerEndpoint& lan : paths.lan) {
+        const PeerEndpoint ok = Usable(lan);
+        if (!ok.None() && paths_.lan.size() < kPeerLanMax &&
+            std::find(paths_.lan.begin(), paths_.lan.end(), ok) == paths_.lan.end()) {
+            paths_.lan.push_back(ok);
+        }
+    }
+    ApplyLocalPaths();
+    SyncPaths();
+}
+
+void LobbyClient::SetRelaySend(RelaySend send) {
+    *relaySend_ = std::move(send);
+    ApplyLocalPaths();
+}
+
+void LobbyClient::ApplyLocalPaths() {
+    if (state_ == State::Joined) {
+        links_.SetLocal(localId_, paths_.direct, static_cast<bool>(*relaySend_) && !paths_.relay.None());
+    }
+}
+
+void LobbyClient::SyncPaths() {
+    if (state_ != State::Joined || (pathsSent_ && pathsTold_ == paths_)) {
+        return;
+    }
+    const std::vector<uint8_t> bytes = EncodePaths(paths_);
+    if (channel_.SendReliable(kMsgPaths, bytes.data(), bytes.size()) == QueueResult::Ok) {
+        pathsSent_ = true;
+        pathsTold_ = paths_;
+    }
 }
 
 void LobbyClient::Update(uint32_t nowMs) {
     if (state_ == State::Closed) {
         return;
     }
+    lastNowMs_ = nowMs;
     channel_.Update(nowMs);
     if (rejoin_ && state_ == State::Connecting && Elapsed(nowMs, rejoinSinceMs_) >= kSuccessorWaitMs) {
         channel_.Disconnect(nowMs);
@@ -1376,6 +1640,8 @@ void LobbyClient::Update(uint32_t nowMs) {
     }
     if (state_ == State::Joined) {
         SyncReach(); // again, in case a full send queue refused it
+        SyncPaths();
+        links_.Update(nowMs);
         SyncTrack(nowMs);
         flow_.Pump(channel_.ReliableOutstanding(), nowMs, [this](const std::vector<uint8_t>& payload) {
             return channel_.SendReliable(kMsgTrackChunk, payload.data(), payload.size()) == QueueResult::Ok;
@@ -1486,6 +1752,17 @@ void LobbyClient::HandleMessage(const Message& msg, uint32_t nowMs) {
         localId_ = id;
         state_ = State::Joined;
         SyncReach();
+        ApplyLocalPaths();
+        SyncPaths();
+        return;
+    }
+    case kMsgPeers: {
+        std::vector<PeerEntry> entries;
+        if (state_ != State::Joined || !DecodePeers(data, len, entries)) {
+            refused_++;
+            return;
+        }
+        links_.Apply(entries, nowMs);
         return;
     }
     case kMsgReject: {
@@ -1525,6 +1802,11 @@ void LobbyClient::HandleMessage(const Message& msg, uint32_t nowMs) {
         }
         grid_ = std::move(grid);
         haveGrid_ = true;
+        std::vector<uint8_t> slotIds;
+        for (const GridEntry& human : grid_.humans) {
+            slotIds.push_back(human.id);
+        }
+        links_.SetRace(grid_.raceIndex, slotIds, nowMs);
         return;
     }
     case kMsgStart: {
@@ -1666,6 +1948,11 @@ void LobbyClient::TakeRoster(std::vector<PlayerInfo> roster) {
     }
     roster_ = std::move(roster);
     haveRoster_ = true;
+    std::vector<uint8_t> ids;
+    for (const PlayerInfo& player : roster_) {
+        ids.push_back(player.id);
+    }
+    links_.Keep(ids);
 }
 
 // The successor promotes only with someone to host: its table names every other member that holds a token.
@@ -1835,17 +2122,13 @@ void LobbyClient::HandleState(const Message& msg) {
     }
     const int own = OwnSlot();
     const size_t racers = grid_.humans.size() + grid_.cpus;
-    if (posesRace_ != state.raceIndex) {
-        posesIn_.clear();
-        posesRace_ = state.raceIndex;
-    }
     for (const StatePose& pose : state.poses) {
         if (static_cast<size_t>(pose.slot) >= racers) {
             refused_++; // no such machine in this race
             return;
         }
         if (pose.slot != own) {
-            PushPose(posesIn_, pose);
+            TakeIn(pose, kPathHost, lastNowMs_);
         }
     }
 }
@@ -1862,6 +2145,9 @@ void LobbyClient::SendPoses(uint16_t raceIndex, const std::vector<StatePose>& po
         }
     }
     SendState(channel_, raceIndex, mine);
+    if (PosePhase(room_.phase)) {
+        links_.SendPoses(raceIndex, mine, lastNowMs_);
+    }
 }
 
 void LobbyClient::TakePoses(uint16_t& raceIndex, std::vector<StatePose>& out) {
@@ -1876,6 +2162,7 @@ void LobbyClient::Leave(uint32_t nowMs) {
     channel_.Disconnect(nowMs);
     state_ = State::Closed;
     closeText_.clear();
+    links_.Clear();
 }
 
 void LobbyClient::Note(const std::string& text) {
@@ -1885,6 +2172,7 @@ void LobbyClient::Note(const std::string& text) {
 void LobbyClient::CloseWith(const std::string& text) {
     state_ = State::Closed;
     closeText_ = text;
+    links_.Clear();
 }
 
 LanBrowser::LanBrowser(std::vector<NetAddress> targets, uint32_t nonce, DatagramSend send)

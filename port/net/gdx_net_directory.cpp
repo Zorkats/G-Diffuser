@@ -431,6 +431,8 @@ constexpr ErrorRow kErrorRows[] = {
     {Error::CodeTaken, "code_taken", 409},
     {Error::RateLimited, "rate_limited", 429},
     {Error::Internal, "internal", 500},
+    {Error::TurnUpstream, "turn_upstream", 502},
+    {Error::TurnUnavailable, "turn_unavailable", 503},
 };
 
 // A body is read only when it is within the cap (CONTRACT.md §2). On failure out is left alone.
@@ -690,6 +692,40 @@ bool AppendSignature(std::string& body, const Signature& signature) {
     return true;
 }
 
+bool SplitTurnServer(std::string_view text, std::string& host, uint16_t& port) {
+    const size_t colon = text.rfind(':');
+    if (colon == std::string_view::npos) {
+        return false;
+    }
+    const std::string_view name = text.substr(0, colon);
+    const std::string_view digits = text.substr(colon + 1);
+    if (name.empty() || name.size() > 253 || name.front() == '.' || name.front() == '-' || name.back() == '-') {
+        return false;
+    }
+    for (char c : name) {
+        const bool letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+        if (!letter && !IsDigit(c) && c != '.' && c != '-') {
+            return false;
+        }
+    }
+    if (digits.empty() || digits.size() > 5 || digits.front() == '0') {
+        return false;
+    }
+    uint32_t value = 0;
+    for (char c : digits) {
+        if (!IsDigit(c)) {
+            return false;
+        }
+        value = value * 10 + static_cast<uint32_t>(c - '0');
+    }
+    if (value > 65535) {
+        return false;
+    }
+    host = std::string(name);
+    port = static_cast<uint16_t>(value);
+    return true;
+}
+
 namespace {
 
 // What one exchange produced: a directory error, or the parsed body of the expected 2xx answer (CONTRACT.md §6).
@@ -888,6 +924,39 @@ bool ReadTtlZero(const JsonValue& body, uint32_t& out) {
     return true;
 }
 
+// {"username","password","ttl":7200,"servers":[...]} (CONTRACT.md §5.9). The strict reader already holds every string
+// to printable ASCII (§2).
+bool ReadTurnGrant(const JsonValue& body, TurnGrant& out) {
+    TurnGrant grant;
+    uint64_t ttl = 0;
+    if (!HasExactKeys(body, {"username", "password", "ttl", "servers"}) || !TextField(body, "username", grant.username) ||
+        !TextField(body, "password", grant.password) ||
+        !NumberField(body, "ttl", kTurnTtlSeconds, kTurnTtlSeconds, ttl)) {
+        return false;
+    }
+    for (const std::string* text : {&grant.username, &grant.password}) {
+        if (text->empty() || text->size() > kTurnTextMax) {
+            return false;
+        }
+    }
+    const JsonValue* servers = body.Find("servers");
+    if (servers == nullptr || servers->kind != JsonValue::Kind::Array || servers->items.empty() ||
+        servers->items.size() > kTurnServersMax) {
+        return false;
+    }
+    for (const JsonValue& item : servers->items) {
+        std::string host;
+        uint16_t port = 0;
+        if (item.kind != JsonValue::Kind::String || !SplitTurnServer(item.text, host, port)) {
+            return false;
+        }
+        grant.servers.push_back(item.text);
+    }
+    grant.ttl = static_cast<uint32_t>(ttl);
+    out = std::move(grant);
+    return true;
+}
+
 // Retry-After is whole seconds (CONTRACT.md §6). Anything else is not a value the directory sends.
 constexpr uint32_t kRetryAfterMaxSeconds = 3600;
 bool ParseRetryAfter(const std::string& text, uint32_t& out) {
@@ -963,6 +1032,8 @@ bool ConfigOk(const std::vector<std::string>& bases, const Transport& transport)
 //   - A write 5xx ends the call. The write may already be applied, and a second base could report code_taken or
 //     bad_secret for a write that succeeded.
 //   - A 4xx and any 2xx answer end the call.
+// A POST carries a JSON body, writes and the relay credentials alike (CONTRACT.md §2). A read that ends with no base
+// answering reports the last relay token a base gave (CONTRACT.md §5.9), else Unreachable.
 Reply Exchange(const Transport& transport, const std::vector<std::string>& bases, bool write, std::string_view method,
                const std::string& path, const std::string& body, int expected) {
     Reply reply;
@@ -973,13 +1044,18 @@ Reply Exchange(const Transport& transport, const std::vector<std::string>& bases
     reply.error = Error::Unreachable;  // what the call reports when no base gives an answer
     for (const std::string& base : bases) {
         const Request request{std::string(method), base + path,
-                              write ? std::string("application/json") : std::string(), body};
+                              method == "POST" ? std::string("application/json") : std::string(), body};
         const Response response = transport(request);
         if (!response.ok) {
             continue;
         }
         if (response.status >= 500 && response.status <= 599) {
             if (!write) {
+                const ErrorRow* row = DirectoryError(response.body);
+                if (row != nullptr && row->status == response.status &&
+                    (row->error == Error::TurnUpstream || row->error == Error::TurnUnavailable)) {
+                    reply.error = row->error;
+                }
                 continue;
             }
             reply.error = InternalAnswer(response) ? Error::Internal : Error::Unreachable;
@@ -1100,6 +1176,11 @@ Answer<std::vector<Record>> Client::HostRooms(std::string_view hostKey, uint16_t
     }
     const std::string path = "/v1/hosts/" + std::string(hostKey) + "/rooms";
     return Finish(Exchange(transport_, bases_, false, "GET", ProtocolQuery(path, protocol), "", 200), ReadRoomList);
+}
+
+Answer<TurnGrant> Client::TurnCredentials() const {
+    // Nothing is written, so nothing is signed, and a 5xx moves on to the next base as a read's does (§5.9).
+    return Finish(Exchange(transport_, bases_, false, "POST", "/v1/turn", "{}", 200), ReadTurnGrant);
 }
 
 }  // namespace gdx::net::directory

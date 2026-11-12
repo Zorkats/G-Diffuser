@@ -3408,6 +3408,18 @@ void GdxMenu::RegisterMenu() {
                       "is never shown."))
                   .SearchTerms("discord timer elapsed"));
 
+    // G-NET direct member links (decision 67), read when a room session starts (port/gdx_lan_lobby.cpp).
+    AddWidget("Online", "Overview", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "Direct links to other players", .cVar = "gEnhancements.Online.DirectLinks",
+                          .type = GdxUI::WIDGET_CVAR_CHECKBOX }
+                  .Options(UIWidgets::CheckboxOptions().DefaultValue(true).Tooltip(
+                      "In an online room, send your machine straight to the other players as\n"
+                      "well as through the host, so they see you sooner. This shows your IP\n"
+                      "address to the other players in the room. Off: only the host and the\n"
+                      "relay see it, and races run through the host as before.\n"
+                      "Takes effect in the next room you host or join."))
+                  .ModifiedMarker()
+                  .SearchTerms("g-net direct links peer to peer p2p ip address privacy latency online room"));
     AddWidget("Online", "Overview", SECTION_COLUMN_1,
               WidgetInfo{ .name = "Leaderboards (per course)", .type = GdxUI::WIDGET_COMING_SOON });
     AddWidget("Online", "Overview", SECTION_COLUMN_1,

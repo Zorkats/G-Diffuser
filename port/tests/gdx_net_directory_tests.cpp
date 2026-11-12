@@ -436,6 +436,8 @@ void TestErrorNames() {
     CHECK(std::string(dir::ErrorName(dir::Error::RateLimited)) == "rate_limited");
     CHECK(std::string(dir::ErrorName(dir::Error::Internal)) == "internal");
     CHECK(std::string(dir::ErrorName(dir::Error::BadSignature)) == "bad_signature");
+    CHECK(std::string(dir::ErrorName(dir::Error::TurnUpstream)) == "turn_upstream");
+    CHECK(std::string(dir::ErrorName(dir::Error::TurnUnavailable)) == "turn_unavailable");
 }
 
 // CONTRACT.md §3, code.
@@ -1181,6 +1183,136 @@ void TestRetryAfter() {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Relay credentials (CONTRACT.md §5.9).
+
+const std::string kGrant = "{\"username\":\"u-0f1e2d3c4b5a\",\"password\":\"p/9a8b+7c6d=\",\"ttl\":7200,"
+                           "\"servers\":[\"turn.cloudflare.com:3478\",\"turn.cloudflare.com:443\"]}";
+
+void TestTurnServers() {
+    std::string host = "kept";
+    uint16_t port = 7;
+    CHECK(dir::SplitTurnServer("turn.cloudflare.com:3478", host, port) && host == "turn.cloudflare.com" && port == 3478);
+    CHECK(dir::SplitTurnServer("198.51.100.1:65535", host, port) && host == "198.51.100.1" && port == 65535);
+    CHECK(dir::SplitTurnServer("a:1", host, port) && host == "a" && port == 1);
+    CHECK(dir::SplitTurnServer(std::string(253, 'a') + ":3478", host, port));
+    host = "kept";
+    port = 7;
+    for (const std::string bad : {"", "turn.cloudflare.com", ":3478", "turn.cloudflare.com:", "turn.cloudflare.com:0",
+                                  "turn.cloudflare.com:03478", "turn.cloudflare.com:65536", "turn.cloudflare.com:123456",
+                                  "turn.cloudflare.com:34x8", ".bad:3478", "-bad:3478", "bad-:3478", "a b:3478",
+                                  "[2001:db8::1]:3478", "2001:db8::1:3478", "under_score:3478"}) {
+        CHECK(!dir::SplitTurnServer(bad, host, port));
+    }
+    CHECK(!dir::SplitTurnServer(std::string(254, 'a') + ":3478", host, port));
+    CHECK(host == "kept" && port == 7);
+}
+
+void TestTurnCredentials() {
+    {
+        Stub stub;
+        stub.Script(kBaseA, Json(200, kGrant));
+        const auto answer = ClientOver(stub, {kBaseA}).TurnCredentials();
+        CHECK(answer.error == dir::Error::None);
+        CHECK(answer.value.username == "u-0f1e2d3c4b5a");
+        CHECK(answer.value.password == "p/9a8b+7c6d=");
+        CHECK(answer.value.ttl == 7200);
+        CHECK(answer.value.servers == std::vector<std::string>({"turn.cloudflare.com:3478", "turn.cloudflare.com:443"}));
+        CHECK(stub.seen.size() == 1);
+        CHECK(Nth(stub, 0).method == "POST");
+        CHECK(Nth(stub, 0).url == kBaseA + "/v1/turn");
+        CHECK(Nth(stub, 0).contentType == "application/json");
+        CHECK(Nth(stub, 0).body == "{}"); // nothing is written, so nothing is signed
+    }
+    {
+        // No signer is needed.
+        Stub stub;
+        stub.Script(kBaseA, Json(200, kGrant));
+        const dir::Client unsigned_(std::vector<std::string>{kBaseA}, stub.MakeTransport());
+        CHECK(unsigned_.TurnCredentials().error == dir::Error::None);
+    }
+    struct Case {
+        dir::Response a;
+        dir::Response b;
+        dir::Error want;
+        std::size_t calls;
+    };
+    const Case cases[] = {
+        {Refusal(503, "turn_unavailable"), Down(), dir::Error::TurnUnavailable, 2},
+        {Refusal(502, "turn_upstream"), Down(), dir::Error::TurnUpstream, 2},
+        {Down(), Refusal(503, "turn_unavailable"), dir::Error::TurnUnavailable, 2},
+        {Refusal(503, "turn_unavailable"), Refusal(502, "turn_upstream"), dir::Error::TurnUpstream, 2},
+        {Refusal(503, "turn_unavailable"), Json(200, kGrant), dir::Error::None, 2},
+        {Refusal(502, "turn_upstream"), Json(200, kGrant), dir::Error::None, 2},
+        {Down(), Down(), dir::Error::Unreachable, 2},
+        {Refusal(500, "internal"), Down(), dir::Error::Unreachable, 2},
+        // A token on a status it does not carry is not a relay answer.
+        {Refusal(503, "turn_upstream"), Down(), dir::Error::Unreachable, 2},
+        {Refusal(502, "internal"), Down(), dir::Error::Unreachable, 2},
+        {Refusal(429, "rate_limited", "17"), Json(200, kGrant), dir::Error::RateLimited, 1},
+        {Refusal(400, "bad_field"), Json(200, kGrant), dir::Error::BadField, 1},
+        {Refusal(503, "turn_unavailable"), Refusal(400, "bad_json"), dir::Error::BadJson, 2},
+    };
+    for (const Case& c : cases) {
+        Stub stub;
+        stub.Script(kBaseA, c.a);
+        stub.Script(kBaseB, c.b);
+        const auto answer = ClientOver(stub, {kBaseA, kBaseB}).TurnCredentials();
+        CHECK(answer.error == c.want);
+        CHECK(stub.seen.size() == c.calls);
+        CHECK((answer.error == dir::Error::None) == !answer.value.username.empty());
+        CHECK(answer.error != dir::Error::RateLimited || answer.retryAfterSeconds == 17);
+    }
+    // Answers that break §5.9 are Malformed, and their value stays empty.
+    const std::string servers = "\"servers\":[\"turn.cloudflare.com:3478\"]";
+    std::string nine = "\"servers\":[";
+    for (int i = 0; i < 9; i++) {
+        nine += (i ? ",\"t" : "\"t") + std::to_string(i) + ".example:3478\"";
+    }
+    nine += "]";
+    const std::string malformed[] = {
+        "{}",
+        "{\"username\":\"u\",\"password\":\"p\",\"ttl\":7199," + servers + "}",
+        "{\"username\":\"u\",\"password\":\"p\",\"ttl\":7200," + servers + ",\"x\":1}",
+        "{\"username\":\"u\",\"password\":\"p\",\"ttl\":7200}",
+        "{\"username\":\"\",\"password\":\"p\",\"ttl\":7200," + servers + "}",
+        "{\"username\":\"u\",\"password\":\"" + std::string(513, 'p') + "\",\"ttl\":7200," + servers + "}",
+        "{\"username\":1,\"password\":\"p\",\"ttl\":7200," + servers + "}",
+        "{\"username\":\"u\",\"password\":\"p\",\"ttl\":7200,\"servers\":[]}",
+        "{\"username\":\"u\",\"password\":\"p\",\"ttl\":7200," + nine + "}",
+        "{\"username\":\"u\",\"password\":\"p\",\"ttl\":7200,\"servers\":[\"turn.cloudflare.com\"]}",
+        "{\"username\":\"u\",\"password\":\"p\",\"ttl\":7200,\"servers\":[3478]}",
+        "{\"username\":\"u\",\"password\":\"p\",\"ttl\":7200,\"servers\":\"turn.cloudflare.com:3478\"}",
+    };
+    for (const std::string& body : malformed) {
+        Stub stub;
+        stub.Script(kBaseA, Json(200, body));
+        const auto answer = ClientOver(stub, {kBaseA}).TurnCredentials();
+        CHECK(answer.error == dir::Error::Malformed);
+        CHECK(answer.value.username.empty() && answer.value.servers.empty());
+    }
+    {
+        // The limits themselves pass: 512 characters, 8 servers.
+        std::string eight = "\"servers\":[";
+        for (int i = 0; i < 8; i++) {
+            eight += (i ? ",\"t" : "\"t") + std::to_string(i) + ".example:3478\"";
+        }
+        eight += "]";
+        Stub stub;
+        stub.Script(kBaseA, Json(200, "{\"username\":\"" + std::string(512, 'u') + "\",\"password\":\"p\",\"ttl\":7200," +
+                                          eight + "}"));
+        const auto answer = ClientOver(stub, {kBaseA}).TurnCredentials();
+        CHECK(answer.error == dir::Error::None && answer.value.servers.size() == 8);
+    }
+    // Reads still go out without a content type, writes with one.
+    {
+        Stub stub;
+        stub.Script(kBaseA, Json(200, "{\"room\":null}"));
+        ClientOver(stub, {kBaseA}).QuickRace(3);
+        CHECK(stub.seen.size() == 1 && Nth(stub, 0).contentType.empty());
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // Failover (the policy in gdx_net_directory.h).
 
 void TestFailover() {
@@ -1674,6 +1806,8 @@ int main() {
     TestListsAndQuick();
     TestErrorTokens();
     TestRetryAfter();
+    TestTurnServers();
+    TestTurnCredentials();
     TestFailover();
     TestJsonFuzz();
     TestJsonRoundTrip();

@@ -104,6 +104,7 @@ struct OnlineSetup {
     std::vector<Bytes32> friends;
     std::optional<Bytes32> expectHost; // Join: the host key the directory gave for the room
     bool localTest = false;            // a local test directory is set: a successor on loopback may be dialed
+    bool directLinks = true;           // gEnhancements.Online.DirectLinks (decision 67)
 };
 
 struct Command {
@@ -378,6 +379,63 @@ void LogRaceUpload(const LobbyHost& host, bool racing, const std::vector<PlayerI
                   "host, %.1f per link, %.1f datagrams/s per link%s\n",
                   seconds, totals.links, roster.size(), watchers, kbit, kbit / links, datagrams / links,
                   totals.links != upload.at.links ? " (links changed during the race)" : "");
+}
+
+// Decision 66: how each other racer's poses reached this member over the race, logged when it ends. A pose
+// counts for the path it came by first; the age is the host clock on arrival minus the host clock at its tick.
+void LogRacePaths(const LobbyClient& client, bool racing, bool& wasRacing) {
+    if (racing == wasRacing) {
+        return;
+    }
+    wasRacing = racing;
+    Grid grid;
+    const PosePathStats& stats = client.PathStats();
+    if (racing || !client.RaceGrid(grid) || stats.raceIndex != grid.raceIndex) {
+        return;
+    }
+    const auto mean = [&](size_t slot, size_t path) {
+        return stats.aged[slot][path] > 0 ? static_cast<long long>(stats.ageSumMs[slot][path] / stats.aged[slot][path])
+                                          : -1LL;
+    };
+    for (size_t slot = 0; slot < grid.humans.size() && slot < kGridSlots; slot++) {
+        if (grid.humans[slot].id == client.LocalId()) {
+            continue;
+        }
+        const auto& first = stats.first[slot];
+        gdx_port_logf("[lan] race %u poses of slot %zu (player %u): first by host %u, direct %u, relay %u; mean age "
+                      "host %lld ms, direct %lld ms, relay %lld ms (-1: none)\n",
+                      static_cast<unsigned>(grid.raceIndex), slot, static_cast<unsigned>(grid.humans[slot].id),
+                      first[kPathHost], first[kPathDirect], first[kPathRelay], mean(slot, kPathHost),
+                      mean(slot, kPathDirect), mean(slot, kPathRelay));
+    }
+    const net::links::LinkStats& link = client.Links().Stats();
+    gdx_port_logf("[lan] direct links: %zu peers, %u punches and %u pose datagrams sent, %u refused; poses taken "
+                  "by LAN %u, public %u, relay %u\n",
+                  client.Links().PeerCount(), link.punchesSent, link.posesSent, link.refused,
+                  link.posesReceived[static_cast<size_t>(net::links::PathKind::Lan)],
+                  link.posesReceived[static_cast<size_t>(net::links::PathKind::Public)],
+                  link.posesReceived[static_cast<size_t>(net::links::PathKind::Relay)]);
+}
+
+// Decisions 67 and 68: what the host may tell the other members about reaching this copy. With direct links off
+// that is nothing; on, this copy's addresses on its own networks with the room socket's port, IPv4 first. The
+// host gives those only to a member behind the same public address.
+PathsInfo OwnPaths(bool direct, uint16_t port) {
+    PathsInfo paths;
+    paths.direct = direct;
+    if (!direct) {
+        return paths;
+    }
+    std::vector<NetAddress> all = net::host_info::LocalAddresses();
+    std::stable_partition(all.begin(), all.end(), [](const NetAddress& a) { return net::IsMappedV4(a.ip); });
+    for (NetAddress address : all) {
+        if (paths.lan.size() >= kPeerLanMax) {
+            break;
+        }
+        address.port = port;
+        paths.lan.push_back(net::links::EndpointOf(address));
+    }
+    return paths;
 }
 
 void RunHostCommand(LobbyHost& host, const Command& cmd, uint32_t now) {
@@ -673,10 +731,34 @@ void Run(Kind kind, std::shared_ptr<UdpSocket> socket, uint16_t port, LocalProfi
     // O7.3: every client signs its Join with the profile's friend key, and one that joins a directory room checks
     // the host's key against the one the directory gave. The directory takes a record only when its key signed the
     // write (decision 53), so a host cannot list a room under another player's key.
+    // livePaths is ownPaths plus the relay address while this copy has one.
+    const PathsInfo ownPaths = OwnPaths(online.directLinks, socket->LocalPort());
+    PathsInfo livePaths = ownPaths;
+    gdx_port_logf("[lan] direct links %s, %zu LAN addresses to offer\n", online.directLinks ? "on" : "off",
+                  ownPaths.lan.size());
+    // Decisions 69, 70, 72: a member of a directory room allocates a TURN relay address on its socket, so a member
+    // it cannot reach directly still gets its poses by the shorter way. Like reach, it starts once the room's
+    // type is known, lasts through a rejoin, and is released when the member hosts or leaves.
+    std::unique_ptr<online::MemberRelay> relay;
+    std::vector<NetAddress> relayPeers;
+    const auto releaseRelay = [&]() {
+        if (relay) {
+            relay->Release();
+            relay.reset();
+        }
+        relayPeers.clear();
+        livePaths = ownPaths;
+    };
     const auto makeClient = [&](const NetAddress& addr) {
         auto made = std::make_unique<LobbyClient>(build, me, seat, addr, RandomNonce(), send, store);
         made->SetSigner(SignerFor(online));
         made->AllowLoopback(online.localTest);
+        made->SetPaths(livePaths);
+        made->SetRelaySend([&relay](const NetAddress& to, const uint8_t* data, size_t len) {
+            if (relay) {
+                relay->SendTo(to, data, len);
+            }
+        });
         if (online.expectHost) {
             made->ExpectHostKey(*online.expectHost);
         }
@@ -763,6 +845,7 @@ void Run(Kind kind, std::shared_ptr<UdpSocket> socket, uint16_t port, LocalProfi
             host->SetMirrorKeys(client->Keys()); // the members' keys, so a ban still finds them
             host->SetBans(client->Bans());       // decision 52: the old host's bans last as long as the room
             releaseReach(now);                   // the listing gathers again, and maps the port for the room
+            releaseRelay();                      // a host relays poses itself and has no member links
             gdx_port_logf("[lan] %s is gone; hosting the room on port %u\n", net::host_info::LogText(hostAddr).c_str(),
                           static_cast<unsigned>(port));
             client.reset();
@@ -778,6 +861,13 @@ void Run(Kind kind, std::shared_ptr<UdpSocket> socket, uint16_t port, LocalProfi
             auto next = std::make_unique<LobbyClient>(build, me, seat, plan.address, RandomNonce(), send, store);
             next->SetSigner(SignerFor(online));
             next->AllowLoopback(online.localTest);
+            next->SetPaths(livePaths);
+            next->SetRelaySend([&relay](const NetAddress& to, const uint8_t* data, size_t len) {
+                if (relay) {
+                    relay->SendTo(to, data, len);
+                }
+            });
+            relayPeers.clear(); // the peers stay bound until the new host's Peers name them again
             if (!next->SetRejoin(plan)) {
                 return false;
             }
@@ -808,6 +898,7 @@ void Run(Kind kind, std::shared_ptr<UdpSocket> socket, uint16_t port, LocalProfi
         v.lineSerial = lineSerial;
     };
     RaceUpload upload;
+    bool memberRacing = false;            // the race phase as LogRacePaths last saw it
     uint32_t loggedLottery = 0xFFFFFFFFu; // the race whose lottery a member last logged
 
     while (!ctl->stop.load()) {
@@ -889,6 +980,11 @@ void Run(Kind kind, std::shared_ptr<UdpSocket> socket, uint16_t port, LocalProfi
             if (reach && reach->Receive(from, buffer.data(), len, now)) {
                 continue;
             }
+            // After listing and reach: the STUN and TURN servers may share an address, and each takes only the
+            // answers to its own requests.
+            if (relay && relay->Receive(from, buffer.data(), len, now)) {
+                continue;
+            }
             if (browser) {
                 browser->Receive(from, buffer.data(), len, now);
             } else if (host) {
@@ -921,6 +1017,33 @@ void Run(Kind kind, std::shared_ptr<UdpSocket> socket, uint16_t port, LocalProfi
                         reachLogged = true;
                         gdx_port_logf("[lan] reachable from outside: %s\n", reach->Reachable() ? "yes" : "no");
                     }
+                }
+            }
+            if (!relay && !online.bases.empty() && client->GetState() == LobbyClient::State::Joined &&
+                client->Room(now).type != RoomType::Lan) {
+                online::RelayOptions options;
+                options.bases = online.bases;
+                relay = std::make_unique<online::MemberRelay>(
+                    std::move(options), send,
+                    [&client](const NetAddress& peer, const uint8_t* data, size_t len, uint32_t at) {
+                        if (client) {
+                            client->ReceiveRelay(peer, data, len, at);
+                        }
+                    });
+            }
+            if (relay) {
+                relay->Update(now);
+                const std::optional<NetAddress> relayed = relay->Relayed();
+                const PeerEndpoint want = relayed ? net::links::EndpointOf(*relayed) : PeerEndpoint();
+                if (!(want == livePaths.relay)) {
+                    livePaths.relay = want;
+                    client->SetPaths(livePaths);
+                    gdx_port_logf("[lan] relay address %s\n", relayed ? "offered to the room" : "withdrawn");
+                }
+                std::vector<NetAddress> peers = client->Links().RelayAddresses();
+                if (peers != relayPeers) {
+                    relay->SetPeers(peers, now);
+                    relayPeers = std::move(peers);
                 }
             }
         }
@@ -1041,6 +1164,7 @@ void Run(Kind kind, std::shared_ptr<UdpSocket> socket, uint16_t port, LocalProfi
                 closedView.joinCode = joinCode;
                 publish(std::move(closedView));
                 releaseReach(now);
+                releaseRelay();
                 socket->Close();
                 return;
             }
@@ -1052,6 +1176,7 @@ void Run(Kind kind, std::shared_ptr<UdpSocket> socket, uint16_t port, LocalProfi
             v.votes = client->Votes();
             v.lottery = client->Lottery();
             v.lotteryChecked = client->LotteryChecked();
+            LogRacePaths(*client, v.room.phase == Phase::Racing, memberRacing);
             if (v.room.phase == Phase::Lottery && loggedLottery != v.room.raceIndex) {
                 loggedLottery = v.room.raceIndex;
                 gdx_port_logf("[lan] race %u lottery: %zu ballots, %s, %s\n", static_cast<unsigned>(v.room.raceIndex),
@@ -1076,6 +1201,7 @@ void Run(Kind kind, std::shared_ptr<UdpSocket> socket, uint16_t port, LocalProfi
 
     const uint32_t now = NowMs();
     releaseReach(now);
+    releaseRelay();
     if (listing) {
         // A host that closes the room ends it, so its record goes too. A silent stop or a handover leaves the record
         // for the successor to take over; it runs out in 180 s otherwise.
@@ -1218,6 +1344,7 @@ OnlineSetup ReadOnlineSetup(bool needKey) {
     setup.stun = online::StunServers();
     setup.advertise = online::AdvertiseAddress();
     setup.localTest = online::LocalTestDirectory();
+    setup.directLinks = online::DirectLinks();
     if (needKey || gdx_profile_state_active_has_seed() != 0) {
         auto seed = std::make_shared<JoinSeed>();
         if (online::ActiveSeed(seed->bytes) == GDX_PROFILE_OK && online::HostKey(setup.hostKey) &&

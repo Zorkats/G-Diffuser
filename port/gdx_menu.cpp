@@ -581,6 +581,8 @@ GdxMenu::GdxMenu() : Ship::GuiWindow("gOpenMenuBar", false, "G-Diffuser Menu") {
     CVarRegisterInteger("gEnhancements.Online.DiscordShowPosition", 1);
     CVarRegisterInteger("gEnhancements.Online.DiscordShowMode", 1);
     CVarRegisterInteger("gEnhancements.Online.DiscordShowTimer", 1);
+    // G-NET direct member links (decision 67): on by default; off keeps this copy's address from other members.
+    CVarRegisterInteger("gEnhancements.Online.DirectLinks", 1);
 
     // GAMEPLAY. Stock F-Zero X already commits the NUMERIC records to SRAM on finish
     // (menus.c:252-268), so AutosaveOnRecord adds only auto-persisting the best GHOST replay, which

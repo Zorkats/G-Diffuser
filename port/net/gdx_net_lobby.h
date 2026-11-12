@@ -90,6 +90,17 @@
 //                                         member who has one, ids unique and ascending
 //   37 Reach          client to host      u8 0 or 1: the member's gathering finished after it joined, or it
 //                                         came back to a promoted host, and this is what it found (decision 51)
+//   38 Peers          host to one member  u8 count (at most kPeersPerMessage), count x { u8 id, 32 bytes pair
+//                                         secret, endpoint public, endpoint relay, u8 LAN count (at most
+//                                         kPeerLanMax), LAN count x endpoint }. An endpoint is 16 bytes address
+//                                         as in Room and u16 port, all zero for none. Each entry adds or replaces
+//                                         the link to that member (decisions 62, 63, 73); an entry with a zero
+//                                         secret and no endpoint forgets it. The public endpoint is zero when that
+//                                         member turned direct links off, and LAN endpoints go only to members
+//                                         behind the same public address (decisions 67, 68)
+//   39 Paths          client to host      endpoint relay (the member's TURN relay address, zero for none), u8 LAN
+//                                         count (at most kPeerLanMax), LAN count x endpoint, u8 direct (0 or 1:
+//                                         the member's DirectLinks setting). Sent on join and on every change
 //
 // Discovery datagrams travel outside the channel, on the same socket. They start with "GDXL", which the
 // channel never sends (its packets start with "GD" and a type byte from 0 to 5), so the host tells them
@@ -265,6 +276,8 @@ enum MessageType : uint8_t {
     kMsgNonce = 35,
     kMsgKeys = 36,
     kMsgReach = 37,
+    kMsgPeers = 38,
+    kMsgPaths = 39,
 };
 
 // Wire values. Never renumber them.
@@ -680,6 +693,59 @@ struct RaceState {
 // True when every number of the pose is one a machine can have: see the limits above.
 bool StatePoseOk(const StatePose& pose);
 
+// Direct member links (decisions 61 to 73). An address and port another copy can send to. All zero is "none".
+struct PeerEndpoint {
+    IpBytes ip{};
+    uint16_t port = 0;
+
+    bool None() const {
+        return port == 0 && IsZeroIp(ip);
+    }
+
+    bool operator==(const PeerEndpoint& o) const {
+        return ip == o.ip && port == o.port;
+    }
+    bool operator!=(const PeerEndpoint& o) const {
+        return !(*this == o);
+    }
+};
+
+// LAN addresses one member reports, and the most a Peers entry carries.
+constexpr size_t kPeerLanMax = 4;
+constexpr size_t kPeerEndpointBytes = 16 + 2;
+constexpr size_t kPeerEntryMaxBytes = 1 + 32 + 2 * kPeerEndpointBytes + 1 + kPeerLanMax * kPeerEndpointBytes;
+// Entries one Peers message holds, so the longest one still fits the channel. A host with more peers to
+// describe sends several.
+constexpr size_t kPeersPerMessage = (kMaxMessagePayload - 1) / kPeerEntryMaxBytes;
+
+// One other member, as the host describes it to this one.
+struct PeerEntry {
+    uint8_t id = 0;
+    Bytes32 secret{};      // the pair's MAC key; all zero with no endpoint: forget this member
+    PeerEndpoint pub;      // as the host's socket sees the member; none when it turned direct links off
+    PeerEndpoint relay;    // its TURN relay address; none without one
+    std::vector<PeerEndpoint> lan; // only when both sit behind the same public address
+
+    bool Forget() const {
+        return IsZero32(secret);
+    }
+
+    bool operator==(const PeerEntry& o) const {
+        return id == o.id && secret == o.secret && pub == o.pub && relay == o.relay && lan == o.lan;
+    }
+};
+
+// What a member tells the host about the ways other members may reach it.
+struct PathsInfo {
+    PeerEndpoint relay;
+    std::vector<PeerEndpoint> lan;
+    bool direct = true; // gEnhancements.Online.DirectLinks
+
+    bool operator==(const PathsInfo& o) const {
+        return relay == o.relay && lan == o.lan && direct == o.direct;
+    }
+};
+
 // Wire values, and the order of a results table: finishers, then those still driving when the race
 // ended, then those who retired.
 enum class ResultKind : uint8_t {
@@ -814,6 +880,9 @@ std::vector<uint8_t> EncodeRejoin(const Rejoin& rejoin);
 std::vector<uint8_t> EncodeNonce(const JoinNonce& nonce);
 std::vector<uint8_t> EncodeKeys(const std::vector<MemberKey>& keys);
 std::vector<uint8_t> EncodeReach(bool reachable);
+// Writes at most kPeersPerMessage entries and kPeerLanMax LAN endpoints each: a longer list is the caller's to split.
+std::vector<uint8_t> EncodePeers(const std::vector<PeerEntry>& peers);
+std::vector<uint8_t> EncodePaths(const PathsInfo& paths);
 
 bool DecodeJoin(const uint8_t* data, size_t len, JoinRequest& out);
 bool DecodeWelcome(const uint8_t* data, size_t len, uint8_t& out);
@@ -877,6 +946,12 @@ bool DecodeNonce(const uint8_t* data, size_t len, JoinNonce& out);
 bool DecodeKeys(const uint8_t* data, size_t len, std::vector<MemberKey>& out);
 // A u8 0 or 1, nothing after it.
 bool DecodeReach(const uint8_t* data, size_t len, bool& out);
+// One to kPeersPerMessage entries, ids unique, ascending, from 1 to kMaxPlayers - 1. An entry is either a forget
+// (zero secret, no endpoint) or a secret with at least one endpoint. Every endpoint present is DialableIp with
+// loopback allowed (a room of copies on one machine); whether to use it is the links' check.
+bool DecodePeers(const uint8_t* data, size_t len, std::vector<PeerEntry>& out);
+// A relay endpoint that is none or dialable, at most kPeerLanMax dialable LAN endpoints, direct 0 or 1.
+bool DecodePaths(const uint8_t* data, size_t len, PathsInfo& out);
 
 // Discovery.
 bool IsDiscovery(const uint8_t* data, size_t len);

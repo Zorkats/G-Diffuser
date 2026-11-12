@@ -39,6 +39,9 @@ std::vector<std::string> DirectoryBases();
 bool DirectoryConfigured();
 // Whether the developer's local test directory (GDX_NET_DEV_DIRECTORY) is set: loopback addresses may be dialed.
 bool LocalTestDirectory();
+// gEnhancements.Online.DirectLinks (decision 67): on, the host may give this copy's public and LAN addresses to the
+// other members; off, it never does.
+bool DirectLinks();
 // The STUN servers, "name:port" each (decision 28): gEnhancements.Online.StunServers, comma-separated.
 std::vector<std::string> StunServers();
 // The address the player lists in place of their own (O5.11), or none. gEnhancements.Online.Advertise; port 0
@@ -159,6 +162,52 @@ public:
     bool Reachable() const;
     // The member leaves the room or hosts it now: deletes the port mapping. Nothing is sent afterwards.
     void Release(uint32_t now);
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+// ---- A member's relay allocation (decisions 69, 70, 72) ----
+
+// A member of a directory room asks the directory for Cloudflare TURN credentials (CONTRACT.md §5.9) and allocates
+// a relay address on its own room socket, so a member it cannot reach directly may still get its poses by the
+// shorter way. The credentials and the server's address are fetched on a helper thread; the allocation runs on the
+// worker's tick.
+//
+// A failed fetch or allocation is tried again after kRelayRetryFirstMs, doubling up to kRelayRetryMaxMs, and
+// after the directory's Retry-After when it is busy. A directory with no relay (turn_unavailable) is not asked
+// again this session. The credentials last two hours; the allocation ends when the server refuses a refresh with
+// them, and a new one starts with new credentials, under a new relay address.
+constexpr uint32_t kRelayRetryFirstMs = 15000;
+constexpr uint32_t kRelayRetryMaxMs = 300000;
+
+struct RelayOptions {
+    std::vector<std::string> bases;
+};
+
+class MemberRelay {
+public:
+    // What the relay delivered: a datagram a peer's relay address sent to this copy's.
+    using Deliver = std::function<void(const net::NetAddress& peer, const uint8_t* data, size_t len, uint32_t now)>;
+
+    MemberRelay(RelayOptions options, net::gather::Send send, Deliver deliver);
+    ~MemberRelay();
+    MemberRelay(const MemberRelay&) = delete;
+    MemberRelay& operator=(const MemberRelay&) = delete;
+
+    // Starts the allocation once the credentials are in, keeps it refreshed, and starts again after a failure.
+    void Update(uint32_t now);
+    // true when the datagram came from the TURN server and was TURN traffic; the room never sees it then.
+    bool Receive(const net::NetAddress& from, const uint8_t* data, size_t len, uint32_t now);
+    // The peers' relay addresses (links::PeerLinks::RelayAddresses). Kept across allocations.
+    void SetPeers(const std::vector<net::NetAddress>& peers, uint32_t now);
+    // false while there is no allocation, or the peer is not bound or permitted yet.
+    bool SendTo(const net::NetAddress& peer, const uint8_t* data, size_t len);
+    // This copy's relay address while the allocation stands.
+    std::optional<net::NetAddress> Relayed() const;
+    // The member leaves the room or hosts it now: ends the allocation. Nothing is sent afterwards.
+    void Release();
 
 private:
     struct Impl;

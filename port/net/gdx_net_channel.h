@@ -44,10 +44,11 @@ constexpr size_t kUnreliableOutCap = 64; // unreliable messages waiting for the 
 // lottery commitment and its reveal, and the directory takeover secret for the successor (O6.1, O6.4, O5.10); 8 adds
 // the join proof: the host's nonce, the joiner's friend key and signature in Join, and the members' keys (O7.3); 9 adds
 // reachability (the reachable flag in Join and the Reach message) and the bans in the handover table (decisions 50
-// to 52). A peer on another version is refused
+// to 52); 10 adds direct member links and the relay paths (the Peers and Paths messages and the GDXP datagram,
+// decisions 61 to 73). A peer on another version is refused
 // with VersionMismatch. Since O5.1 this number alone decides who may join, not the build string (decision 25), so
 // a change to any message or to the track encoding must bump it.
-constexpr uint16_t kProtocolVersion = 9;
+constexpr uint16_t kProtocolVersion = 10;
 
 enum class Role : uint8_t {
     Client,
