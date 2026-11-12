@@ -451,6 +451,7 @@ gdx_add_main_target(G-Diffuser
     net/gdx_net_room.cpp           # O3 room state machine: vote, lottery, pick, lock-in and the phase timers
     gdx_net_machine_select.c       # O3 lock-in screen: when the stock machine screens belong to the room
     gdx_net_race_box.c             # O3 room race: the quit box every racer has (continue, return to room, leave the room)
+    gdx_net_race_words.c           # O3 room race: the quit box words as stock-style CI textures (original art)
     gdx_net_room_screen.c          # O3 room screen of the main menu: pages, cursor and the texts to draw
     gdx_net_text.c                 # O3 room screens: text the two stock fonts can draw, wrapping and the timer
     gdx_net_track_choice.c         # O3 vote and pick: when the stock course select belongs to the room, and its lines
@@ -1646,7 +1647,8 @@ endif()
 # closes it, the cursor, and what each row does. The room and the race are the five functions the test supplies.
 add_executable(gdx_net_race_box_tests
     tests/gdx_net_race_box_tests.c
-    gdx_net_race_box.c)
+    gdx_net_race_box.c
+    gdx_net_race_words.c)
 target_include_directories(gdx_net_race_box_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 if(MSVC)
     target_compile_options(gdx_net_race_box_tests PRIVATE /W3)
@@ -2016,6 +2018,7 @@ if(GDX_BUILD_JP AND NOT ANDROID)
         net/gdx_net_room.cpp
         gdx_net_machine_select.c
         gdx_net_race_box.c
+        gdx_net_race_words.c
         gdx_net_room_screen.c
         gdx_net_text.c
         gdx_net_track_choice.c

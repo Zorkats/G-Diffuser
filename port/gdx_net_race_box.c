@@ -2,6 +2,7 @@
  * Copyright (c) Zorkats */
 
 #include "gdx_net_race_box.h"
+#include "gdx_net_race_words.h"
 
 #include "gdx_net_race_room.h"
 #include "gdx_net_room_screen.h"
@@ -162,6 +163,20 @@ const char* gdx_net_race_box_text(int row) {
             return "RETURN TO ROOM";
         default:
             return "LEAVE THE ROOM";
+    }
+}
+
+int gdx_net_race_box_word(int row) {
+    if (row < 0 || row >= sRows) {
+        return GDX_NET_RACE_WORD_NONE;
+    }
+    switch (row) {
+        case ROW_STAY:
+            return sOwn == OWN_DRIVES ? GDX_NET_RACE_WORD_CONTINUE : GDX_NET_RACE_WORD_WATCH;
+        case ROW_ROOM:
+            return GDX_NET_RACE_WORD_RETURN_TO_ROOM;
+        default:
+            return GDX_NET_RACE_WORD_LEAVE_THE_ROOM;
     }
 }
 

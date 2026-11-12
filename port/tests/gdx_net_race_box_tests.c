@@ -1,13 +1,14 @@
 /* port/tests/gdx_net_race_box_tests.c -- unit tests for the quit box of a room's race (gdx_net_race_box.h).
  * Copyright (c) Zorkats
  *
- * Standalone: links gdx_net_race_box.c only. The room and the race are the five functions below. Expected
+ * Standalone: links gdx_net_race_box.c and gdx_net_race_words.c. The room and the race are the five functions below. Expected
  * values are written out by hand from the header.
  *
  * The module keeps the box between calls, so every test starts from a reset and a race number of its own.
  */
 
 #include "../gdx_net_race_box.h"
+#include "../gdx_net_race_words.h"
 #include "../gdx_net_race_room.h"
 #include "../gdx_net_room_view.h"
 
@@ -550,7 +551,114 @@ static void test_words_fit_the_small_font(void) {
     CHECK(GDX_NET_RACE_BOX_ROWS == 3);
 }
 
-int main(void) {
+/* Each row names the texture it draws, and it agrees with the row's text. */
+static void test_each_row_names_its_word(void) {
+    int row;
+
+    racing(40, 0);
+    CHECK(gdx_net_race_box_word(0) == GDX_NET_RACE_WORD_NONE);
+    open_ready();
+    CHECK(gdx_net_race_box_word(0) == GDX_NET_RACE_WORD_CONTINUE);
+    CHECK(gdx_net_race_box_word(1) == GDX_NET_RACE_WORD_RETURN_TO_ROOM);
+    CHECK(gdx_net_race_box_word(2) == GDX_NET_RACE_WORD_LEAVE_THE_ROOM);
+    CHECK(gdx_net_race_box_word(3) == GDX_NET_RACE_WORD_NONE);
+    CHECK(gdx_net_race_box_word(-1) == GDX_NET_RACE_WORD_NONE);
+    sOwnState = FINISHED;
+    CHECK(idle() == GDX_NET_RACE_BOX_NOTHING);
+    CHECK(gdx_net_race_box_word(0) == GDX_NET_RACE_WORD_WATCH);
+    sOwnState = OUT;
+    CHECK(idle() == GDX_NET_RACE_BOX_NOTHING);
+    CHECK(gdx_net_race_box_word(0) == GDX_NET_RACE_WORD_WATCH);
+
+    racing(41, 1);
+    open_ready();
+    CHECK(gdx_net_race_box_word(0) == GDX_NET_RACE_WORD_CONTINUE);
+    CHECK(gdx_net_race_box_word(1) == GDX_NET_RACE_WORD_RETURN_TO_ROOM);
+    CHECK(gdx_net_race_box_word(2) == GDX_NET_RACE_WORD_NONE);
+
+    for (row = 0; row < gdx_net_race_box_rows(); row++) {
+        const char* text = gdx_net_race_box_text(row);
+        const int word = gdx_net_race_box_word(row);
+
+        CHECK((word == GDX_NET_RACE_WORD_CONTINUE) == (strcmp(text, "CONTINUE") == 0));
+        CHECK((word == GDX_NET_RACE_WORD_RETURN_TO_ROOM) == (strcmp(text, "RETURN TO ROOM") == 0));
+    }
+}
+
+/* The art: the sizes, only indices the legend has, the stock blank rows above and below the letters, and
+ * one buffer per word, decoded once. */
+static void test_the_word_art(void) {
+    static const int kWords[3] = { GDX_NET_RACE_WORD_WATCH, GDX_NET_RACE_WORD_RETURN_TO_ROOM,
+                                   GDX_NET_RACE_WORD_LEAVE_THE_ROOM };
+    static const int kWidths[3] = { 40, 64, 64 };
+    int i;
+    int w = -1;
+    int h = -1;
+
+    CHECK(gdx_net_race_words_faults() == 0);
+    CHECK(gdx_net_race_words_texture(GDX_NET_RACE_WORD_CONTINUE, &w, &h) == NULL);
+    CHECK(w == -1 && h == -1);
+    CHECK(gdx_net_race_words_texture(GDX_NET_RACE_WORD_NONE, &w, &h) == NULL);
+    CHECK(gdx_net_race_words_texture(GDX_NET_RACE_WORD_COUNT, NULL, NULL) == NULL);
+    for (i = 0; i < 3; i++) {
+        const unsigned char* tex = gdx_net_race_words_texture(kWords[i], &w, &h);
+        int inked = 0;
+        int x;
+        int y;
+
+        CHECK(tex != NULL);
+        if (tex == NULL) {
+            continue;
+        }
+        CHECK(w == kWidths[i] && h == 16);
+        CHECK(((unsigned long) (size_t) tex & 7u) == 0);
+        CHECK(gdx_net_race_words_texture(kWords[i], NULL, NULL) == tex);
+        for (y = 0; y < h; y++) {
+            for (x = 0; x < w; x++) {
+                const unsigned char c = tex[y * w + x];
+
+                CHECK(c == 0 || c == 1 || c == 2 || c == 4 || c == 5 || c == 7 || c == 11 || c == 12 || c == 16);
+                if (y < 3 || y > 12) {
+                    CHECK(c == 0);
+                }
+                inked += c != 0;
+            }
+        }
+        /* Every word has white letter cores and dark rims. */
+        CHECK(inked > w * 3);
+        CHECK(memchr(tex, 5, (size_t) (w * h)) != NULL);
+        CHECK(memchr(tex, 1, (size_t) (w * h)) != NULL);
+    }
+}
+
+/* --dump prints each word's palette indices, one row per line, for a comparison with the art's source. */
+static void dump_words(void) {
+    static const int kWords[3] = { GDX_NET_RACE_WORD_RETURN_TO_ROOM, GDX_NET_RACE_WORD_LEAVE_THE_ROOM,
+                                   GDX_NET_RACE_WORD_WATCH };
+    int i;
+
+    for (i = 0; i < 3; i++) {
+        int w;
+        int h;
+        const unsigned char* tex = gdx_net_race_words_texture(kWords[i], &w, &h);
+        int x;
+        int y;
+
+        printf("word %d %dx%d\n", kWords[i], w, h);
+        for (y = 0; y < h; y++) {
+            for (x = 0; x < w; x++) {
+                printf(x == 0 ? "%d" : " %d", tex[y * w + x]);
+            }
+            printf("\n");
+        }
+    }
+}
+
+int main(int argc, char** argv) {
+    if (argc > 1 && strcmp(argv[1], "--dump") == 0) {
+        dump_words();
+        return 0;
+    }
     test_closed_until_start();
     test_start_opens_it();
     test_the_host_has_two_rows();
@@ -571,6 +679,8 @@ int main(void) {
     test_a_box_of_another_race_is_not_this_ones();
     test_reset_closes_it();
     test_words_fit_the_small_font();
+    test_each_row_names_its_word();
+    test_the_word_art();
     if (sFailures != 0) {
         printf("gdx_net_race_box_tests: %d of %d checks failed\n", sFailures, sChecks);
         return 1;

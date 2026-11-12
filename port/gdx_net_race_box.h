@@ -71,6 +71,10 @@ int gdx_net_race_box_cursor(void);
 /* A row's words, in characters the small stock font has. "" for a row the box does not have. */
 const char* gdx_net_race_box_text(int row);
 
+/* A row's words as the texture to draw: GDX_NET_RACE_WORD_* (port/gdx_net_race_words.h), or
+ * GDX_NET_RACE_WORD_NONE for a row the box does not have. */
+int gdx_net_race_box_word(int row);
+
 /* 1 while the box is open: the copy's own machine gets no controller input. */
 int gdx_net_race_box_holds_input(void);
 
