@@ -8,6 +8,7 @@
 #include "gdx_course_branch_view.h"
 #include "gdx_course_settings_view.h"
 #include "gdx_course_junction.h"
+#include "gdx_net_room_course.h"
 
 extern CourseInfo* gCurrentCourseInfo;
 extern bool gInCourseEditor;
@@ -1004,7 +1005,13 @@ void gdx_course_branch_on_segments_init(const CourseSegment* ring, s32 count) {
     if (!gInCourseEditor && !gInCourseEditTestRun) {
         char courseId[26]; /* GDX_BRANCH_COURSE_ID_MAX + 1 */
 
-        gdx_settings_view_select_course(gdx_racer_course_file_id(courseId, sizeof(courseId)) ? courseId : NULL, count);
+        /* A G-NET room's custom track brings its own settings, decoded from the room's copy. */
+        if (gdx_net_room_course_active()) {
+            gdx_net_room_course_apply_settings(count);
+        } else {
+            gdx_settings_view_select_course(gdx_racer_course_file_id(courseId, sizeof(courseId)) ? courseId : NULL,
+                                            count);
+        }
     }
     /* Matched by position, not from the rotation Course_SegmentsInit just did: a test run restart rotates a ring
      * that is already rotated. */
@@ -1026,7 +1033,12 @@ void gdx_course_branch_on_course_init(void) {
     if (!gInCourseEditor && !gInCourseEditTestRun) {
         char courseId[26]; /* GDX_BRANCH_COURSE_ID_MAX + 1 */
 
-        gdx_branch_view_select_course(gdx_racer_course_file_id(courseId, sizeof(courseId)) ? courseId : NULL);
+        /* A G-NET room's custom track brings its own forks, decoded from the room's copy. */
+        if (gdx_net_room_course_active()) {
+            gdx_net_room_course_apply_forks();
+        } else {
+            gdx_branch_view_select_course(gdx_racer_course_file_id(courseId, sizeof(courseId)) ? courseId : NULL);
+        }
     }
     /* The editor builds ring 2 itself once its course is set up, and again after each edit. A test run races
      * the editor's fork set. */

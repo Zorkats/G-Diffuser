@@ -95,13 +95,13 @@ bool PumpUntil(End& a, Channel& ca, End& b, Channel& cb, uint32_t limitMs, Pred 
 void CaseChannelOverLoopback() {
     End clientEnd;
     End serverEnd;
-    CHECK(clientEnd.socket.Open(NetAddress{kLoopbackIp, 0}));
-    CHECK(serverEnd.socket.Open(NetAddress{kLoopbackIp, 0}));
+    CHECK(clientEnd.socket.Open(NetAddress::FromV4(kLoopbackIp, 0)));
+    CHECK(serverEnd.socket.Open(NetAddress::FromV4(kLoopbackIp, 0)));
     if (!clientEnd.socket.IsOpen() || !serverEnd.socket.IsOpen()) {
         return;
     }
-    clientEnd.peer = NetAddress{kLoopbackIp, serverEnd.socket.LocalPort()};
-    serverEnd.peer = NetAddress{kLoopbackIp, clientEnd.socket.LocalPort()};
+    clientEnd.peer = NetAddress::FromV4(kLoopbackIp, serverEnd.socket.LocalPort());
+    serverEnd.peer = NetAddress::FromV4(kLoopbackIp, clientEnd.socket.LocalPort());
 
     uint32_t sendFailures = 0;
     ChannelConfig clientCfg;

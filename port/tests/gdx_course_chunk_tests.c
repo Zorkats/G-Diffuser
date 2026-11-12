@@ -52,6 +52,17 @@ void func_i2_800B0FAC(CourseSegment* segment, Mtx3F* basis) {
     CHECK(0);
 }
 
+/* Road themes are out of this test: every segment wears its venue's road at the row's own scale. */
+static s32 sGdxBuildTheme;
+static s32 Course_GdxSegmentTheme(const CourseSegment* segment) {
+    (void)segment;
+    return 0;
+}
+static f32 Course_GdxRowScale(const unk_800CF528* row, s32 theme) {
+    (void)theme;
+    return row->textureScale;
+}
+
 #include "../../decomp/src/game/course_chunk_build.inc"
 
 static CourseSegment sSegments[GDX_COURSE_POINT_CAPACITY];

@@ -338,6 +338,12 @@ GdxNetRules sRules{};
 
 gdx::hash::Sha256 sDigest{};
 
+// Machine records by character: none, one record every human on it shares, or a clash that races stock.
+enum : unsigned char { kMachineStock = 0, kMachineRecord = 1, kMachineClash = 2 };
+int sMachinesSet = 0;
+unsigned char sMachineState[GDX_NET_RACE_MAX_RACERS]{};
+unsigned char sMachineRecord[GDX_NET_RACE_MAX_RACERS][GDX_NET_MACHINE_RECORD_BYTES]{};
+
 // The ticks the game does something on besides counting: the three beeps of the countdown.
 constexpr int kIntroBeeps[] = { 220, 160, 100 };
 
@@ -531,6 +537,57 @@ float gdx_net_race_rule_magnet_range(float own) {
 
 float gdx_net_race_rule_magnet_strength(float own) {
     return sRulesSet.load(std::memory_order_relaxed) ? sRules.magnetStrength : own;
+}
+
+int gdx_net_race_rule_boost_frames(int own) {
+    return sRulesSet.load(std::memory_order_relaxed) ? sRules.boostFrames : own;
+}
+
+void gdx_net_race_set_machines(const unsigned char* machine, const unsigned char* hasRecord,
+                               const unsigned char* records, int humans) {
+    bool seen[GDX_NET_RACE_MAX_RACERS] = {};
+
+    std::fill(std::begin(sMachineState), std::end(sMachineState), static_cast<unsigned char>(kMachineStock));
+    sMachinesSet = 1;
+    if (machine == nullptr || humans <= 0) {
+        return;
+    }
+    humans = std::min(humans, GDX_NET_RACE_MAX_RACERS);
+    for (int i = 0; i < humans; i++) {
+        const int c = machine[i];
+        if (c >= GDX_NET_RACE_MAX_RACERS) {
+            continue;
+        }
+        const bool has = hasRecord != nullptr && records != nullptr && hasRecord[i] != 0;
+        const unsigned char* record = has ? records + static_cast<size_t>(i) * GDX_NET_MACHINE_RECORD_BYTES : nullptr;
+        if (!seen[c]) {
+            seen[c] = true;
+            sMachineState[c] = has ? kMachineRecord : kMachineClash;
+            if (has) {
+                std::copy(record, record + GDX_NET_MACHINE_RECORD_BYTES, sMachineRecord[c]);
+            }
+        } else if (sMachineState[c] == kMachineRecord &&
+                   (!has || !std::equal(record, record + GDX_NET_MACHINE_RECORD_BYTES, sMachineRecord[c]))) {
+            sMachineState[c] = kMachineClash;
+        }
+    }
+}
+
+void gdx_net_race_clear_machines(void) {
+    sMachinesSet = 0;
+}
+
+int gdx_net_race_machines_set(void) {
+    return sMachinesSet;
+}
+
+int gdx_net_race_machine_record(int character, unsigned char* out) {
+    if (!sMachinesSet || character < 0 || character >= GDX_NET_RACE_MAX_RACERS || out == nullptr ||
+        sMachineState[character] != kMachineRecord) {
+        return 0;
+    }
+    std::copy(sMachineRecord[character], sMachineRecord[character] + GDX_NET_MACHINE_RECORD_BYTES, out);
+    return 1;
 }
 
 void gdx_net_race_digest_begin(void) {

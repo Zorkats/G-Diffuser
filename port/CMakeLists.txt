@@ -326,6 +326,12 @@ add_subdirectory(third_party/lua EXCLUDE_FROM_ALL)
 # Ogg Vorbis, FLAC and WAV decoders for the streamed BGM replacement (gdx_music_stream.cpp).
 add_subdirectory(third_party/music_decoders EXCLUDE_FROM_ALL)
 
+# miniupnpc 2.3.3: the UPnP port mapping a G-NET room asks the router for (decision 58). Desktop only; an Android
+# build compiles net/gdx_net_host_info.cpp without it, and its UPnP calls return nothing.
+if(NOT ANDROID)
+    add_subdirectory(third_party/miniupnpc EXCLUDE_FROM_ALL)
+endif()
+
 # The standalone updater is shipped beside desktop game executables, not in the Android APK.
 if(NOT ANDROID)
     add_subdirectory(updater)
@@ -449,6 +455,8 @@ gdx_add_main_target(G-Diffuser
     net/gdx_net_channel.cpp        # O2 reliable and unreliable messages over one UDP peer
     net/gdx_net_lobby.cpp          # O2 lobby messages, LAN discovery packets and the chat filter
     net/gdx_net_room.cpp           # O3 room state machine: vote, lottery, pick, lock-in and the phase timers
+    net/gdx_net_lottery.cpp        # O6.4 the Open room's lottery commitment and its reveal
+    net/gdx_net_succession.cpp     # D28 who takes the room over when its host is lost
     gdx_net_machine_select.c       # O3 lock-in screen: when the stock machine screens belong to the room
     gdx_net_race_box.c             # O3 room race: the quit box every racer has (continue, return to room, leave the room)
     gdx_net_race_words.c           # O3 room race: the quit box words as stock-style CI textures (original art)
@@ -459,6 +467,25 @@ gdx_add_main_target(G-Diffuser
     net/gdx_net_race.cpp           # O3 remote racers: pose buffer, the guess of where a machine is now and the dev echo
     gdx_net_race_dev.c             # O3 remote racers: the GDX_NET_PUPPET_ECHO, GDX_NET_DEV_AUTOPILOT, GDX_NET_DEV_CONTACTS and GDX_NET_DEV_TRACE developer switches
     net/gdx_net_lobby_session.cpp  # O2 lobby host, joining client and LAN room browser
+    gdx_net_track_cache.cpp        # O4.3 downloaded custom tracks, verified, under online/cache/tracks
+    gdx_net_own_tracks.cpp         # O4.7 the Edit Cup tracks a room can race: identity and title per slot
+    gdx_net_room_course.cpp        # O4.8 a room's custom track raced from memory: course image, forks, settings
+    gdx_net_track_save.cpp         # O4.9 "Save to my tracks": a room's custom track into this copy's Edit Cup
+    net/gdx_net_track_pack.cpp     # O4 custom tracks: a track's identity (SHA-256 of its content bytes) and the receiver's check
+    net/gdx_net_transfer.cpp       # O4.2 custom track transfer: chunks, the sender and phase gate, and the host relay
+    net/gdx_net_track_flow.cpp     # O4.6 who asks, offers and streams a room's custom track, and what the room hears
+    net/gdx_net_https.cpp          # O5.4 shared HTTPS transport: WinHTTP on Windows, libcurl elsewhere
+    net/gdx_net_codes.cpp          # O5.2 room and friend codes: Crockford base32 with a check
+    net/gdx_net_directory.cpp      # O5.5 room directory client: rules, encoders, strict reader, failover
+    net/gdx_net_listing.cpp        # O5.10 a hosted room's listing: register, heartbeat, takeover
+    net/gdx_net_stun.cpp           # O5.6 STUN Binding client
+    net/gdx_net_portmap.cpp        # O5.7 PCP and NAT-PMP port mapping, reachability checks
+    net/gdx_net_gather.cpp         # O5.8 the addresses a host lists its room under
+    net/gdx_net_host_info.cpp      # O5.8 system lookups: names, local addresses, default gateway
+    net/gdx_net_open_rooms.cpp     # O6.2 the Open room list and Quick race cooldown
+    net/gdx_net_friends.cpp        # O7.1 friend key, join proof and friend list
+    gdx_net_online.cpp             # O5.10 the directory's transport, settings and the room listing driver
+    gdx_net_friend_store.cpp       # O7.4 the friend list file, through the recovery writer
     gdx_lan_lobby.cpp              # O2 lobby worker thread that owns the socket
     gdx_lan_lobby_page.cpp         # Online > LAN Lobby menu page
     gdx_menu_words.c               # Menu row labels composed at runtime from words of the stock menu textures
@@ -785,11 +812,15 @@ target_link_libraries(G-Diffuser PRIVATE discord-rpc)
 target_link_libraries(G-Diffuser PRIVATE gdx_lua)
 target_link_libraries(G-Diffuser PRIVATE gdx_music_decoders)
 target_link_libraries(G-Diffuser PRIVATE monocypher)
+if(TARGET gdx_miniupnpc)
+    target_link_libraries(G-Diffuser PRIVATE gdx_miniupnpc)
+    target_compile_definitions(G-Diffuser PRIVATE GDX_HAVE_MINIUPNPC)
+endif()
 
 if(WIN32)
     # user32: MessageBox; Comdlg32: ROM picker; Comctl32: extraction progress marquee;
     # winhttp: the update check and download; ws2_32: the O2 LAN lobby socket.
-    target_link_libraries(G-Diffuser PRIVATE user32 Comdlg32 Comctl32 winhttp ws2_32)
+    target_link_libraries(G-Diffuser PRIVATE user32 Comdlg32 Comctl32 winhttp ws2_32 iphlpapi)
 elseif(ANDROID)
     include(FetchContent)
     # Ogg/Vorbis resolve to the copies fetched in cmake/dependencies/android.cmake; the rest are
@@ -1030,7 +1061,8 @@ endif()
 # Updater: version compare, SUMS parsing and SHA-256 in gdx_update.cpp, built without libultraship.
 add_executable(gdx_update_tests
     tests/gdx_update_tests.cpp
-    gdx_update.cpp)
+    gdx_update.cpp
+    net/gdx_net_https.cpp)
 target_compile_definitions(gdx_update_tests PRIVATE
     GDX_UPDATE_TESTS_STANDALONE=1
     GDX_VERSION_STRING="1.1.0" GDX_BUILD_CHANNEL="dev" GDX_BUILD_COMMIT="")
@@ -1625,6 +1657,8 @@ endif()
 add_executable(gdx_net_room_tests
     tests/gdx_net_room_tests.cpp
     net/gdx_net_room.cpp
+    net/gdx_net_lottery.cpp
+    net/gdx_net_succession.cpp
     net/gdx_net_lobby.cpp)
 target_compile_features(gdx_net_room_tests PRIVATE cxx_std_17)
 if(MSVC)
@@ -1636,7 +1670,8 @@ endif()
 # the menu are four functions the test supplies, so no socket, thread or game code is linked.
 add_executable(gdx_net_machine_select_tests
     tests/gdx_net_machine_select_tests.c
-    gdx_net_machine_select.c)
+    gdx_net_machine_select.c
+    gdx_net_text.c)
 target_include_directories(gdx_net_machine_select_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 if(MSVC)
     target_compile_options(gdx_net_machine_select_tests PRIVATE /W3)
@@ -1698,10 +1733,18 @@ add_executable(gdx_net_lobby_tests
     tests/gdx_net_lobby_tests.cpp
     net/gdx_net_lobby.cpp
     net/gdx_net_room.cpp
+    net/gdx_net_lottery.cpp
+    net/gdx_net_succession.cpp
     net/gdx_net_lobby_session.cpp
+    net/gdx_net_friends.cpp
     net/gdx_net_channel.cpp
-    net/gdx_net_socket.cpp)
+    net/gdx_net_socket.cpp
+    net/gdx_net_track_flow.cpp net/gdx_net_transfer.cpp net/gdx_net_track_pack.cpp
+    gdx_course_snapshot.cpp gdx_recovery_file.cpp gdx_course_branch_format.c gdx_course_settings.c
+    gdx_course_registry.c)
+target_include_directories(gdx_net_lobby_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/net")
 target_compile_features(gdx_net_lobby_tests PRIVATE cxx_std_17)
+target_link_libraries(gdx_net_lobby_tests PRIVATE monocypher)
 if(WIN32)
     target_link_libraries(gdx_net_lobby_tests PRIVATE ws2_32)
 endif()
@@ -1723,6 +1766,310 @@ if(MSVC)
     target_compile_options(gdx_net_loopback_tests PRIVATE /W3)
 elseif(GDX_PORT_WARN_FLAGS)
     target_compile_options(gdx_net_loopback_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# The G-NET tests, registered with CTest (enable_testing() is in the top-level CMakeLists.txt), so one run of
+# `ctest -C Release -R gdx_net` proves them all. Each is a standalone program that returns 0 when every check
+# passed. A new G-NET test is named gdx_net_*_tests and joins this list.
+foreach(gdx_net_test IN ITEMS
+        gdx_net_socket_tests
+        gdx_net_channel_tests
+        gdx_net_room_tests
+        gdx_net_machine_select_tests
+        gdx_net_race_box_tests
+        gdx_net_room_screen_tests
+        gdx_net_track_choice_tests
+        gdx_net_race_tests
+        gdx_net_lobby_tests
+        gdx_net_loopback_tests
+        gdx_net_track_pack_tests
+        gdx_net_track_cache_tests
+        gdx_net_transfer_tests
+        gdx_net_track_flow_tests
+        gdx_net_https_tests
+        gdx_net_open_rooms_tests
+        gdx_net_succession_tests
+        gdx_net_lottery_tests
+        gdx_net_codes_tests
+        gdx_net_friends_tests
+        gdx_net_friend_store_tests
+        gdx_net_stun_tests
+        gdx_net_portmap_tests
+        gdx_net_allowlist_tests
+        gdx_net_directory_tests
+        gdx_net_listing_tests
+        gdx_net_gather_tests
+        gdx_net_host_info_tests
+        gdx_net_upload_tests)
+    add_test(NAME ${gdx_net_test} COMMAND ${gdx_net_test})
+endforeach()
+# Leftover L1, the room's lock table: every setting racer, CPU or course code reads is in one class of
+# port/gdx_net_rules_audit.c. The test scans the source tree it is given for the names passed to CVarGet*
+# and fails on a gameplay name the table lacks or a row the source no longer has.
+add_executable(gdx_net_rules_audit_tests
+    tests/gdx_net_rules_audit_tests.cpp
+    gdx_net_rules_audit.c)
+target_include_directories(gdx_net_rules_audit_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_features(gdx_net_rules_audit_tests PRIVATE cxx_std_17)
+if(MSVC)
+    target_compile_options(gdx_net_rules_audit_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_net_rules_audit_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+add_test(NAME gdx_net_rules_audit_tests COMMAND gdx_net_rules_audit_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
+# O4.1 custom track identity: the SHA-256 of a track's content bytes, the receiver's hash-before-decode check,
+# and a seeded fuzz of the snapshot decoder on network bytes.
+add_executable(gdx_net_track_pack_tests
+    tests/gdx_net_track_pack_tests.cpp
+    net/gdx_net_track_pack.cpp
+    gdx_course_snapshot.cpp gdx_recovery_file.cpp gdx_course_branch_format.c gdx_course_settings.c
+    gdx_course_registry.c)
+target_include_directories(gdx_net_track_pack_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/net")
+target_compile_features(gdx_net_track_pack_tests PRIVATE cxx_std_17)
+if(MSVC)
+    target_compile_options(gdx_net_track_pack_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_net_track_pack_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# O4.3 downloaded track cache: verified content bytes under their identity, least recently used dropped first,
+# in a temporary directory.
+add_executable(gdx_net_track_cache_tests
+    tests/gdx_net_track_cache_tests.cpp
+    gdx_net_track_cache.cpp gdx_user_folders.cpp net/gdx_net_track_pack.cpp
+    gdx_course_snapshot.cpp gdx_recovery_file.cpp gdx_course_branch_format.c gdx_course_settings.c
+    gdx_course_registry.c)
+target_include_directories(gdx_net_track_cache_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/net")
+target_compile_features(gdx_net_track_cache_tests PRIVATE cxx_std_17)
+if(MSVC)
+    target_compile_options(gdx_net_track_cache_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_net_track_cache_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# O7.4 friend list file: a round trip, a missing file, a damaged one set aside and never overwritten, and the
+# refusals, in a temporary directory.
+add_executable(gdx_net_friend_store_tests
+    tests/gdx_net_friend_store_tests.cpp
+    gdx_net_friend_store.cpp net/gdx_net_friends.cpp gdx_recovery_file.cpp)
+target_include_directories(gdx_net_friend_store_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/net")
+target_compile_features(gdx_net_friend_store_tests PRIVATE cxx_std_17)
+target_link_libraries(gdx_net_friend_store_tests PRIVATE monocypher)
+if(MSVC)
+    target_compile_options(gdx_net_friend_store_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_net_friend_store_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# O4.2 track transfer: the five transfer messages, the sender and phase gate of decision 15, the receiver,
+# the paced sender and the host relay, and how long a lobby message waits behind a lost chunk on two real
+# channels (decision 6).
+add_executable(gdx_net_transfer_tests
+    tests/gdx_net_transfer_tests.cpp
+    net/gdx_net_transfer.cpp net/gdx_net_track_pack.cpp net/gdx_net_channel.cpp
+    gdx_course_snapshot.cpp gdx_recovery_file.cpp gdx_course_branch_format.c gdx_course_settings.c
+    gdx_course_registry.c)
+target_include_directories(gdx_net_transfer_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/net")
+target_compile_features(gdx_net_transfer_tests PRIVATE cxx_std_17)
+if(MSVC)
+    target_compile_options(gdx_net_transfer_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_net_transfer_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# O4.6 a room's custom track: the host asks the owner, relays to the guests and tells the room who holds it,
+# with the two flows wired back to back in memory and every time a nowMs argument.
+add_executable(gdx_net_track_flow_tests
+    tests/gdx_net_track_flow_tests.cpp
+    net/gdx_net_track_flow.cpp net/gdx_net_transfer.cpp net/gdx_net_track_pack.cpp net/gdx_net_lobby.cpp
+    gdx_course_snapshot.cpp gdx_recovery_file.cpp gdx_course_branch_format.c gdx_course_settings.c
+    gdx_course_registry.c)
+target_include_directories(gdx_net_track_flow_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/net")
+target_compile_features(gdx_net_track_flow_tests PRIVATE cxx_std_17)
+if(MSVC)
+    target_compile_options(gdx_net_track_flow_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_net_track_flow_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# O5.4 shared HTTPS transport: Get and Post against a plain-socket server on 127.0.0.1, through the same
+# WinHTTP or libcurl code the updater uses.
+# O5.5 room directory client: strict JSON, the URL list and every answer, against a stub transport. Monocypher signs
+# the writes as the game does, so the CONTRACT.md §9 signature vectors are checked byte for byte.
+add_executable(gdx_net_directory_tests
+    tests/gdx_net_directory_tests.cpp
+    net/gdx_net_directory.cpp)
+target_include_directories(gdx_net_directory_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/net")
+target_compile_features(gdx_net_directory_tests PRIVATE cxx_std_17)
+target_link_libraries(gdx_net_directory_tests PRIVATE monocypher)
+if(MSVC)
+    target_compile_options(gdx_net_directory_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_net_directory_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+
+# O5.10 a hosted room's directory listing (register, heartbeat, takeover) against a fake directory that applies the
+# contract's rules. The socket file is linked for FormatAddress and ParseAddress; no socket is opened.
+add_executable(gdx_net_listing_tests
+    tests/gdx_net_listing_tests.cpp
+    net/gdx_net_listing.cpp
+    net/gdx_net_directory.cpp
+    net/gdx_net_codes.cpp
+    net/gdx_net_socket.cpp)
+target_include_directories(gdx_net_listing_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/net")
+target_compile_features(gdx_net_listing_tests PRIVATE cxx_std_17)
+if(MSVC)
+    target_link_libraries(gdx_net_listing_tests PRIVATE ws2_32)
+    target_compile_options(gdx_net_listing_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_net_listing_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+
+# O5.6 to O5.8 and O5.11: a host's endpoints and the reachability rule from STUN, PCP or NAT-PMP, IPv6 and an
+# advertised address, with the servers and the gateway played by fixed packets.
+add_executable(gdx_net_gather_tests
+    tests/gdx_net_gather_tests.cpp
+    net/gdx_net_gather.cpp
+    net/gdx_net_listing.cpp
+    net/gdx_net_stun.cpp
+    net/gdx_net_portmap.cpp
+    net/gdx_net_directory.cpp
+    net/gdx_net_codes.cpp
+    net/gdx_net_socket.cpp)
+target_include_directories(gdx_net_gather_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/net")
+target_compile_features(gdx_net_gather_tests PRIVATE cxx_std_17)
+if(MSVC)
+    target_link_libraries(gdx_net_gather_tests PRIVATE ws2_32)
+    target_compile_options(gdx_net_gather_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_net_gather_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+
+# Decision 59: which local addresses a room lists (a temporary IPv6 one first) and how the log cuts an address.
+# Built without miniupnpc: its UPnP calls are the stubs, and none is made.
+add_executable(gdx_net_host_info_tests
+    tests/gdx_net_host_info_tests.cpp
+    net/gdx_net_host_info.cpp
+    net/gdx_net_socket.cpp)
+target_include_directories(gdx_net_host_info_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/net")
+target_compile_features(gdx_net_host_info_tests PRIVATE cxx_std_17)
+if(MSVC)
+    target_link_libraries(gdx_net_host_info_tests PRIVATE ws2_32 iphlpapi)
+    target_compile_options(gdx_net_host_info_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_net_host_info_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+
+# L2 host upload budget: the race and the track burst on a fake network, with the real lobby and transfer code.
+# The socket file is linked only for FormatAddress; no socket is opened.
+add_executable(gdx_net_upload_tests
+    tests/gdx_net_upload_tests.cpp
+    net/gdx_net_lobby.cpp
+    net/gdx_net_room.cpp
+    net/gdx_net_lottery.cpp
+    net/gdx_net_succession.cpp
+    net/gdx_net_lobby_session.cpp
+    net/gdx_net_friends.cpp
+    net/gdx_net_channel.cpp
+    net/gdx_net_socket.cpp
+    net/gdx_net_track_flow.cpp
+    net/gdx_net_transfer.cpp
+    net/gdx_net_track_pack.cpp
+    gdx_course_snapshot.cpp
+    gdx_recovery_file.cpp
+    gdx_course_branch_format.c
+    gdx_course_settings.c
+    gdx_course_registry.c)
+target_include_directories(gdx_net_upload_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/net")
+target_compile_features(gdx_net_upload_tests PRIVATE cxx_std_17)
+target_link_libraries(gdx_net_upload_tests PRIVATE monocypher)
+if(WIN32)
+    target_link_libraries(gdx_net_upload_tests PRIVATE ws2_32)
+endif()
+if(MSVC)
+    target_compile_options(gdx_net_upload_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_net_upload_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+
+add_executable(gdx_net_https_tests
+    tests/gdx_net_https_tests.cpp
+    net/gdx_net_https.cpp)
+target_include_directories(gdx_net_https_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/net")
+target_compile_features(gdx_net_https_tests PRIVATE cxx_std_17)
+if(WIN32)
+    target_link_libraries(gdx_net_https_tests PRIVATE winhttp ws2_32)
+else()
+    find_package(Threads REQUIRED)
+    target_link_libraries(gdx_net_https_tests PRIVATE ${CMAKE_DL_LIBS} Threads::Threads)
+endif()
+if(MSVC)
+    target_compile_options(gdx_net_https_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_net_https_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# O6.2 open rooms: the list cap, the shared request cooldown and Quick race ties, on fake time.
+add_executable(gdx_net_open_rooms_tests
+    tests/gdx_net_open_rooms_tests.cpp
+    net/gdx_net_open_rooms.cpp)
+target_include_directories(gdx_net_open_rooms_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/net")
+target_compile_features(gdx_net_open_rooms_tests PRIVATE cxx_std_17)
+if(MSVC)
+    target_compile_options(gdx_net_open_rooms_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_net_open_rooms_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# D28.2 succession: successor choice, the split-brain step and the no-successor close, on fake time.
+add_executable(gdx_net_succession_tests
+    tests/gdx_net_succession_tests.cpp
+    net/gdx_net_succession.cpp)
+target_include_directories(gdx_net_succession_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/net")
+target_compile_features(gdx_net_succession_tests PRIVATE cxx_std_17)
+if(MSVC)
+    target_compile_options(gdx_net_succession_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_net_succession_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# O6.4 lottery commitment: commit and reveal, the draw seed and the payload decoders.
+add_executable(gdx_net_lottery_tests
+    tests/gdx_net_lottery_tests.cpp
+    net/gdx_net_lottery.cpp)
+target_include_directories(gdx_net_lottery_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/net")
+target_compile_features(gdx_net_lottery_tests PRIVATE cxx_std_17)
+if(MSVC)
+    target_compile_options(gdx_net_lottery_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_net_lottery_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# O5 and O7 codecs with no socket: room and friend codes, the friend key, join proof and friend list, the
+# STUN binding client, NAT-PMP and PCP port mapping with the reachability rule, and the signed version
+# allowlist. Each test is one module and its own test file; the crypto ones link libultraship's Monocypher.
+foreach(gdx_net_codec IN ITEMS codes friends stun portmap allowlist)
+    set(gdx_net_codec_sources tests/gdx_net_${gdx_net_codec}_tests.cpp net/gdx_net_${gdx_net_codec}.cpp)
+    if(gdx_net_codec STREQUAL "portmap")
+        list(APPEND gdx_net_codec_sources net/gdx_net_stun.cpp)
+    endif()
+    add_executable(gdx_net_${gdx_net_codec}_tests ${gdx_net_codec_sources})
+    target_include_directories(gdx_net_${gdx_net_codec}_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
+                               "${CMAKE_CURRENT_SOURCE_DIR}/net")
+    target_compile_features(gdx_net_${gdx_net_codec}_tests PRIVATE cxx_std_17)
+    if(gdx_net_codec STREQUAL "friends" OR gdx_net_codec STREQUAL "allowlist")
+        target_link_libraries(gdx_net_${gdx_net_codec}_tests PRIVATE monocypher)
+    endif()
+    if(MSVC)
+        target_compile_options(gdx_net_${gdx_net_codec}_tests PRIVATE /W3)
+    elseif(GDX_PORT_WARN_FLAGS)
+        target_compile_options(gdx_net_${gdx_net_codec}_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+    endif()
+endforeach()
+# O5.9 owner tool: makes the release signing key and signs the version allowlist (tools/gnet-allowlist).
+add_executable(gnet_allowlist_tool
+    ../tools/gnet-allowlist/gnet_allowlist_tool.cpp
+    net/gdx_net_allowlist.cpp)
+target_include_directories(gnet_allowlist_tool PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/net")
+target_compile_features(gnet_allowlist_tool PRIVATE cxx_std_17)
+target_link_libraries(gnet_allowlist_tool PRIVATE monocypher)
+if(WIN32)
+    target_link_libraries(gnet_allowlist_tool PRIVATE bcrypt) # BCryptGenRandom for the key
+endif()
+if(MSVC)
+    target_compile_options(gnet_allowlist_tool PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gnet_allowlist_tool PRIVATE ${GDX_PORT_WARN_FLAGS})
 endif()
 # Game-text test: compiles gdx_game_text.c UNMODIFIED against stub text and archive reader, with
 # synthesized payloads only.
@@ -2016,6 +2363,23 @@ if(GDX_BUILD_JP AND NOT ANDROID)
         net/gdx_net_channel.cpp
         net/gdx_net_lobby.cpp
         net/gdx_net_room.cpp
+        net/gdx_net_lottery.cpp
+        net/gdx_net_succession.cpp
+        net/gdx_net_track_flow.cpp
+        net/gdx_net_transfer.cpp
+        net/gdx_net_track_pack.cpp
+        net/gdx_net_codes.cpp
+        net/gdx_net_directory.cpp
+        net/gdx_net_friends.cpp
+        net/gdx_net_gather.cpp
+        net/gdx_net_host_info.cpp
+        net/gdx_net_listing.cpp
+        net/gdx_net_open_rooms.cpp
+        net/gdx_net_portmap.cpp
+        net/gdx_net_stun.cpp
+        gdx_net_online.cpp
+        gdx_net_friend_store.cpp
+        gdx_net_track_cache.cpp
         gdx_net_machine_select.c
         gdx_net_race_box.c
         gdx_net_race_words.c
@@ -2023,6 +2387,9 @@ if(GDX_BUILD_JP AND NOT ANDROID)
         gdx_net_text.c
         gdx_net_track_choice.c
         gdx_net_room_view.cpp
+        gdx_net_own_tracks.cpp
+        gdx_net_room_course.cpp
+        gdx_net_track_save.cpp
         net/gdx_net_race.cpp
         gdx_net_race_dev.c
         net/gdx_net_lobby_session.cpp
@@ -2032,6 +2399,7 @@ if(GDX_BUILD_JP AND NOT ANDROID)
         gdx_save_import.c
         gdx_save_import_stage.cpp
         gdx_update.cpp
+        net/gdx_net_https.cpp
         gdx_update_ui.cpp
         gdx_rom_courses.c
         gdx_mfs_image.c
@@ -2110,9 +2478,11 @@ if(GDX_BUILD_JP AND NOT ANDROID)
     target_link_libraries(G-Diffuser-JP PRIVATE gdx_lua)
     target_link_libraries(G-Diffuser-JP PRIVATE gdx_music_decoders)
     target_link_libraries(G-Diffuser-JP PRIVATE monocypher)
+    target_link_libraries(G-Diffuser-JP PRIVATE gdx_miniupnpc)
+    target_compile_definitions(G-Diffuser-JP PRIVATE GDX_HAVE_MINIUPNPC)
 
     if(WIN32)
-        target_link_libraries(G-Diffuser-JP PRIVATE user32 Comdlg32 Comctl32 winhttp ws2_32)
+        target_link_libraries(G-Diffuser-JP PRIVATE user32 Comdlg32 Comctl32 winhttp ws2_32 iphlpapi)
     else()
         find_package(Threads REQUIRED)
         target_link_libraries(G-Diffuser-JP PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
@@ -2334,6 +2704,44 @@ if(MSVC)
 else()
     target_compile_options(gdx_course_snapshot_io_tests PRIVATE -UNDEBUG)
 endif()
+
+# Online O4.8: a room's custom track raced from memory. A real track goes through capture, content and Verify; the
+# lobby, the extended height switch and the boot are stubs in the test, and the stores must stay empty.
+add_executable(gdx_net_room_course_tests
+    tests/gdx_net_room_course_tests.cpp tests/gdx_course_snapshot_fixture.c
+    gdx_net_room_course.cpp net/gdx_net_track_pack.cpp
+    gdx_course_snapshot_state.cpp gdx_course_snapshot.cpp gdx_course_snapshot_native.c gdx_course_disk.c
+    gdx_recovery_metadata.cpp gdx_course_branch_format.c gdx_course_registry.c gdx_course_settings.c
+    gdx_recovery_file.cpp "${DECOMP}/src/game/course.c")
+target_include_directories(gdx_net_room_course_tests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/net" "${DECOMP}" "${DECOMP}/include" "${DECOMP}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../include")
+target_compile_definitions(gdx_net_room_course_tests PRIVATE
+    GDX_COURSE_CHECKSUM_TEST=1 PORT=1 EXPANSION_KIT=1 AVOID_UB=1 F3DEX_GBI_2=1 _LANGUAGE_C=1 VERSION_US=1)
+target_compile_features(gdx_net_room_course_tests PRIVATE cxx_std_17)
+if(MSVC)
+    target_compile_options(gdx_net_room_course_tests PRIVATE /W3 /we4013)
+endif()
+add_test(NAME gdx_net_room_course_tests COMMAND gdx_net_room_course_tests)
+
+# Online O4.9: "Save to my tracks" on the results page. A real track goes through the hash check; the lobby's copy,
+# the content import and the Edit Cup are stubs in the test, which finish an install at once or leave it pending.
+add_executable(gdx_net_track_save_tests
+    tests/gdx_net_track_save_tests.cpp tests/gdx_course_snapshot_fixture.c
+    gdx_net_track_save.cpp gdx_net_text.c net/gdx_net_track_pack.cpp
+    gdx_course_snapshot_state.cpp gdx_course_snapshot.cpp gdx_course_snapshot_native.c gdx_course_disk.c
+    gdx_recovery_metadata.cpp gdx_course_branch_format.c gdx_course_registry.c gdx_course_settings.c
+    gdx_recovery_file.cpp "${DECOMP}/src/game/course.c")
+target_include_directories(gdx_net_track_save_tests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/net" "${DECOMP}" "${DECOMP}/include" "${DECOMP}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../include")
+target_compile_definitions(gdx_net_track_save_tests PRIVATE
+    GDX_COURSE_CHECKSUM_TEST=1 PORT=1 EXPANSION_KIT=1 AVOID_UB=1 F3DEX_GBI_2=1 _LANGUAGE_C=1 VERSION_US=1)
+target_compile_features(gdx_net_track_save_tests PRIVATE cxx_std_17)
+if(MSVC)
+    target_compile_options(gdx_net_track_save_tests PRIVATE /W3 /we4013)
+endif()
+add_test(NAME gdx_net_track_save_tests COMMAND gdx_net_track_save_tests)
 
 add_executable(gdx_course_snapshot_mfs_tests
     tests/gdx_course_snapshot_io_tests.cpp

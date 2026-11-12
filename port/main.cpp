@@ -1836,7 +1836,9 @@ int main(int argc, char** argv) {
     // window is already gone; last, it would leave a silent zombie process. ClearPresence +
     // RunCallbacks run inside so the profile clears before the socket dies.
     gdx_discord_shutdown();
-    // Says goodbye to an open LAN room and joins its worker thread (gdx_lan_lobby.cpp).
+    // Ends this copy's LAN session and joins its worker thread (gdx_lan_lobby.cpp). A member says goodbye; a
+    // host does not: closing the game counts as a crash, so the members carry on under the next host
+    // (decision 17).
     gdx::lan::Shutdown();
     // gdx_disk_save_tick() only flushes after the write burst has been idle for kDebounceFrames
     // (~0.5s), so a save landing inside that final window would be dropped on close.

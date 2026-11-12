@@ -14,7 +14,8 @@
 extern "C" {
 #endif
 
-#define GDX_NET_RACE_HUMANS 12 /* net::lobby::kMaxRacers */
+#define GDX_NET_RACE_HUMANS 12       /* net::lobby::kMaxRacers */
+#define GDX_NET_RACE_RECORD_BYTES 32 /* net::lobby::kMachineRecordBytes, the game's sizeof(CustomMachine) */
 
 enum {
     GDX_NET_RACE_PHASE_NONE = 0,      /* no race: the lobby, a vote, the lock-in screen, the results */
@@ -38,14 +39,21 @@ typedef struct GdxNetRaceRoom {
     int self; /* the local player's place among the humans, 0 at the front of their rows */
     unsigned char machine[GDX_NET_RACE_HUMANS];
     unsigned char skin[GDX_NET_RACE_HUMANS];
+    unsigned char hasRecord[GDX_NET_RACE_HUMANS];                      /* the human brought a machine record */
+    unsigned char record[GDX_NET_RACE_HUMANS][GDX_NET_RACE_RECORD_BYTES]; /* its CustomMachine bytes */
     int laps;
     int ignoreTrackSettings;
     int lavaNoKill;
     float magnetRange;
     float magnetStrength;
+    int boostFrames; /* 0 is the stock boost length */
 } GdxNetRaceRoom;
 
 void gdx_lan_race_room(GdxNetRaceRoom* out);
+
+// The bridge: the Create Machine record of the local player's machine for character, as the game holds it.
+// 1 and the 32 bytes in out when that machine was edited, else 0 (a stock or super machine).
+int gdx_net_race_local_record(int character, unsigned char* out);
 
 /* Milliseconds since the start time of that race on the host clock, negative before it. 0 while the room
  * has sent no start for that race or the host clock is not known yet; elapsedMs is then left alone. */
@@ -62,10 +70,22 @@ void gdx_lan_race_ready(unsigned raceIndex, const unsigned char* digest, unsigne
  * the CPU machines, which only the host's game drives, are out of that race. Does nothing on a client. */
 void gdx_lan_race_host_left(unsigned raceIndex);
 
+/* The host player leaves the room and the room goes on (D28.5). The room runs a race in progress to its
+ * results in the background, then goes to the next host; outside a race it goes at once. This copy is out
+ * of the room from this call on: the view is idle. Call it after the race reported this copy's machine and
+ * its CPUs, so the room hears both first. Does nothing on a client or in no room. */
+void gdx_lan_room_hand_over(void);
+
+/* The custom track of the room's next race, verified, from memory: its 32-byte identity in id and its content
+ * bytes in out. 1 when the room's track is a custom track, this copy holds all of it, its identity is the
+ * room's and it fits capacity. 0 otherwise; nothing is written then. */
+int gdx_lan_race_track(unsigned char* id, unsigned char* out, unsigned long capacity, unsigned long* length);
+
 /* The clock the room runs on, in milliseconds. It wraps. */
 unsigned gdx_lan_now_ms(void);
 
-/* The host's own driving options become the rules of the next race. Does nothing on a client. */
+/* The host's own driving options become the rules of the next race, and its CPU options (AI aggression,
+ * track-hazard avoidance) the room's. Does nothing on a client. */
 void gdx_lan_race_capture_rules(void);
 
 /* How a race ended for one player, as the host's table has it (net::lobby::ResultKind). */

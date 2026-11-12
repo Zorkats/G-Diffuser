@@ -3,6 +3,7 @@
  */
 
 #include "gdx_net_machine_select.h"
+#include "gdx_net_text.h"
 
 #include <stdio.h>
 
@@ -16,6 +17,7 @@ static unsigned sRaceIndex; /* the race the screen was opened for */
 static GdxNetLockInRoom sRoom;
 static char sTimerText[8];
 static char sStatusText[24];
+static char sTitleText[GDX_NET_ROOM_TEXT_BYTES];
 
 static int gdx_net_lock_in_wanted(const GdxNetLockInRoom* room) {
     return room->inRoom && room->phaseMachine && room->entrant;
@@ -31,7 +33,8 @@ int gdx_net_machine_select_poll_open(void) {
     if (sSent && (sRoom.raceIndex == sRaceIndex)) {
         return 0;
     }
-    if ((sRoom.track < 0) || (sRoom.track >= STOCK_TRACKS)) {
+    if (((sRoom.track < 0) || (sRoom.track >= STOCK_TRACKS)) &&
+        !((sRoom.track == GDX_NET_LOCK_IN_TRACK_CUSTOM) && (sRoom.title[0] != '\0'))) {
         return 0;
     }
     sOpen = 1;
@@ -43,7 +46,15 @@ int gdx_net_machine_select_poll_open(void) {
 }
 
 int gdx_net_machine_select_track(void) {
-    return sRoom.track;
+    return sRoom.track == GDX_NET_LOCK_IN_TRACK_CUSTOM ? GDX_NET_LOCK_IN_COURSE_CUSTOM : sRoom.track;
+}
+
+const char* gdx_net_machine_select_track_title(void) {
+    if (sRoom.track != GDX_NET_LOCK_IN_TRACK_CUSTOM) {
+        return NULL;
+    }
+    gdx_net_text_filter(GDX_NET_ROOM_FONT_TITLE, sRoom.title, sTitleText, (int) sizeof(sTitleText));
+    return sTitleText;
 }
 
 int gdx_net_machine_select_active(void) {

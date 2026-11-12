@@ -31,6 +31,11 @@ typedef void (*GdxSnapshotContentVisit)(const unsigned char* bytes, unsigned lon
 int gdx_snapshot_export_content(int index, GdxSnapshotContentVisit visit, void* ctx);
 int gdx_snapshot_content(unsigned short directory, const char* name, const char* extension, const void* base,
                          GdxSnapshotContentVisit visit, void* ctx);
+// gdx_snapshot_content without a single write: no lock file, no snapshot folder, no generation published. A
+// track never saved through the snapshot path gets its content bytes built in memory from base. For readers
+// that must leave the save untouched, such as a room vote (G-NET decision 8).
+int gdx_snapshot_content_peek(unsigned short directory, const char* name, const char* extension, const void* base,
+                              GdxSnapshotContentVisit visit, void* ctx);
 int gdx_snapshot_package_member(const char* containerPath, unsigned int containerCrc,
                                 const char* name, const char* extension, const void* base);
 int gdx_snapshot_import_stage(const char* containerPath, unsigned int containerCrc);
@@ -41,6 +46,13 @@ int gdx_snapshot_import_legacy(unsigned short directory, const char* name, const
                                const void* forks, const void* settings);
 int gdx_snapshot_import_publish(unsigned short directory, const char* name, const char* extension,
                                 void* base);
+// Stages one track from its content bytes (gdx::snapshot::content), as gdx_snapshot_import_stage stages a
+// package: a G-NET room's track the player keeps (plan decision 14). The bytes must be a track's content
+// bytes exactly; the track is bound to name with the CRSD extension and sealed, and base (BaseBytes) gets
+// the fixed image the disk write saves. gdx_snapshot_import_publish(directory, name, "CRSD", base) then
+// takes it. Returns 0 and stages nothing for any other bytes or a name a course id cannot hold.
+int gdx_snapshot_import_stage_content(const unsigned char* bytes, unsigned long length, const char* name,
+                                      void* base);
 int gdx_snapshot_import_restore(unsigned short directory, const char* name, const char* extension,
                                 const void* base);
 

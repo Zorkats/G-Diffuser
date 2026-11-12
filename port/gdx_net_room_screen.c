@@ -9,7 +9,9 @@
 #include "gdx_net_room_screen.h"
 
 #include "gdx_net_track_choice.h"
+#include "gdx_net_track_save.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -38,8 +40,29 @@
 #define ROOMS_VISIBLE 10
 #define DIGIT_STEP 8
 #define FIELD_LEFT 104
+#define FRONT_ROWS_Y 58
+#define FRONT_TEXT_Y 182 /* under the tenth row of the front page */
+#define NOTE_Y 212       /* what the last press on a friend page did, two lines */
+#define FRIENDS_ROWS_Y 96
+#define FRIENDS_LIST_Y 156
+#define FRIEND_ROWS_Y 90
+#define FRIEND_STATUS_Y 132
+#define FRIEND_LIST_Y 146
+#define FRIEND_FIELD_Y 78
+#define MET_LIST_Y 72
+#define MET_VISIBLE 12
+#define CODE_GROUP 4         /* a friend code is shown in groups of four */
+#define CODE_GROUPS_PER_LINE 7
+
+/* Crockford base32, the alphabet of a room code (port/net/gdx_net_codes.h). */
+static const char kCodeAlphabet[] = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+#define CODE_RADIX 32
+
+/* The host's upload per seat it sends to, in kbit/s: measured in L2 (ODD 6.2), UDP and IP headers included. */
+#define UPLOAD_KBIT_PER_SEAT 493u
 
 #define ADDRESS_DIGITS 12
+#define EDIT_MAX GDX_NET_ROOM_FRIEND_CODE_CHARS /* the longest field: a friend code */
 #define PORT_DIGITS 5
 #define PORT_MIN 1024u
 #define PORT_MAX 65535u
@@ -61,6 +84,8 @@ enum {
     ROW_RACE_NEXT,
     ROW_START,
     ROW_SEATS,
+    ROW_CUSTOM,
+    ROW_CPU_FILL,
     ROW_LEAVE,
     ROW_KICK,
     ROW_DISMISS,
@@ -69,9 +94,28 @@ enum {
     ROW_END_SERIES,
     ROW_MESSAGE,
     ROW_MUTE,
+    ROW_SAVE_TRACK,
+    ROW_QUICK,
+    ROW_OPEN,
+    ROW_CODE,
+    ROW_CODE_FIELD,
+    ROW_REFRESH,
+    ROW_HOST_OPEN,
+    ROW_ABOUT,
+    ROW_NOTICE_OK,
+    ROW_FRIENDS,
+    ROW_COPY_CODE,
+    ROW_ADD_CODE,
+    ROW_ADD_MET,
+    ROW_FRIEND_FIELD,
+    ROW_PASTE,
+    ROW_ADD_FRIEND,
+    ROW_FIND_FRIEND,
+    ROW_REMOVE_FRIEND,
+    ROW_BAN,
     /* A message to send: ROW_MSG plus its place among the presets. */
     ROW_MSG = 60,
-    /* A row of a list: ROW_LIST plus the room's place in the search, or plus the player's id. */
+    /* A row of a list: ROW_LIST plus the room's place in the search, the player's id or the friend's place. */
     ROW_LIST = 100
 };
 
@@ -80,7 +124,8 @@ typedef struct Row {
     int enabled;
 } Row;
 
-#define ROWS_MAX (8 + GDX_NET_ROOM_FOUND)
+/* The longest page is the friend list: its four rows and every friend. */
+#define ROWS_MAX (8 + GDX_NET_ROOM_FRIENDS_MAX)
 
 static GdxNetRoomView sView;
 static int sProfileOk;
@@ -92,8 +137,22 @@ static int sCursorId; /* the id of that row */
 static int sCursorFresh; /* the room page just opened and the player has given no input yet */
 static int sTop;      /* first list row on screen */
 static int sEdit;     /* 0, or 1 plus the digit being changed */
-static int sEditBackup[ADDRESS_DIGITS];
+static int sEditBackup[EDIT_MAX];
 static int sAddress[ADDRESS_DIGITS] = { 1, 9, 2, 1, 6, 8, 0, 0, 1, 0, 0, 1 };
+static int sCode[GDX_NET_ROOM_CODE_CHARS]; /* places in kCodeAlphabet */
+static int sFriendCode[GDX_NET_ROOM_FRIEND_CODE_CHARS]; /* the friend code being typed, places as above */
+static char sMyCode[GDX_NET_ROOM_FRIEND_CODE_BYTES];    /* the player's own, read when the friend list opens */
+static int sFriendIndex;       /* the friend of the friend page */
+static int sFriendRoomsOf = -1; /* the friend the directory was last asked about, or -1 */
+static char sNote[GDX_NET_ROOM_STATUS_BYTES]; /* what the last press on a friend page did */
+static int sNoteColour;
+static int sHostType = GDX_NET_ROOM_TYPE_LAN; /* the type HOST A ROOM hosts, left and right change it */
+static int sWaitSeconds;  /* a refused directory press: what was left of the cooldown, or 0 */
+static unsigned sAskSerial; /* the directory's answer count when the page last asked */
+static int sAsked;        /* the page asked, and its answer has not come yet or was not acted on */
+static int sQuickNone;    /* Quick race's last answer: no room to join */
+static int sNoticeFromAbout; /* the notice page was opened from its row, after it was read */
+static int sDirectoryOk;
 static int sAddressPort[PORT_DIGITS] = { 2, 4, 3, 0, 2 };
 static int sPortDigits[PORT_DIGITS];
 static unsigned sFoundIp; /* the room of the found page */
@@ -206,6 +265,24 @@ static const GdxNetRoomResult* result_of(int id, int* place) {
     return NULL;
 }
 
+/* ---- friends ---- */
+
+/* 1 when the directory's last answer is the rooms of the friend on the friend page. */
+static int friend_rooms_shown(void) {
+    return sFriendRoomsOf >= 0 && sFriendRoomsOf == sFriendIndex && sView.dirAsk == GDX_NET_ROOM_ASK_FRIEND &&
+           sView.dirStatus == GDX_NET_ROOM_DIR_READY;
+}
+
+static int friend_page(int page) {
+    return page == GDX_NET_ROOM_PAGE_FRIENDS || page == GDX_NET_ROOM_PAGE_FRIEND_ADD ||
+           page == GDX_NET_ROOM_PAGE_FRIEND || page == GDX_NET_ROOM_PAGE_MET;
+}
+
+static void set_note(int colour, const char* text) {
+    snprintf(sNote, sizeof(sNote), "%s", text);
+    sNoteColour = colour;
+}
+
 /* ---- rows and the cursor ---- */
 
 static void add_row(int id, int enabled) {
@@ -220,6 +297,7 @@ static void build_rows(void) {
     const GdxNetRoomPlayer* me;
     const GdxNetRoomFound* found;
     int place;
+    int save;
     int i;
 
     sRowCount = 0;
@@ -227,10 +305,45 @@ static void build_rows(void) {
         case GDX_NET_ROOM_PAGE_FRONT:
             if (sProfileOk) {
                 add_row(ROW_HOST, 1);
+                /* Rooms on the internet need a directory: with none set they are not offered, and the page
+                   says so under its rows. */
+                if (sDirectoryOk) {
+                    add_row(ROW_QUICK, 1);
+                    add_row(ROW_OPEN, 1);
+                    add_row(ROW_CODE, 1);
+                }
                 add_row(ROW_FIND, 1);
                 add_row(ROW_ADDRESS, 1);
                 add_row(ROW_PORT, 1);
+                add_row(ROW_FRIENDS, 1);
+                add_row(ROW_ABOUT, 1);
             }
+            add_row(ROW_BACK, 1);
+            break;
+        case GDX_NET_ROOM_PAGE_NOTICE:
+            if (!gdx_lan_room_notice_seen()) {
+                add_row(ROW_NOTICE_OK, 1);
+            }
+            add_row(ROW_BACK, 1);
+            break;
+        case GDX_NET_ROOM_PAGE_CODE:
+            add_row(ROW_CODE_FIELD, 1);
+            add_row(ROW_JOIN_RACE, 1);
+            add_row(ROW_JOIN_WATCH, 1);
+            add_row(ROW_BACK, 1);
+            break;
+        case GDX_NET_ROOM_PAGE_OPEN:
+            if (sView.dirAsk == GDX_NET_ROOM_ASK_OPEN && sView.dirStatus == GDX_NET_ROOM_DIR_READY) {
+                for (i = 0; i < sView.listedCount; i++) {
+                    add_row(ROW_LIST + i, 1);
+                }
+            }
+            add_row(ROW_REFRESH, sView.dirStatus != GDX_NET_ROOM_DIR_ASKING);
+            add_row(ROW_BACK, 1);
+            break;
+        case GDX_NET_ROOM_PAGE_QUICK:
+            add_row(ROW_HOST_OPEN, sQuickNone);
+            add_row(ROW_REFRESH, !sAsked && sView.dirStatus != GDX_NET_ROOM_DIR_ASKING);
             add_row(ROW_BACK, 1);
             break;
         case GDX_NET_ROOM_PAGE_ADDRESS:
@@ -248,8 +361,8 @@ static void build_rows(void) {
             break;
         case GDX_NET_ROOM_PAGE_FOUND:
             found = found_room();
-            add_row(ROW_JOIN_RACE, found != NULL && found->sameBuild && found->racers < found->racerCap);
-            add_row(ROW_JOIN_WATCH, found != NULL && found->sameBuild && found->watchers < GDX_NET_ROOM_WATCH_SEATS);
+            add_row(ROW_JOIN_RACE, found != NULL && found->racers < found->racerCap);
+            add_row(ROW_JOIN_WATCH, found != NULL && found->watchers < GDX_NET_ROOM_WATCH_SEATS);
             add_row(ROW_BACK, 1);
             break;
         case GDX_NET_ROOM_PAGE_JOINING:
@@ -267,11 +380,18 @@ static void build_rows(void) {
             } else if (me != NULL && sView.phase == GDX_NET_ROOM_PHASE_LOBBY) {
                 add_row(ROW_READY, 1);
             }
+            /* The results of a race on a custom track: the one way it reaches this player's Edit Cup. */
+            save = gdx_net_track_save_state(&sView);
+            if (save != GDX_NET_TRACK_SAVE_NONE) {
+                add_row(ROW_SAVE_TRACK, save == GDX_NET_TRACK_SAVE_READY || save == GDX_NET_TRACK_SAVE_FAILED);
+            }
             if (sView.mode == GDX_NET_ROOM_MODE_HOSTING) {
                 switch (sView.phase) {
                     case GDX_NET_ROOM_PHASE_LOBBY:
                         add_row(ROW_START, 1);
                         add_row(ROW_SEATS, 1);
+                        add_row(ROW_CUSTOM, 1);
+                        add_row(ROW_CPU_FILL, 1);
                         break;
                     case GDX_NET_ROOM_PHASE_LOTTERY:
                         add_row(ROW_SKIP, 1);
@@ -302,6 +422,43 @@ static void build_rows(void) {
             add_row(ROW_MUTE, 1);
             if (sView.mode == GDX_NET_ROOM_MODE_HOSTING) {
                 add_row(ROW_KICK, 1);
+                add_row(ROW_BAN, 1);
+            }
+            add_row(ROW_BACK, 1);
+            break;
+        case GDX_NET_ROOM_PAGE_FRIENDS:
+            add_row(ROW_COPY_CODE, sMyCode[0] != '\0');
+            add_row(ROW_ADD_CODE, 1);
+            add_row(ROW_ADD_MET, 1);
+            add_row(ROW_BACK, 1);
+            place = gdx_lan_room_friend_count();
+            for (i = 0; i < place && i < GDX_NET_ROOM_FRIENDS_MAX; i++) {
+                add_row(ROW_LIST + i, 1);
+            }
+            break;
+        case GDX_NET_ROOM_PAGE_FRIEND_ADD:
+            add_row(ROW_FRIEND_FIELD, 1);
+            add_row(ROW_PASTE, 1);
+            add_row(ROW_ADD_FRIEND, 1);
+            add_row(ROW_BACK, 1);
+            break;
+        case GDX_NET_ROOM_PAGE_FRIEND:
+            /* None without a directory. A press while a request is out is refused, and the row stays where it
+               is so the cursor does not fall onto REMOVE. */
+            add_row(ROW_FIND_FRIEND, sDirectoryOk);
+            add_row(ROW_REMOVE_FRIEND, 1);
+            add_row(ROW_BACK, 1);
+            if (friend_rooms_shown()) {
+                for (i = 0; i < sView.listedCount; i++) {
+                    add_row(ROW_LIST + i, 1);
+                }
+            }
+            break;
+        case GDX_NET_ROOM_PAGE_MET:
+            /* A player already on the list under the name the room showed has nothing to add. */
+            place = gdx_lan_room_met_count();
+            for (i = 0; i < place && i < GDX_NET_ROOM_MET_MAX; i++) {
+                add_row(ROW_LIST + i, !gdx_lan_room_met_listed(i));
             }
             add_row(ROW_BACK, 1);
             break;
@@ -330,6 +487,10 @@ static void list_geometry(int* first, int* count, int* y, int* visible) {
         *count = sRowCount - 1;
         *y = ROOMS_TOP;
         *visible = ROOMS_VISIBLE;
+    } else if (sPage == GDX_NET_ROOM_PAGE_OPEN) {
+        *count = sRowCount - 2; /* "REFRESH" and "BACK" follow the list */
+        *y = ROOMS_TOP;
+        *visible = ROOMS_VISIBLE;
     } else if (sPage == GDX_NET_ROOM_PAGE_ROOM) {
         for (i = 0; i < sRowCount && sRows[i].id < ROW_LIST; i++) {
         }
@@ -338,6 +499,16 @@ static void list_geometry(int* first, int* count, int* y, int* visible) {
         /* A table has a row of column heads above its first line. */
         *y = table_shown() ? TABLE_ROWS_TOP + i * LIST_STEP + 8 + LIST_STEP : ROOM_ROWS_TOP + i * LIST_STEP + 8;
         *visible = (LIST_BOTTOM - *y) / LIST_STEP + 1;
+    } else if (sPage == GDX_NET_ROOM_PAGE_FRIENDS || sPage == GDX_NET_ROOM_PAGE_FRIEND) {
+        /* The page's rows, then the list under them. */
+        *first = sPage == GDX_NET_ROOM_PAGE_FRIENDS ? 4 : 3;
+        *count = sRowCount - *first;
+        *y = sPage == GDX_NET_ROOM_PAGE_FRIENDS ? FRIENDS_LIST_Y : FRIEND_LIST_Y;
+        *visible = (LIST_BOTTOM - *y) / LIST_STEP + 1;
+    } else if (sPage == GDX_NET_ROOM_PAGE_MET) {
+        *count = sRowCount - 1; /* "BACK" follows the list */
+        *y = MET_LIST_Y;
+        *visible = MET_VISIBLE;
     }
 }
 
@@ -398,6 +569,10 @@ static void settle_cursor(void) {
 }
 
 static void go(int page, int cursorId) {
+    if (page == GDX_NET_ROOM_PAGE_FRIENDS && sPage != GDX_NET_ROOM_PAGE_FRIENDS) {
+        gdx_lan_room_my_friend_code(sMyCode, (int) sizeof(sMyCode));
+    }
+    sNote[0] = '\0';
     sPage = page;
     sCursor = 0;
     sCursorId = cursorId;
@@ -415,10 +590,27 @@ static void sync(void) {
 
     gdx_lan_room_view(&sView);
     sProfileOk = gdx_lan_room_profile_ok();
+    sDirectoryOk = gdx_lan_room_directory_ok();
+    if (!sDirectoryOk) {
+        sHostType = GDX_NET_ROOM_TYPE_LAN;
+    }
     switch (sView.mode) {
         case GDX_NET_ROOM_MODE_IDLE:
-            if (page != GDX_NET_ROOM_PAGE_ADDRESS) {
+            if (page != GDX_NET_ROOM_PAGE_ADDRESS && page != GDX_NET_ROOM_PAGE_CODE &&
+                page != GDX_NET_ROOM_PAGE_OPEN && page != GDX_NET_ROOM_PAGE_QUICK &&
+                page != GDX_NET_ROOM_PAGE_NOTICE && !friend_page(page)) {
                 page = GDX_NET_ROOM_PAGE_FRONT;
+            }
+            /* The friend list is the active profile's key: with no profile there is none to show. */
+            if (friend_page(page) && !sProfileOk) {
+                page = GDX_NET_ROOM_PAGE_FRONT;
+            }
+            if (page == GDX_NET_ROOM_PAGE_FRIEND && sFriendIndex >= gdx_lan_room_friend_count()) {
+                page = GDX_NET_ROOM_PAGE_FRIENDS;
+            }
+            /* Nothing leaves this copy before the player has read what will (ODD 10). */
+            if (page == GDX_NET_ROOM_PAGE_FRONT && sProfileOk && !gdx_lan_room_notice_seen()) {
+                page = GDX_NET_ROOM_PAGE_NOTICE;
             }
             break;
         case GDX_NET_ROOM_MODE_BROWSING:
@@ -466,6 +658,21 @@ static void sync(void) {
         sCursorId == ROW_STOP_SEARCH) {
         sCursorId = ROW_LIST;
     }
+    /* The same for a friend's rooms. */
+    if (sPage == GDX_NET_ROOM_PAGE_FRIEND && sAsked && sView.dirSerial != sAskSerial) {
+        sAsked = 0;
+        if (friend_rooms_shown() && sView.listedCount > 0) {
+            sCursorId = ROW_LIST;
+        }
+    }
+    /* The same for the Open rooms: a fresh answer puts the cursor on its first room, not on BACK. */
+    if (sPage == GDX_NET_ROOM_PAGE_OPEN && sAsked && sView.dirSerial != sAskSerial) {
+        sAsked = 0;
+        if (sView.dirAsk == GDX_NET_ROOM_ASK_OPEN && sView.dirStatus == GDX_NET_ROOM_DIR_READY &&
+            sView.listedCount > 0) {
+            sCursorId = ROW_LIST;
+        }
+    }
     /* A room that just opened has no roster for a moment, so its top row, "READY UP", is not there yet and a
      * cursor that followed its row would be on "START THE RACES" or on the leave row when it comes. The
      * cursor waits at the top until the player gives an input. */
@@ -494,9 +701,16 @@ static void move_cursor(int direction) {
 
 /* ---- the number fields ---- */
 
-/* The digits the cursor's row edits, or NULL when it is not a number field. */
+/* The digits the cursor's row edits, or NULL when it is not a number field. A room code is a field of places
+ * in kCodeAlphabet. */
 static int* edit_digits(int* count) {
     switch (sCursorId) {
+        case ROW_CODE_FIELD:
+            *count = GDX_NET_ROOM_CODE_CHARS;
+            return sCode;
+        case ROW_FRIEND_FIELD:
+            *count = GDX_NET_ROOM_FRIEND_CODE_CHARS;
+            return sFriendCode;
         case ROW_PORT:
             *count = PORT_DIGITS;
             return sPortDigits;
@@ -531,6 +745,7 @@ static void start_edit(void) {
 static void edit_input(unsigned input) {
     int count;
     int* digits = edit_digits(&count);
+    const int radix = (sCursorId == ROW_CODE_FIELD || sCursorId == ROW_FRIEND_FIELD) ? CODE_RADIX : 10;
     int part;
 
     if (digits == NULL) {
@@ -546,11 +761,11 @@ static void edit_input(unsigned input) {
         sSound = GDX_NET_ROOM_SOUND_MOVE;
     }
     if (input & GDX_NET_ROOM_IN_UP) {
-        digits[sEdit - 1] = (digits[sEdit - 1] + 1) % 10;
+        digits[sEdit - 1] = (digits[sEdit - 1] + 1) % radix;
         sSound = GDX_NET_ROOM_SOUND_MOVE;
     }
     if (input & GDX_NET_ROOM_IN_DOWN) {
-        digits[sEdit - 1] = (digits[sEdit - 1] + 9) % 10;
+        digits[sEdit - 1] = (digits[sEdit - 1] + radix - 1) % radix;
         sSound = GDX_NET_ROOM_SOUND_MOVE;
     }
     if (input & GDX_NET_ROOM_IN_BACK) {
@@ -562,8 +777,9 @@ static void edit_input(unsigned input) {
     if (!(input & GDX_NET_ROOM_IN_CONFIRM)) {
         return;
     }
-    /* Done: a number outside what the field can hold becomes the nearest one it can. */
-    if (sCursorId == ROW_ADDR_FIELD) {
+    /* Done: a number outside what the field can hold becomes the nearest one it can. Every code is one. */
+    if (sCursorId == ROW_CODE_FIELD || sCursorId == ROW_FRIEND_FIELD) {
+    } else if (sCursorId == ROW_ADDR_FIELD) {
         for (part = 0; part < 4; part++) {
             if (digits_value(&sAddress[part * 3], 3) > 255u) {
                 set_digits(&sAddress[part * 3], 3, 255u);
@@ -592,6 +808,52 @@ static void join(int watch) {
     sSound = gdx_lan_room_join(ip, port, watch) ? GDX_NET_ROOM_SOUND_CONFIRM : GDX_NET_ROOM_SOUND_REFUSE;
 }
 
+/* The code being typed, "ABC-DEF". */
+static void code_text(char* out) {
+    int i;
+    int at = 0;
+
+    for (i = 0; i < GDX_NET_ROOM_CODE_CHARS; i++) {
+        if (i == GDX_NET_ROOM_CODE_CHARS / 2) {
+            out[at++] = '-';
+        }
+        out[at++] = kCodeAlphabet[sCode[i]];
+    }
+    out[at] = '\0';
+}
+
+/* Asks the directory for a page. A press inside the cooldown sends nothing and keeps what was left of it. */
+static void ask_directory(int ask) {
+    int wait = 0;
+
+    sWaitSeconds = 0;
+    sQuickNone = 0;
+    if (gdx_lan_room_ask(ask, &wait)) {
+        sAsked = 1;
+        sAskSerial = sView.dirSerial;
+        return;
+    }
+    sAsked = 0;
+    sWaitSeconds = wait;
+    sSound = GDX_NET_ROOM_SOUND_REFUSE;
+}
+
+/* Quick race's answer, once it comes: its room is joined at once, and none is a question for the player. */
+static void quick_poll(void) {
+    if (sPage != GDX_NET_ROOM_PAGE_QUICK || !sAsked || sView.dirSerial == sAskSerial) {
+        return;
+    }
+    sAsked = 0;
+    if (sView.dirAsk != GDX_NET_ROOM_ASK_QUICK || sView.dirStatus != GDX_NET_ROOM_DIR_READY) {
+        return; /* a failure: the page shows the directory's text */
+    }
+    if (!sView.quickFound) {
+        sQuickNone = 1;
+    } else if (!gdx_lan_room_join_listed(-1, 0)) {
+        sSound = GDX_NET_ROOM_SOUND_REFUSE;
+    }
+}
+
 /* A press of a row that asks twice: 1 when it is the second one in a row. The first shows in the row's label. */
 static int second_press(int id) {
     if (sArmed != id) {
@@ -601,6 +863,161 @@ static int second_press(int id) {
     sArmed = ROW_NONE;
     return 1;
 }
+
+/* A character of a pasted code as a place in kCodeAlphabet, read the way the code parser reads it: small
+ * letters as capitals, I and L as 1, O as 0. -1 for any other character. */
+static int code_place(char c) {
+    const char* at;
+
+    if (c >= 'a' && c <= 'z') {
+        c = (char) (c - 'a' + 'A');
+    }
+    if (c == 'I' || c == 'L') {
+        c = '1';
+    } else if (c == 'O') {
+        c = '0';
+    }
+    at = c != '\0' ? strchr(kCodeAlphabet, c) : NULL;
+    return at != NULL ? (int) (at - kCodeAlphabet) : -1;
+}
+
+/* The clipboard into the friend code field. Spaces, hyphens and line ends are passed over; anything else that
+ * is not a letter of a code, or a length other than a code's, leaves the field as it was. */
+static void paste_code(void) {
+    char text[GDX_NET_ROOM_FRIEND_CODE_BYTES * 2];
+    int places[GDX_NET_ROOM_FRIEND_CODE_CHARS];
+    int count = 0;
+    int i;
+
+    if (!gdx_lan_room_clipboard_get(text, (int) sizeof(text))) {
+        sSound = GDX_NET_ROOM_SOUND_REFUSE;
+        set_note(GDX_NET_ROOM_COLOUR_RED, "THE CLIPBOARD HOLDS NO TEXT.");
+        return;
+    }
+    for (i = 0; text[i] != '\0' && count >= 0; i++) {
+        const char c = text[i];
+        int place;
+
+        if (c == ' ' || c == '-' || c == '\t' || c == '\r' || c == '\n') {
+            continue;
+        }
+        place = code_place(c);
+        if (place < 0 || count == GDX_NET_ROOM_FRIEND_CODE_CHARS) {
+            count = -1;
+            break;
+        }
+        places[count++] = place;
+    }
+    if (count != GDX_NET_ROOM_FRIEND_CODE_CHARS) {
+        sSound = GDX_NET_ROOM_SOUND_REFUSE;
+        set_note(GDX_NET_ROOM_COLOUR_RED, "THE CLIPBOARD HOLDS NO FRIEND CODE.");
+        return;
+    }
+    memcpy(sFriendCode, places, sizeof(sFriendCode));
+    sCursorId = ROW_ADD_FRIEND;
+    set_note(GDX_NET_ROOM_COLOUR_WHITE, "PASTED. CHECK IT AND ADD THIS FRIEND.");
+}
+
+/* What an add did, in the note. name is the friend's name after it. */
+static void friend_add_note(int result, const char* name) {
+    char text[GDX_NET_ROOM_STATUS_BYTES];
+
+    switch (result) {
+        case GDX_NET_ROOM_FRIEND_ADDED:
+            snprintf(text, sizeof(text), "%s IS ON YOUR LIST.", name);
+            set_note(GDX_NET_ROOM_COLOUR_WHITE, text);
+            return;
+        case GDX_NET_ROOM_FRIEND_RENAMED:
+            snprintf(text, sizeof(text), "YOUR LIST NOW CALLS THIS FRIEND %s.", name);
+            set_note(GDX_NET_ROOM_COLOUR_WHITE, text);
+            return;
+        case GDX_NET_ROOM_FRIEND_LISTED:
+            set_note(GDX_NET_ROOM_COLOUR_DIM, "THIS FRIEND IS ON YOUR LIST ALREADY.");
+            return;
+        case GDX_NET_ROOM_FRIEND_BAD_CODE:
+            set_note(GDX_NET_ROOM_COLOUR_RED, "THIS IS NOT A FRIEND CODE. CHECK EVERY LETTER.");
+            break;
+        case GDX_NET_ROOM_FRIEND_SELF:
+            set_note(GDX_NET_ROOM_COLOUR_RED, "THIS IS YOUR OWN FRIEND CODE.");
+            break;
+        case GDX_NET_ROOM_FRIEND_FULL:
+            set_note(GDX_NET_ROOM_COLOUR_RED, "THE LIST IS FULL. REMOVE A FRIEND FIRST.");
+            break;
+        case GDX_NET_ROOM_FRIEND_BAD_NAME:
+            set_note(GDX_NET_ROOM_COLOUR_RED, "THIS NAME CANNOT GO ON YOUR LIST.");
+            break;
+        case GDX_NET_ROOM_FRIEND_GONE:
+            set_note(GDX_NET_ROOM_COLOUR_RED, "THIS PLAYER IS NO LONGER LISTED.");
+            break;
+        default:
+            set_note(GDX_NET_ROOM_COLOUR_RED, "YOUR LIST COULD NOT BE SAVED.");
+            break;
+    }
+    sSound = GDX_NET_ROOM_SOUND_REFUSE;
+}
+
+/* ADD THIS FRIEND: the typed code onto the list. A new friend takes the cursor to their row of the list. */
+static void add_typed_friend(void) {
+    char code[GDX_NET_ROOM_FRIEND_CODE_CHARS + 1];
+    char name[GDX_NET_ROOM_NAME_BYTES];
+    int result;
+    int count;
+    int i;
+
+    for (i = 0; i < GDX_NET_ROOM_FRIEND_CODE_CHARS; i++) {
+        code[i] = kCodeAlphabet[sFriendCode[i]];
+    }
+    code[GDX_NET_ROOM_FRIEND_CODE_CHARS] = '\0';
+    result = gdx_lan_room_friend_add_code(code);
+    if (result != GDX_NET_ROOM_FRIEND_ADDED) {
+        friend_add_note(result, "");
+        return;
+    }
+    count = gdx_lan_room_friend_count();
+    gdx_lan_room_friend_name(count - 1, name, (int) sizeof(name));
+    memset(sFriendCode, 0, sizeof(sFriendCode));
+    go(GDX_NET_ROOM_PAGE_FRIENDS, ROW_LIST + count - 1);
+    friend_add_note(result, name);
+}
+
+static void ask_friend(void) {
+    int wait = 0;
+
+    sWaitSeconds = 0;
+    if (gdx_lan_room_ask_friend(sFriendIndex, &wait)) {
+        sAsked = 1;
+        sAskSerial = sView.dirSerial;
+        sFriendRoomsOf = sFriendIndex;
+        return;
+    }
+    sAsked = 0;
+    sWaitSeconds = wait;
+    sSound = GDX_NET_ROOM_SOUND_REFUSE;
+}
+
+/* REMOVE, the second press: the cursor goes to the friend after them on the list, or the one before. */
+static void remove_friend(void) {
+    char name[GDX_NET_ROOM_NAME_BYTES];
+    char text[GDX_NET_ROOM_STATUS_BYTES];
+    int count;
+
+    gdx_lan_room_friend_name(sFriendIndex, name, (int) sizeof(name));
+    if (!gdx_lan_room_friend_remove(sFriendIndex)) {
+        sSound = GDX_NET_ROOM_SOUND_REFUSE;
+        set_note(GDX_NET_ROOM_COLOUR_RED, "YOUR LIST COULD NOT BE SAVED.");
+        return;
+    }
+    sFriendRoomsOf = -1;
+    sAsked = 0;
+    count = gdx_lan_room_friend_count();
+    go(GDX_NET_ROOM_PAGE_FRIENDS,
+       count == 0 ? ROW_ADD_CODE : ROW_LIST + (sFriendIndex < count ? sFriendIndex : count - 1));
+    snprintf(text, sizeof(text), "%s IS OFF YOUR LIST.", name);
+    set_note(GDX_NET_ROOM_COLOUR_WHITE, text);
+    sSound = GDX_NET_ROOM_SOUND_BACK;
+}
+
+static int back(void);
 
 static int confirm(void) {
     const GdxNetRoomPlayer* me = local_player();
@@ -614,9 +1031,28 @@ static int confirm(void) {
             sFoundIp = sView.found[key].ip;
             sFoundPort = sView.found[key].port;
             go(GDX_NET_ROOM_PAGE_FOUND, ROW_NONE);
+        } else if (sPage == GDX_NET_ROOM_PAGE_OPEN && key < sView.listedCount) {
+            /* A full room still has its watch seats. */
+            if (!gdx_lan_room_join_listed(key, sView.listed[key].freeSeats == 0)) {
+                sSound = GDX_NET_ROOM_SOUND_REFUSE;
+            }
         } else if (sPage == GDX_NET_ROOM_PAGE_ROOM && key != sView.localId && player_by_id(key) != NULL) {
             sPlayerId = key;
             go(GDX_NET_ROOM_PAGE_PLAYER, ROW_BACK);
+        } else if (sPage == GDX_NET_ROOM_PAGE_FRIENDS && key < gdx_lan_room_friend_count()) {
+            sFriendIndex = key;
+            sWaitSeconds = 0;
+            go(GDX_NET_ROOM_PAGE_FRIEND, ROW_NONE);
+        } else if (sPage == GDX_NET_ROOM_PAGE_FRIEND && friend_rooms_shown() && key < sView.listedCount) {
+            if (!gdx_lan_room_join_listed(key, sView.listed[key].freeSeats == 0)) {
+                sSound = GDX_NET_ROOM_SOUND_REFUSE;
+            }
+        } else if (sPage == GDX_NET_ROOM_PAGE_MET && key < gdx_lan_room_met_count()) {
+            char name[GDX_NET_ROOM_NAME_BYTES];
+            const int result = gdx_lan_room_met_add(key);
+
+            gdx_lan_room_met_name(key, name, (int) sizeof(name));
+            friend_add_note(result, name);
         } else {
             sSound = GDX_NET_ROOM_SOUND_NONE; /* nothing to do with this row */
         }
@@ -629,9 +1065,75 @@ static int confirm(void) {
     }
     switch (sCursorId) {
         case ROW_HOST:
+        case ROW_HOST_OPEN:
             sHostError[0] = '\0';
-            if (!gdx_lan_room_host(sHostError, (int) sizeof(sHostError))) {
+            if (!gdx_lan_room_host(sCursorId == ROW_HOST_OPEN ? GDX_NET_ROOM_TYPE_OPEN : sHostType, sHostError,
+                                   (int) sizeof(sHostError))) {
                 sSound = GDX_NET_ROOM_SOUND_REFUSE;
+                if (sPage != GDX_NET_ROOM_PAGE_FRONT) {
+                    go(GDX_NET_ROOM_PAGE_FRONT, ROW_HOST); /* where the reason shows */
+                }
+            }
+            break;
+        case ROW_QUICK:
+            sHostError[0] = '\0';
+            go(GDX_NET_ROOM_PAGE_QUICK, ROW_NONE);
+            ask_directory(GDX_NET_ROOM_ASK_QUICK);
+            break;
+        case ROW_OPEN:
+            sHostError[0] = '\0';
+            go(GDX_NET_ROOM_PAGE_OPEN, ROW_NONE);
+            ask_directory(GDX_NET_ROOM_ASK_OPEN);
+            break;
+        case ROW_REFRESH:
+            ask_directory(sPage == GDX_NET_ROOM_PAGE_QUICK ? GDX_NET_ROOM_ASK_QUICK : GDX_NET_ROOM_ASK_OPEN);
+            break;
+        case ROW_CODE:
+            sHostError[0] = '\0';
+            go(GDX_NET_ROOM_PAGE_CODE, ROW_NONE);
+            break;
+        case ROW_ABOUT:
+            sNoticeFromAbout = 1;
+            go(GDX_NET_ROOM_PAGE_NOTICE, ROW_BACK);
+            break;
+        case ROW_NOTICE_OK:
+            gdx_lan_room_notice_accept();
+            go(GDX_NET_ROOM_PAGE_FRONT, ROW_NONE);
+            break;
+        case ROW_FRIENDS:
+            sHostError[0] = '\0';
+            go(GDX_NET_ROOM_PAGE_FRIENDS, ROW_NONE);
+            break;
+        case ROW_COPY_CODE:
+            if (sMyCode[0] != '\0' && gdx_lan_room_clipboard_set(sMyCode)) {
+                set_note(GDX_NET_ROOM_COLOUR_WHITE, "YOUR FRIEND CODE IS ON THE CLIPBOARD.");
+            } else {
+                sSound = GDX_NET_ROOM_SOUND_REFUSE;
+                set_note(GDX_NET_ROOM_COLOUR_RED, "THE CLIPBOARD COULD NOT BE SET.");
+            }
+            break;
+        case ROW_ADD_CODE:
+            go(GDX_NET_ROOM_PAGE_FRIEND_ADD, ROW_PASTE);
+            break;
+        case ROW_ADD_MET:
+            go(GDX_NET_ROOM_PAGE_MET, ROW_NONE);
+            break;
+        case ROW_PASTE:
+            paste_code();
+            break;
+        case ROW_ADD_FRIEND:
+            add_typed_friend();
+            break;
+        case ROW_FIND_FRIEND:
+            if (sAsked || sView.dirStatus == GDX_NET_ROOM_DIR_ASKING) {
+                sSound = GDX_NET_ROOM_SOUND_REFUSE;
+            } else {
+                ask_friend();
+            }
+            break;
+        case ROW_REMOVE_FRIEND:
+            if (second_press(ROW_REMOVE_FRIEND)) {
+                remove_friend();
             }
             break;
         case ROW_FIND:
@@ -645,33 +1147,29 @@ static int confirm(void) {
         case ROW_PORT:
         case ROW_ADDR_FIELD:
         case ROW_ADDR_PORT:
+        case ROW_CODE_FIELD:
+        case ROW_FRIEND_FIELD:
             start_edit();
             break;
         case ROW_BACK:
-            sSound = GDX_NET_ROOM_SOUND_BACK;
-            if (sPage == GDX_NET_ROOM_PAGE_FRONT) {
-                return GDX_NET_ROOM_SCREEN_LEAVE;
-            }
-            if (sPage == GDX_NET_ROOM_PAGE_ADDRESS) {
-                go(GDX_NET_ROOM_PAGE_FRONT, ROW_ADDRESS);
-            } else if (sPage == GDX_NET_ROOM_PAGE_FOUND) {
-                go(GDX_NET_ROOM_PAGE_ROOMS, found_row());
-            } else if (sPage == GDX_NET_ROOM_PAGE_MESSAGES) {
-                go(GDX_NET_ROOM_PAGE_ROOM, ROW_MESSAGE);
-            } else {
-                go(GDX_NET_ROOM_PAGE_ROOM, ROW_LIST + sPlayerId);
-            }
-            break;
+            return back();
         case ROW_STOP_SEARCH:
         case ROW_CANCEL:
             sSound = GDX_NET_ROOM_SOUND_BACK;
             gdx_lan_room_stop();
             break;
         case ROW_JOIN_RACE:
-            join(0);
-            break;
         case ROW_JOIN_WATCH:
-            join(1);
+            if (sPage == GDX_NET_ROOM_PAGE_CODE) {
+                char code[GDX_NET_ROOM_CODE_BYTES];
+
+                code_text(code);
+                if (!gdx_lan_room_join_code(code, sCursorId == ROW_JOIN_WATCH)) {
+                    sSound = GDX_NET_ROOM_SOUND_REFUSE;
+                }
+            } else {
+                join(sCursorId == ROW_JOIN_WATCH);
+            }
             break;
         case ROW_READY:
             gdx_lan_room_ready(me != NULL && !me->ready);
@@ -687,6 +1185,12 @@ static int confirm(void) {
             break;
         case ROW_SEATS:
             sSound = GDX_NET_ROOM_SOUND_NONE; /* left and right change it */
+            break;
+        case ROW_CUSTOM:
+            gdx_lan_room_custom_tracks(!sView.customTracks);
+            break;
+        case ROW_CPU_FILL:
+            gdx_lan_room_cpu_fill(!sView.cpuFill);
             break;
         case ROW_LEAVE:
             if (second_press(ROW_LEAVE)) {
@@ -714,6 +1218,23 @@ static int confirm(void) {
             gdx_lan_room_kick(sPlayerId);
             go(GDX_NET_ROOM_PAGE_ROOM, ROW_NONE);
             break;
+        case ROW_BAN:
+            /* Asked twice: the player cannot come back while this copy hosts the room (O7.3). */
+            if (second_press(ROW_BAN)) {
+                gdx_lan_room_ban(sPlayerId);
+                go(GDX_NET_ROOM_PAGE_ROOM, ROW_NONE);
+            }
+            break;
+        case ROW_SAVE_TRACK:
+            switch (gdx_net_track_save_begin(&sView)) {
+                case GDX_NET_TRACK_SAVE_SAVING:
+                case GDX_NET_TRACK_SAVE_SAVED:
+                    break;
+                default:
+                    sSound = GDX_NET_ROOM_SOUND_REFUSE;
+                    break;
+            }
+            break;
         case ROW_DISMISS:
             sSound = GDX_NET_ROOM_SOUND_BACK;
             gdx_lan_room_dismiss();
@@ -734,6 +1255,23 @@ static int back(void) {
             return GDX_NET_ROOM_SCREEN_LEAVE;
         case GDX_NET_ROOM_PAGE_ADDRESS:
             go(GDX_NET_ROOM_PAGE_FRONT, ROW_ADDRESS);
+            break;
+        case GDX_NET_ROOM_PAGE_CODE:
+            go(GDX_NET_ROOM_PAGE_FRONT, ROW_CODE);
+            break;
+        case GDX_NET_ROOM_PAGE_OPEN:
+            go(GDX_NET_ROOM_PAGE_FRONT, ROW_OPEN);
+            break;
+        case GDX_NET_ROOM_PAGE_QUICK:
+            sAsked = 0; /* an answer that comes after this joins nothing */
+            go(GDX_NET_ROOM_PAGE_FRONT, ROW_QUICK);
+            break;
+        case GDX_NET_ROOM_PAGE_NOTICE:
+            /* Not read: the screen is left, as nothing on it may be used yet. */
+            if (!gdx_lan_room_notice_seen()) {
+                return GDX_NET_ROOM_SCREEN_LEAVE;
+            }
+            go(GDX_NET_ROOM_PAGE_FRONT, sNoticeFromAbout ? ROW_ABOUT : ROW_NONE);
             break;
         case GDX_NET_ROOM_PAGE_ROOMS:
         case GDX_NET_ROOM_PAGE_JOINING:
@@ -759,6 +1297,19 @@ static int back(void) {
         case GDX_NET_ROOM_PAGE_PLAYER:
             go(GDX_NET_ROOM_PAGE_ROOM, ROW_LIST + sPlayerId);
             break;
+        case GDX_NET_ROOM_PAGE_FRIENDS:
+            go(GDX_NET_ROOM_PAGE_FRONT, ROW_FRIENDS);
+            break;
+        case GDX_NET_ROOM_PAGE_FRIEND_ADD:
+            go(GDX_NET_ROOM_PAGE_FRIENDS, ROW_ADD_CODE);
+            break;
+        case GDX_NET_ROOM_PAGE_FRIEND:
+            sAsked = 0;
+            go(GDX_NET_ROOM_PAGE_FRIENDS, ROW_LIST + sFriendIndex);
+            break;
+        case GDX_NET_ROOM_PAGE_MET:
+            go(GDX_NET_ROOM_PAGE_FRIENDS, ROW_ADD_MET);
+            break;
         case GDX_NET_ROOM_PAGE_MESSAGES:
             go(GDX_NET_ROOM_PAGE_ROOM, ROW_MESSAGE);
             break;
@@ -783,6 +1334,10 @@ void gdx_net_room_screen_want_front(void) {
 void gdx_net_room_screen_open(void) {
     sWantFront = 0;
     sHostError[0] = '\0';
+    sAsked = 0;
+    sQuickNone = 0;
+    sWaitSeconds = 0;
+    sNoticeFromAbout = 0;
     sSound = GDX_NET_ROOM_SOUND_NONE;
     sPage = -1; /* no page: sync puts the cursor at the top of the one the session gives */
     sync();
@@ -792,6 +1347,9 @@ int gdx_net_room_screen_update(unsigned input) {
     int result = GDX_NET_ROOM_SCREEN_STAY;
 
     sSound = GDX_NET_ROOM_SOUND_NONE;
+    gdx_net_track_save_poll(); /* a save queued before the page closed is collected all the same */
+    sync();
+    quick_poll();
     sync();
     if (input != 0) {
         sCursorFresh = 0; /* the cursor is the player's from here on */
@@ -806,11 +1364,31 @@ int gdx_net_room_screen_update(unsigned input) {
     if (input & GDX_NET_ROOM_IN_DOWN) {
         move_cursor(1);
     }
+    if ((input & (GDX_NET_ROOM_IN_LEFT | GDX_NET_ROOM_IN_RIGHT)) && sCursorId == ROW_HOST && sDirectoryOk) {
+        sHostType = (sHostType + ((input & GDX_NET_ROOM_IN_RIGHT) ? 1 : GDX_NET_ROOM_TYPES - 1)) % GDX_NET_ROOM_TYPES;
+        sSound = GDX_NET_ROOM_SOUND_MOVE;
+    }
     if ((input & (GDX_NET_ROOM_IN_LEFT | GDX_NET_ROOM_IN_RIGHT)) && sCursorId == ROW_SEATS) {
         const int cap = sView.racerCap + ((input & GDX_NET_ROOM_IN_RIGHT) ? 1 : -1);
 
         if (cap >= GDX_NET_ROOM_SEATS_MIN && cap <= GDX_NET_ROOM_SEATS_MAX) {
             gdx_lan_room_racer_cap(cap);
+            sSound = GDX_NET_ROOM_SOUND_MOVE;
+        }
+    }
+    if ((input & (GDX_NET_ROOM_IN_LEFT | GDX_NET_ROOM_IN_RIGHT)) && sCursorId == ROW_CUSTOM) {
+        const int on = (input & GDX_NET_ROOM_IN_RIGHT) ? 1 : 0;
+
+        if (on != sView.customTracks) {
+            gdx_lan_room_custom_tracks(on);
+            sSound = GDX_NET_ROOM_SOUND_MOVE;
+        }
+    }
+    if ((input & (GDX_NET_ROOM_IN_LEFT | GDX_NET_ROOM_IN_RIGHT)) && sCursorId == ROW_CPU_FILL) {
+        const int on = (input & GDX_NET_ROOM_IN_RIGHT) ? 1 : 0;
+
+        if (on != sView.cpuFill) {
+            gdx_lan_room_cpu_fill(on);
             sSound = GDX_NET_ROOM_SOUND_MOVE;
         }
     }
@@ -894,13 +1472,14 @@ static void put_line(int y, int colour, const char* text) {
 }
 
 /* A paragraph from y down, in lines of LIST_STEP. Returns the row after its last line. */
+#define PARAGRAPH_LINES_MAX 14
 static int put_paragraph(int y, int colour, const char* text, int maxLines) {
-    char lines[8][GDX_NET_ROOM_TEXT_BYTES];
+    char lines[PARAGRAPH_LINES_MAX][GDX_NET_ROOM_TEXT_BYTES];
     int count;
     int i;
 
-    if (maxLines > 8) {
-        maxLines = 8;
+    if (maxLines > PARAGRAPH_LINES_MAX) {
+        maxLines = PARAGRAPH_LINES_MAX;
     }
     count = gdx_net_text_wrap(text, GDX_NET_ROOM_WRAP_COLUMNS, lines[0], GDX_NET_ROOM_TEXT_BYTES, maxLines);
     for (i = 0; i < count; i++) {
@@ -926,7 +1505,36 @@ static const char* row_label(int id) {
     }
     switch (id) {
         case ROW_HOST:
-            return "HOST A ROOM";
+            /* With no directory a room is on this network, and there is nothing to choose. */
+            if (!sDirectoryOk) {
+                return "HOST A ROOM";
+            }
+            switch (sHostType) {
+                case GDX_NET_ROOM_TYPE_CODE:
+                    return "HOST A ROOM BY CODE";
+                case GDX_NET_ROOM_TYPE_OPEN:
+                    return "HOST AN OPEN ROOM";
+                case GDX_NET_ROOM_TYPE_FRIENDS:
+                    return "HOST A ROOM FOR FRIENDS";
+                default:
+                    return "HOST A ROOM ON THIS NETWORK";
+            }
+        case ROW_HOST_OPEN:
+            return "HOST AN OPEN ROOM";
+        case ROW_QUICK:
+            return "QUICK RACE";
+        case ROW_OPEN:
+            return "OPEN ROOMS";
+        case ROW_CODE:
+            return "JOIN BY CODE";
+        case ROW_CODE_FIELD:
+            return "CODE";
+        case ROW_REFRESH:
+            return sPage == GDX_NET_ROOM_PAGE_QUICK ? "ASK AGAIN" : "REFRESH";
+        case ROW_ABOUT:
+            return "WHAT G-NET SENDS";
+        case ROW_NOTICE_OK:
+            return "I UNDERSTAND";
         case ROW_FIND:
             return "FIND ROOMS";
         case ROW_ADDRESS:
@@ -955,6 +1563,10 @@ static const char* row_label(int id) {
                                                                                        : "VOTE FOR A TRACK";
         case ROW_SEATS:
             return "RACE SEATS";
+        case ROW_CUSTOM:
+            return "CUSTOM TRACKS";
+        case ROW_CPU_FILL:
+            return "CPU RACERS";
         case ROW_LEAVE:
             if (sArmed == ROW_LEAVE) {
                 return host ? "PRESS A AGAIN TO CLOSE THE ROOM" : "PRESS A AGAIN TO LEAVE THE ROOM";
@@ -970,6 +1582,41 @@ static const char* row_label(int id) {
             return (other != NULL && other->muted) ? "UNMUTE THIS PLAYER" : "MUTE THIS PLAYER";
         case ROW_KICK:
             return "REMOVE FROM THE ROOM";
+        case ROW_BAN:
+            return sArmed == ROW_BAN ? "PRESS A AGAIN TO BAN" : "BAN FROM THE ROOM";
+        case ROW_FRIENDS:
+            return "FRIENDS";
+        case ROW_COPY_CODE:
+            return "COPY MY CODE";
+        case ROW_ADD_CODE:
+            return "ADD BY CODE";
+        case ROW_ADD_MET:
+            return "ADD FROM THE LAST ROOM";
+        case ROW_FRIEND_FIELD:
+            return "CODE";
+        case ROW_PASTE:
+            return "PASTE";
+        case ROW_ADD_FRIEND:
+            return "ADD THIS FRIEND";
+        case ROW_FIND_FRIEND:
+            return "FIND THEIR ROOMS";
+        case ROW_REMOVE_FRIEND:
+            return sArmed == ROW_REMOVE_FRIEND ? "PRESS A AGAIN TO REMOVE" : "REMOVE FROM FRIENDS";
+        case ROW_SAVE_TRACK:
+            switch (gdx_net_track_save_state(&sView)) {
+                case GDX_NET_TRACK_SAVE_SAVING:
+                    return "SAVING THE TRACK";
+                case GDX_NET_TRACK_SAVE_SAVED:
+                    return "SAVED IN YOUR EDIT CUP";
+                case GDX_NET_TRACK_SAVE_FULL:
+                    return "YOUR EDIT CUP IS FULL";
+                case GDX_NET_TRACK_SAVE_FAILED:
+                    return "TRY SAVING AGAIN";
+                case GDX_NET_TRACK_SAVE_OWN:
+                    return "ALREADY IN YOUR EDIT CUP";
+                default:
+                    return "SAVE TO MY TRACKS";
+            }
         default:
             return "BACK";
     }
@@ -989,17 +1636,19 @@ static void put_row(int index, int y) {
 }
 
 /* The digits of a number field from x, grouped in threes with a period between groups when grouped. The
- * digit being changed takes the cursor's colour. */
-static void put_digits(int x, int y, const int* digits, int count, int grouped, int editing, int colour) {
+ * digit being changed takes the cursor's colour. A room code's places are letters of kCodeAlphabet and its
+ * groups have a hyphen between them. */
+static void put_digits(int x, int y, const int* digits, int count, int grouped, int editing, int colour,
+                       int code) {
     char one[2] = { '0', '\0' };
     int i;
 
     for (i = 0; i < count; i++) {
         if (grouped && i > 0 && (i % 3) == 0) {
-            put_text(x, y, GDX_NET_ROOM_FONT_SMALL, GDX_NET_ROOM_ALIGN_LEFT, colour, ".");
+            put_text(x, y, GDX_NET_ROOM_FONT_SMALL, GDX_NET_ROOM_ALIGN_LEFT, colour, code ? "-" : ".");
             x += DIGIT_STEP;
         }
-        one[0] = (char) ('0' + digits[i]);
+        one[0] = code ? kCodeAlphabet[digits[i]] : (char) ('0' + digits[i]);
         put_text(x, y, GDX_NET_ROOM_FONT_SMALL, GDX_NET_ROOM_ALIGN_LEFT,
                  (editing && sEdit == i + 1) ? GDX_NET_ROOM_COLOUR_CURSOR : colour, one);
         x += DIGIT_STEP;
@@ -1011,7 +1660,8 @@ static void put_field_row(int index, int y, const int* digits, int count, int gr
     const int editing = index == sCursor && sEdit != 0;
 
     put_row(index, y);
-    put_digits(FIELD_LEFT, y, digits, count, grouped, editing, editing ? GDX_NET_ROOM_COLOUR_WHITE : row_colour(index));
+    put_digits(FIELD_LEFT, y, digits, count, grouped, editing, editing ? GDX_NET_ROOM_COLOUR_WHITE : row_colour(index),
+               sRows[index].id == ROW_CODE_FIELD);
 }
 
 /* A bar at the right margin that shows which part of a list is on screen. Nothing when all of it is. */
@@ -1045,6 +1695,8 @@ static const char* phase_title(int phase) {
             return "RACE START";
         case GDX_NET_ROOM_PHASE_RACING:
             return "RACE";
+        case GDX_NET_ROOM_PHASE_ASSETS:
+            return "GETTING THE TRACK";
         default:
             return "RESULTS";
     }
@@ -1072,6 +1724,8 @@ static const char* seat_text(const GdxNetRoomPlayer* player, int* done) {
         case GDX_NET_ROOM_PHASE_COUNTDOWN:
         case GDX_NET_ROOM_PHASE_RACING:
             return player->inRace ? "RACING" : "SITS OUT";
+        case GDX_NET_ROOM_PHASE_ASSETS:
+            return player->inRace ? "DOWNLOADING" : "SITS OUT";
         default:
             return "";
     }
@@ -1083,13 +1737,22 @@ static const char* player_name(int id) {
     return player != NULL ? player->name : "A PLAYER WHO LEFT";
 }
 
+/* A track's name as the room screens show it: a stock track's, or a custom track's title. */
+static void track_text(int track, char* out, int size) {
+    if (track == GDX_NET_ROOM_TRACK_CUSTOM) {
+        snprintf(out, (size_t) size, "%s", sView.trackTitle[0] != '\0' ? sView.trackTitle : "A CUSTOM TRACK");
+        return;
+    }
+    gdx_lan_room_track_name(track, out, size);
+}
+
 /* What the room is doing, as a sentence or two. */
 static void room_info(char* out, int size) {
     char track[GDX_NET_ROOM_TEXT_BYTES];
     int voted = 0;
     int i;
 
-    gdx_lan_room_track_name(sView.phase == GDX_NET_ROOM_PHASE_LOTTERY ? sView.lotteryTrack : sView.track, track,
+    track_text(sView.phase == GDX_NET_ROOM_PHASE_LOTTERY ? sView.lotteryTrack : sView.track, track,
                             (int) sizeof(track));
     switch (sView.phase) {
         case GDX_NET_ROOM_PHASE_LOBBY:
@@ -1123,6 +1786,14 @@ static void room_info(char* out, int size) {
         case GDX_NET_ROOM_PHASE_GRID_SYNC:
             snprintf(out, (size_t) size, "LOADING %s.", track);
             break;
+        case GDX_NET_ROOM_PHASE_ASSETS:
+            if (sView.trackChunksOf > 0u && !sView.trackHeld && !sView.trackFailed) {
+                snprintf(out, (size_t) size, "NEXT TRACK %s.\nGOT %u OF %u PARTS FROM THE HOST.", track,
+                         sView.trackChunks, sView.trackChunksOf);
+            } else {
+                snprintf(out, (size_t) size, "NEXT TRACK %s.\nTHE RACERS GET IT FROM THE HOST.", track);
+            }
+            break;
         case GDX_NET_ROOM_PHASE_COUNTDOWN:
             snprintf(out, (size_t) size, "%s IS ABOUT TO START.", track);
             break;
@@ -1136,15 +1807,48 @@ static void room_info(char* out, int size) {
     }
 }
 
-/* "192.168.1.20:24302" as the view gives it becomes "192.168.1.20 PORT 24302": the small font has no colon. */
-static void address_words(const char* address, char* out, int size) {
-    const char* colon = strchr(address, ':');
+/* "192.168.1.20:24302" as the view gives it becomes "192.168.1.20 PORT 24302": the small font has no colon.
+ * An IPv6 address comes as "[2001:db8::1]:24302" and becomes "2001 DB8 .. 1 PORT 24302": a space between
+ * groups, ".." where the zero groups were left out, letters in capitals. Returns 1 for an IPv6 address. */
+static int address_words(const char* address, char* out, int size) {
+    const char* colon;
+    int at = 0;
 
+    if (address[0] == '[') {
+        const char* end = strstr(address, "]:");
+        const char* c;
+
+        if (end == NULL || size < 1) {
+            snprintf(out, (size_t) size, "%s", address);
+            return 1;
+        }
+        for (c = address + 1; c < end && at < size - 1; c++) {
+            if (*c == ':') {
+                if (c[1] == ':') {
+                    at += snprintf(out + at, (size_t) (size - at), "%s..%s", c == address + 1 ? "" : " ",
+                                   c + 2 == end ? "" : " ");
+                    c++;
+                } else {
+                    out[at++] = ' ';
+                }
+            } else {
+                out[at++] = (char) toupper((unsigned char) *c);
+            }
+            if (at >= size) {
+                at = size - 1;
+            }
+        }
+        out[at] = '\0';
+        snprintf(out + at, (size_t) (size - at), " PORT %s", end + 2);
+        return 1;
+    }
+    colon = strchr(address, ':');
     if (colon == NULL) {
         snprintf(out, (size_t) size, "%s", address);
     } else {
         snprintf(out, (size_t) size, "%.*s PORT %s", (int) (colon - address), address, colon + 1);
     }
+    return 0;
 }
 
 static void format_address(unsigned ip, unsigned port, char* out, int size) {
@@ -1152,11 +1856,30 @@ static void format_address(unsigned ip, unsigned port, char* out, int size) {
              ip & 0xFFu, port);
 }
 
+/* The notice of ODD 10: what this copy sends once the player hosts, searches or joins, and to whom. Fourteen
+ * lines at most, from y 58. */
+static const char kNotice[] =
+    "A ROOM GETS YOUR PROFILE NAME AND COLOUR AND MACHINE AND FRIEND CODE AND YOUR MESSAGES. ITS HOST CAN BAN "
+    "YOUR FRIEND CODE. THE HOST SEES YOUR IP ADDRESS. IF YOU ARE NEXT TO HOST THE WHOLE ROOM GETS IT. PLAYERS "
+    "ON YOUR NETWORK CAN SEE IT TOO. A ROOM BY CODE OR AN OPEN ROOM OR A ROOM FOR FRIENDS IS LISTED IN THE "
+    "ROOM DIRECTORY WITH THE ADDRESS AND FRIEND CODE OF ITS HOST. YOUR FRIEND CODE IS THE PUBLIC HALF OF YOUR "
+    "PROFILE KEY. NOTHING IS SENT BEFORE YOU HOST OR SEARCH OR JOIN.";
+
+#define NOTICE_Y 58
+#define NOTICE_LINES 14
+
+static void draw_notice(void) {
+    const int rowsY = NOTICE_Y + NOTICE_LINES * LIST_STEP + 6;
+    int i;
+
+    put_title("WHAT G-NET SENDS");
+    put_paragraph(NOTICE_Y, GDX_NET_ROOM_COLOUR_WHITE, kNotice, NOTICE_LINES);
+    for (i = 0; i < sRowCount; i++) {
+        put_row(i, rowsY + i * MENU_STEP);
+    }
+}
+
 static void draw_front(void) {
-    static const char kNotice[] =
-        "HOSTING OR SEARCHING OR JOINING SHARES YOUR PROFILE NAME AND COLOUR AND FAVOURITE MACHINE AND THE "
-        "MESSAGES YOU SEND WITH THE ROOM. PLAYERS ON YOUR NETWORK CAN SEE YOUR IP ADDRESS. NOTHING IS SENT "
-        "BEFORE THAT.";
     int i;
 
     put_title("G-NET");
@@ -1169,7 +1892,7 @@ static void draw_front(void) {
         return;
     }
     for (i = 0; i < sRowCount; i++) {
-        const int y = 62 + i * MENU_STEP;
+        const int y = FRONT_ROWS_Y + i * MENU_STEP;
 
         if (sRows[i].id == ROW_PORT) {
             if (i == sCursor && sEdit != 0) {
@@ -1185,12 +1908,99 @@ static void draw_front(void) {
         }
     }
     if (sEdit != 0) {
-        put_paragraph(126, GDX_NET_ROOM_COLOUR_DIM,
+        put_paragraph(FRONT_TEXT_Y, GDX_NET_ROOM_COLOUR_DIM,
                       "LEFT AND RIGHT PICK A DIGIT. UP AND DOWN CHANGE IT. A KEEPS THE PORT. B DOES NOT.", 3);
     } else if (sHostError[0] != '\0') {
-        put_paragraph(126, GDX_NET_ROOM_COLOUR_RED, sHostError, 3);
+        put_paragraph(FRONT_TEXT_Y, GDX_NET_ROOM_COLOUR_RED, sHostError, 3);
+    } else {
+        char next[GDX_NET_ROOM_NAME_BYTES];
+        char text[GDX_NET_ROOM_STATUS_BYTES];
+
+        /* The host left the room in a race (D28.5): the room is still this copy's to run until the results. */
+        if (gdx_lan_room_handing_over(next, (int) sizeof(next))) {
+            snprintf(text, sizeof(text),
+                     "YOUR ROOM FINISHES THIS RACE WITHOUT YOU. THEN %s HOSTS IT. CLOSING THE GAME NOW ENDS THE "
+                     "RACE.",
+                     next[0] != '\0' ? next : "THE NEXT PLAYER");
+            put_paragraph(FRONT_TEXT_Y, GDX_NET_ROOM_COLOUR_WHITE, text, 3);
+        } else if (sCursorId == ROW_HOST && sDirectoryOk) {
+            put_paragraph(FRONT_TEXT_Y, GDX_NET_ROOM_COLOUR_DIM, "LEFT AND RIGHT CHANGE THE KIND OF ROOM.", 1);
+        }
     }
-    put_paragraph(162, GDX_NET_ROOM_COLOUR_DIM, kNotice, 6);
+    if (!sDirectoryOk) {
+        put_paragraph(212, GDX_NET_ROOM_COLOUR_DIM, "NO ROOM DIRECTORY IS SET. ROOMS STAY ON THIS NETWORK.", 2);
+    }
+}
+
+static void draw_code(void) {
+    put_title("JOIN BY CODE");
+    put_field_row(0, 66, sCode, GDX_NET_ROOM_CODE_CHARS, 1);
+    put_row(1, 86);
+    put_row(2, 86 + MENU_STEP);
+    put_row(3, 86 + 2 * MENU_STEP);
+    if (sEdit != 0) {
+        put_paragraph(134, GDX_NET_ROOM_COLOUR_DIM,
+                      "LEFT AND RIGHT PICK A LETTER. UP AND DOWN CHANGE IT. A KEEPS THE CODE. B DOES NOT.", 3);
+    } else {
+        put_paragraph(134, GDX_NET_ROOM_COLOUR_DIM,
+                      "ASK THE HOST FOR THE CODE OF THEIR ROOM. IT HAS SIX LETTERS AND DIGITS.", 3);
+    }
+}
+
+/* The line under a directory page's title: what the directory said, or why nothing was asked. */
+static void put_directory_status(int ask, const char* none) {
+    char text[GDX_NET_ROOM_TEXT_BYTES];
+
+    if (sWaitSeconds > 0) {
+        snprintf(text, sizeof(text), "ASK AGAIN IN %d SECONDS.", sWaitSeconds);
+        put_line(60, GDX_NET_ROOM_COLOUR_DIM, text);
+    } else if (sView.dirStatus == GDX_NET_ROOM_DIR_ASKING) {
+        put_line(60, GDX_NET_ROOM_COLOUR_DIM, "ASKING THE ROOM DIRECTORY.");
+    } else if (sView.dirAsk != ask) {
+        put_line(60, GDX_NET_ROOM_COLOUR_DIM, "PRESS REFRESH TO ASK THE ROOM DIRECTORY.");
+    } else if (sView.dirStatus == GDX_NET_ROOM_DIR_FAILED) {
+        put_line(60, GDX_NET_ROOM_COLOUR_RED, sView.dirText[0] != '\0' ? sView.dirText : "THE DIRECTORY FAILED.");
+    } else if (none != NULL) {
+        put_line(60, GDX_NET_ROOM_COLOUR_DIM, none);
+    }
+}
+
+static void put_listed_rows(int first, int count, int y0, int visible);
+
+static void draw_open(void) {
+    char text[GDX_NET_ROOM_TEXT_BYTES];
+    int first;
+    int count;
+    int y0;
+    int visible;
+
+    put_title("OPEN ROOMS");
+    list_geometry(&first, &count, &y0, &visible);
+    if (count == 0) {
+        put_directory_status(GDX_NET_ROOM_ASK_OPEN, "NO OPEN ROOM RIGHT NOW.");
+    } else {
+        snprintf(text, sizeof(text), "%d OPEN %s", count, count == 1 ? "ROOM" : "ROOMS");
+        put_directory_status(GDX_NET_ROOM_ASK_OPEN, text);
+    }
+    put_listed_rows(first, count, y0, visible);
+    put_row(sRowCount - 2, ROOMS_TOP + ROOMS_VISIBLE * LIST_STEP + 10);
+    put_row(sRowCount - 1, ROOMS_TOP + ROOMS_VISIBLE * LIST_STEP + 10 + MENU_STEP);
+}
+
+static void draw_quick(void) {
+    int i;
+
+    put_title("QUICK RACE");
+    if (sAsked) {
+        put_line(60, GDX_NET_ROOM_COLOUR_WHITE, "LOOKING FOR AN OPEN ROOM.");
+    } else if (sQuickNone) {
+        put_line(60, GDX_NET_ROOM_COLOUR_WHITE, "NO OPEN ROOM RIGHT NOW. YOU CAN HOST ONE.");
+    } else {
+        put_directory_status(GDX_NET_ROOM_ASK_QUICK, NULL);
+    }
+    for (i = 0; i < sRowCount; i++) {
+        put_row(i, 86 + i * MENU_STEP);
+    }
 }
 
 static void draw_address(void) {
@@ -1228,8 +2038,7 @@ static void draw_rooms(void) {
     for (i = sTop; i < sView.foundCount && i < sTop + ROOMS_VISIBLE; i++) {
         const GdxNetRoomFound* room = &sView.found[i];
         const int y = ROOMS_TOP + (i - sTop) * LIST_STEP;
-        const int colour = i == sCursor ? GDX_NET_ROOM_COLOUR_CURSOR
-                                        : room->sameBuild ? GDX_NET_ROOM_COLOUR_WHITE : GDX_NET_ROOM_COLOUR_DIM;
+        const int colour = i == sCursor ? GDX_NET_ROOM_COLOUR_CURSOR : GDX_NET_ROOM_COLOUR_WHITE;
 
         if (i == sCursor) {
             put_bar(y);
@@ -1238,7 +2047,7 @@ static void draw_rooms(void) {
         snprintf(text, sizeof(text), "%u OF %u", (unsigned) room->racers, (unsigned) room->racerCap);
         put_text(164, y, GDX_NET_ROOM_FONT_SMALL, GDX_NET_ROOM_ALIGN_LEFT, colour, text);
         put_text(MARGIN_RIGHT, y, GDX_NET_ROOM_FONT_SMALL, GDX_NET_ROOM_ALIGN_RIGHT, colour,
-                 !room->sameBuild ? "OTHER BUILD" : room->phase == GDX_NET_ROOM_PHASE_LOBBY ? "LOBBY" : "RACING");
+                 room->phase == GDX_NET_ROOM_PHASE_LOBBY ? "LOBBY" : "RACING");
     }
     put_scroll(ROOMS_TOP, sView.foundCount, ROOMS_VISIBLE);
     put_row(sRowCount - 1, ROOMS_TOP + ROOMS_VISIBLE * LIST_STEP + 10);
@@ -1265,10 +2074,6 @@ static void draw_found(void) {
     put_row(0, 100);
     put_row(1, 100 + MENU_STEP);
     put_row(2, 100 + 2 * MENU_STEP);
-    if (!room->sameBuild) {
-        put_paragraph(y, GDX_NET_ROOM_COLOUR_RED, "THIS ROOM RUNS ANOTHER BUILD OF THE GAME.", 2);
-        return;
-    }
     if (room->racers >= room->racerCap) {
         y = put_paragraph(y, GDX_NET_ROOM_COLOUR_DIM, "EVERY RACE SEAT IS TAKEN.", 1);
     }
@@ -1278,13 +2083,24 @@ static void draw_found(void) {
 }
 
 static void draw_joining(void) {
-    char text[GDX_NET_ROOM_TEXT_BYTES];
+    char text[GDX_NET_ROOM_ADDRESS_BYTES + 24]; /* "JOINING", the groups and the port on three lines */
     char address[GDX_NET_ROOM_ADDRESS_BYTES + 8];
 
     put_title("JOINING");
-    address_words(sView.hostText, address, (int) sizeof(address));
-    snprintf(text, sizeof(text), "JOINING %s", address);
-    put_line(70, GDX_NET_ROOM_COLOUR_WHITE, text);
+    if (sView.joinCode[0] != '\0') {
+        snprintf(text, sizeof(text), "JOINING ROOM %s", sView.joinCode);
+    } else {
+        const char* port;
+
+        if (address_words(sView.hostText, address, (int) sizeof(address)) &&
+            (port = strstr(address, " PORT ")) != NULL) {
+            /* Eight groups and the port pass 40 columns: one line each. */
+            snprintf(text, sizeof(text), "JOINING%c%.*s%c%s", 10, (int) (port - address), address, 10, port + 1);
+        } else {
+            snprintf(text, sizeof(text), "JOINING %s", address);
+        }
+    }
+    put_paragraph(70, GDX_NET_ROOM_COLOUR_WHITE, text, 3);
     put_row(0, 100);
 }
 
@@ -1296,6 +2112,7 @@ static void draw_closed(void) {
 
 static void draw_player(void) {
     const GdxNetRoomPlayer* player = player_by_id(sPlayerId);
+    int y;
     int i;
 
     put_title(player_name(sPlayerId));
@@ -1303,10 +2120,217 @@ static void draw_player(void) {
         put_row(i, 80 + i * MENU_STEP);
     }
     /* No apostrophe: the small font draws one far from its letter. */
-    put_paragraph(80 + sRowCount * MENU_STEP + 12, GDX_NET_ROOM_COLOUR_DIM,
-                  (player != NULL && player->muted) ? "MESSAGES FROM THIS PLAYER ARE HIDDEN ON YOUR SCREEN."
-                                                    : "MUTING HIDES MESSAGES FROM THIS PLAYER ON YOUR SCREEN ONLY.",
-                  2);
+    y = put_paragraph(80 + sRowCount * MENU_STEP + 12, GDX_NET_ROOM_COLOUR_DIM,
+                      (player != NULL && player->muted) ? "MESSAGES FROM THIS PLAYER ARE HIDDEN ON YOUR SCREEN."
+                                                        : "MUTING HIDES MESSAGES FROM THIS PLAYER ON YOUR SCREEN ONLY.",
+                      2);
+    if (sView.mode == GDX_NET_ROOM_MODE_HOSTING) {
+        put_paragraph(y + 6, GDX_NET_ROOM_COLOUR_DIM,
+                      "A BAN REMOVES THE PLAYER AND REFUSES THEIR FRIEND CODE AND THEIR ADDRESS FOR AS LONG AS THIS "
+                      "ROOM LASTS.",
+                      4);
+    }
+}
+
+/* A friend code, "ABCD EFGH ...", on two lines of seven groups from y. */
+static void put_code_lines(int y, int colour, const char* code) {
+    const size_t lineChars = CODE_GROUPS_PER_LINE * (CODE_GROUP + 1) - 1;
+    char line[GDX_NET_ROOM_FRIEND_CODE_BYTES];
+
+    snprintf(line, sizeof(line), "%.*s", (int) lineChars, code);
+    put_line(y, colour, line);
+    if (strlen(code) > lineChars + 1) {
+        put_line(y + LIST_STEP, colour, code + lineChars + 1);
+    }
+}
+
+/* The friend code field: its places in groups of four, on two lines from y. The place being changed takes the
+ * cursor's colour. */
+static void put_friend_field(int y, int index) {
+    const int editing = index == sCursor && sEdit != 0;
+    const int colour = editing ? GDX_NET_ROOM_COLOUR_WHITE : row_colour(index);
+    const int perLine = CODE_GROUPS_PER_LINE * CODE_GROUP;
+    char one[2] = { '0', '\0' };
+    int i;
+
+    for (i = 0; i < GDX_NET_ROOM_FRIEND_CODE_CHARS; i++) {
+        const int column = i % perLine;
+        const int x = MARGIN_LEFT + (column + column / CODE_GROUP) * DIGIT_STEP;
+
+        one[0] = kCodeAlphabet[sFriendCode[i]];
+        put_text(x, y + (i / perLine) * LIST_STEP, GDX_NET_ROOM_FONT_SMALL, GDX_NET_ROOM_ALIGN_LEFT,
+                 (editing && sEdit == i + 1) ? GDX_NET_ROOM_COLOUR_CURSOR : colour, one);
+    }
+}
+
+static void put_note(void) {
+    if (sNote[0] != '\0') {
+        put_paragraph(NOTE_Y, sNoteColour, sNote, 2);
+    }
+}
+
+/* The rows of a list of rooms from the directory, as the Open rooms page has them. */
+static void put_listed_rows(int first, int count, int y0, int visible) {
+    char text[GDX_NET_ROOM_TEXT_BYTES];
+    int i;
+
+    for (i = sTop; i < count && i < sTop + visible; i++) {
+        const GdxNetRoomListed* room = &sView.listed[i];
+        const int y = y0 + (i - sTop) * LIST_STEP;
+        const int selected = first + i == sCursor;
+        const int colour = selected ? GDX_NET_ROOM_COLOUR_CURSOR : GDX_NET_ROOM_COLOUR_WHITE;
+
+        if (selected) {
+            put_bar(y);
+        }
+        put_line(y, colour, room->code);
+        snprintf(text, sizeof(text), "%u %s", (unsigned) room->humans, room->humans == 1 ? "PLAYER" : "PLAYERS");
+        put_text(100, y, GDX_NET_ROOM_FONT_SMALL, GDX_NET_ROOM_ALIGN_LEFT, colour, text);
+        if (room->freeSeats == 0) {
+            snprintf(text, sizeof(text), "FULL - WATCH");
+        } else {
+            snprintf(text, sizeof(text), "%u %s FREE", (unsigned) room->freeSeats,
+                     room->freeSeats == 1 ? "SEAT" : "SEATS");
+        }
+        put_text(MARGIN_RIGHT, y, GDX_NET_ROOM_FONT_SMALL, GDX_NET_ROOM_ALIGN_RIGHT, colour, text);
+    }
+    put_scroll(y0, count, visible);
+}
+
+static void draw_friends(void) {
+    char text[GDX_NET_ROOM_TEXT_BYTES];
+    int first;
+    int count;
+    int y0;
+    int visible;
+    int i;
+
+    put_title("FRIENDS");
+    put_line(58, GDX_NET_ROOM_COLOUR_DIM, "YOUR FRIEND CODE");
+    if (sMyCode[0] != '\0') {
+        put_code_lines(68, GDX_NET_ROOM_COLOUR_WHITE, sMyCode);
+    } else {
+        put_line(68, GDX_NET_ROOM_COLOUR_RED, "YOUR PROFILE HAS NO FRIEND CODE.");
+    }
+    for (i = 0; i < 4 && i < sRowCount; i++) {
+        put_row(i, FRIENDS_ROWS_Y + i * MENU_STEP);
+    }
+    list_geometry(&first, &count, &y0, &visible);
+    if (count == 0) {
+        put_paragraph(FRIENDS_LIST_Y - LIST_STEP, GDX_NET_ROOM_COLOUR_DIM,
+                      "NO FRIEND YET. ADD ONE BY CODE OR FROM YOUR LAST ROOM.", 2);
+    } else {
+        snprintf(text, sizeof(text), "%d %s", count, count == 1 ? "FRIEND" : "FRIENDS");
+        put_line(FRIENDS_LIST_Y - LIST_STEP, GDX_NET_ROOM_COLOUR_DIM, text);
+    }
+    for (i = sTop; i < count && i < sTop + visible; i++) {
+        const int y = y0 + (i - sTop) * LIST_STEP;
+
+        if (first + i == sCursor) {
+            put_bar(y);
+        }
+        gdx_lan_room_friend_name(i, text, (int) sizeof(text));
+        put_line(y, row_colour(first + i), text);
+    }
+    put_scroll(y0, count, visible);
+    put_note();
+}
+
+static void draw_friend_add(void) {
+    put_title("ADD A FRIEND");
+    put_row(0, 66);
+    put_friend_field(FRIEND_FIELD_Y, 0);
+    put_row(1, 106);
+    put_row(2, 106 + MENU_STEP);
+    put_row(3, 106 + 2 * MENU_STEP);
+    if (sEdit != 0) {
+        put_paragraph(150, GDX_NET_ROOM_COLOUR_DIM,
+                      "LEFT AND RIGHT PICK A LETTER. UP AND DOWN CHANGE IT. A KEEPS THE CODE. B DOES NOT.", 3);
+    } else {
+        put_paragraph(150, GDX_NET_ROOM_COLOUR_DIM,
+                      "PASTE THE CODE YOUR FRIEND COPIED FROM THEIR FRIENDS PAGE OR SET IT ONE LETTER AT A TIME.", 3);
+    }
+    put_note();
+}
+
+/* The line over a friend's rooms: what the directory said, or why nothing was asked. */
+static void put_friend_status(int count) {
+    char text[GDX_NET_ROOM_TEXT_BYTES];
+
+    if (!sDirectoryOk) {
+        put_line(FRIEND_STATUS_Y, GDX_NET_ROOM_COLOUR_DIM, "FINDING ROOMS NEEDS A ROOM DIRECTORY.");
+    } else if (sWaitSeconds > 0) {
+        snprintf(text, sizeof(text), "ASK AGAIN IN %d SECONDS.", sWaitSeconds);
+        put_line(FRIEND_STATUS_Y, GDX_NET_ROOM_COLOUR_DIM, text);
+    } else if (sFriendRoomsOf != sFriendIndex || (sView.dirAsk != GDX_NET_ROOM_ASK_FRIEND && !sAsked)) {
+        return;
+    } else if (sAsked || sView.dirStatus == GDX_NET_ROOM_DIR_ASKING) {
+        put_line(FRIEND_STATUS_Y, GDX_NET_ROOM_COLOUR_DIM, "ASKING THE ROOM DIRECTORY.");
+    } else if (sView.dirStatus == GDX_NET_ROOM_DIR_FAILED) {
+        put_line(FRIEND_STATUS_Y, GDX_NET_ROOM_COLOUR_RED,
+                 sView.dirText[0] != '\0' ? sView.dirText : "THE DIRECTORY FAILED.");
+    } else if (count == 0) {
+        put_line(FRIEND_STATUS_Y, GDX_NET_ROOM_COLOUR_DIM, "NO ROOM OF THEIRS RIGHT NOW.");
+    } else {
+        snprintf(text, sizeof(text), "%d %s OF THEIRS", count, count == 1 ? "ROOM" : "ROOMS");
+        put_line(FRIEND_STATUS_Y, GDX_NET_ROOM_COLOUR_DIM, text);
+    }
+}
+
+static void draw_friend(void) {
+    char name[GDX_NET_ROOM_NAME_BYTES];
+    char code[GDX_NET_ROOM_FRIEND_CODE_BYTES];
+    int first;
+    int count;
+    int y0;
+    int visible;
+    int i;
+
+    gdx_lan_room_friend_name(sFriendIndex, name, (int) sizeof(name));
+    gdx_lan_room_friend_code(sFriendIndex, code, (int) sizeof(code));
+    put_title(name);
+    put_code_lines(60, GDX_NET_ROOM_COLOUR_DIM, code);
+    for (i = 0; i < 3 && i < sRowCount; i++) {
+        put_row(i, FRIEND_ROWS_Y + i * MENU_STEP);
+    }
+    list_geometry(&first, &count, &y0, &visible);
+    put_friend_status(count);
+    put_listed_rows(first, count, y0, visible);
+    put_note();
+}
+
+static void draw_met(void) {
+    char name[GDX_NET_ROOM_NAME_BYTES];
+    int first;
+    int count;
+    int y0;
+    int visible;
+    int i;
+
+    put_title("LAST ROOM");
+    list_geometry(&first, &count, &y0, &visible);
+    if (count == 0) {
+        put_paragraph(60, GDX_NET_ROOM_COLOUR_DIM,
+                      "NOBODY YET. THE PLAYERS OF THE NEXT ROOM YOU ARE IN SHOW HERE.", 2);
+    } else {
+        put_line(60, GDX_NET_ROOM_COLOUR_DIM, "PICK A PLAYER TO ADD AS A FRIEND.");
+    }
+    for (i = sTop; i < count && i < sTop + visible; i++) {
+        const int y = y0 + (i - sTop) * LIST_STEP;
+
+        if (first + i == sCursor) {
+            put_bar(y);
+        }
+        gdx_lan_room_met_name(i, name, (int) sizeof(name));
+        put_line(y, row_colour(first + i), name);
+        if (!sRows[first + i].enabled) {
+            put_text(MARGIN_RIGHT, y, GDX_NET_ROOM_FONT_SMALL, GDX_NET_ROOM_ALIGN_RIGHT, GDX_NET_ROOM_COLOUR_DIM,
+                     "ON YOUR LIST");
+        }
+    }
+    put_scroll(y0, count, visible);
+    put_row(sRowCount - 1, MET_LIST_Y + MET_VISIBLE * LIST_STEP + 8);
+    put_note();
 }
 
 /* A line of the log as it stands on screen. */
@@ -1440,6 +2464,57 @@ static void put_table_row(int y, int selected, int id) {
     }
 }
 
+/* The room page's first line: where the room is, and for a directory room its code or how its listing goes.
+ * On the vote result, a member whose own check of the draw failed sees that instead (decision 56).
+ * Returns the line's colour. */
+static int room_header(char* out, int size) {
+    static const char* const kTypeWords[GDX_NET_ROOM_TYPES] = { "", "CODE", "OPEN", "FRIENDS" };
+    const int type = sView.roomType >= 0 && sView.roomType < GDX_NET_ROOM_TYPES ? sView.roomType : 0;
+
+    if (sView.mode != GDX_NET_ROOM_MODE_HOSTING) {
+        char address[GDX_NET_ROOM_ADDRESS_BYTES + 8];
+
+        if (sView.phase == GDX_NET_ROOM_PHASE_LOTTERY && !sView.lotteryChecked) {
+            snprintf(out, (size_t) size, "THE HOST'S DRAW FAILED THE CHECK.");
+            return GDX_NET_ROOM_COLOUR_RED;
+        }
+        if (sView.code[0] != '\0') {
+            /* The type tells a member what kind of room the code it passes on opens. */
+            if (type == GDX_NET_ROOM_TYPE_OPEN || type == GDX_NET_ROOM_TYPE_FRIENDS) {
+                snprintf(out, (size_t) size, "%s ROOM CODE %s", kTypeWords[type], sView.code);
+            } else {
+                snprintf(out, (size_t) size, "ROOM CODE %s", sView.code);
+            }
+        } else {
+            if (address_words(sView.hostText, address, (int) sizeof(address))) {
+                /* One line has no room for eight groups: the JOINING page showed the whole address. */
+                const char* port = strstr(address, " PORT ");
+                snprintf(out, (size_t) size, "IPV6 ROOM%s", port != NULL ? port : "");
+            } else {
+                snprintf(out, (size_t) size, "ROOM AT %s", address);
+            }
+        }
+        return GDX_NET_ROOM_COLOUR_DIM;
+    }
+    if (type == GDX_NET_ROOM_TYPE_LAN) {
+        snprintf(out, (size_t) size, "YOUR ROOM ON PORT %u", sView.port);
+        return GDX_NET_ROOM_COLOUR_DIM;
+    }
+    switch (sView.listing) {
+        case GDX_NET_ROOM_LISTING_LISTED:
+            snprintf(out, (size_t) size, "%s ROOM %s%s", kTypeWords[type], sView.code,
+                     (type == GDX_NET_ROOM_TYPE_OPEN && !sView.reachable) ? " - NOT REACHABLE" : "");
+            return GDX_NET_ROOM_COLOUR_DIM;
+        case GDX_NET_ROOM_LISTING_FAILED:
+            snprintf(out, (size_t) size, "%s", sView.listingText[0] != '\0' ? sView.listingText : "NOT LISTED.");
+            return GDX_NET_ROOM_COLOUR_RED;
+        default:
+            snprintf(out, (size_t) size, "%s",
+                     sView.listingText[0] != '\0' ? sView.listingText : "LISTING YOUR ROOM.");
+            return GDX_NET_ROOM_COLOUR_DIM;
+    }
+}
+
 static void draw_room(void) {
     char text[GDX_NET_ROOM_STATUS_BYTES];
     const int racers = count_racers();
@@ -1462,15 +2537,7 @@ static void draw_room(void) {
     }
     /* A table needs the rows the room's address and its seat counts stand on. */
     if (!table) {
-        if (sView.mode == GDX_NET_ROOM_MODE_HOSTING) {
-            snprintf(text, sizeof(text), "YOUR ROOM ON PORT %u", sView.port);
-        } else {
-            char address[GDX_NET_ROOM_ADDRESS_BYTES + 8];
-
-            address_words(sView.hostText, address, (int) sizeof(address));
-            snprintf(text, sizeof(text), "ROOM AT %s", address);
-        }
-        put_line(58, GDX_NET_ROOM_COLOUR_DIM, text);
+        put_line(58, room_header(text, (int) sizeof(text)), text);
         snprintf(text, sizeof(text), "%d OF %d RACERS - %d OF %d WATCHING", racers, sView.racerCap,
                  sView.playerCount - racers, GDX_NET_ROOM_WATCH_SEATS);
         put_line(68, GDX_NET_ROOM_COLOUR_DIM, text);
@@ -1486,6 +2553,21 @@ static void draw_room(void) {
         if (sRows[i].id == ROW_SEATS) {
             snprintf(text, sizeof(text), "%d", sView.racerCap);
             put_text(FIELD_LEFT, y, GDX_NET_ROOM_FONT_SMALL, GDX_NET_ROOM_ALIGN_LEFT, row_colour(i), text);
+            /* A room on the internet runs on the host's upload: the figure each seat costs is measured (L2).
+               The host sends to every seat but its own and to the two watch seats. */
+            if (sView.roomType != GDX_NET_ROOM_TYPE_LAN) {
+                const unsigned kbit = (unsigned) (sView.racerCap + 1) * UPLOAD_KBIT_PER_SEAT;
+                const unsigned tenths = (kbit + 50u) / 100u;
+
+                snprintf(text, sizeof(text), "NEEDS %u.%u MBIT UPLOAD", tenths / 10u, tenths % 10u);
+                put_text(124, y, GDX_NET_ROOM_FONT_SMALL, GDX_NET_ROOM_ALIGN_LEFT, GDX_NET_ROOM_COLOUR_DIM, text);
+            }
+        } else if (sRows[i].id == ROW_CUSTOM) {
+            put_text(FIELD_LEFT, y, GDX_NET_ROOM_FONT_SMALL, GDX_NET_ROOM_ALIGN_LEFT, row_colour(i),
+                     sView.customTracks ? "ON" : "OFF");
+        } else if (sRows[i].id == ROW_CPU_FILL) {
+            put_text(FIELD_LEFT, y, GDX_NET_ROOM_FONT_SMALL, GDX_NET_ROOM_ALIGN_LEFT, row_colour(i),
+                     sView.cpuFill ? "ON" : "OFF");
         }
     }
 
@@ -1571,6 +2653,30 @@ const GdxNetRoomDrawItem* gdx_net_room_screen_draw(int* count) {
             break;
         case GDX_NET_ROOM_PAGE_MESSAGES:
             draw_messages();
+            break;
+        case GDX_NET_ROOM_PAGE_CODE:
+            draw_code();
+            break;
+        case GDX_NET_ROOM_PAGE_OPEN:
+            draw_open();
+            break;
+        case GDX_NET_ROOM_PAGE_QUICK:
+            draw_quick();
+            break;
+        case GDX_NET_ROOM_PAGE_NOTICE:
+            draw_notice();
+            break;
+        case GDX_NET_ROOM_PAGE_FRIENDS:
+            draw_friends();
+            break;
+        case GDX_NET_ROOM_PAGE_FRIEND_ADD:
+            draw_friend_add();
+            break;
+        case GDX_NET_ROOM_PAGE_FRIEND:
+            draw_friend();
+            break;
+        case GDX_NET_ROOM_PAGE_MET:
+            draw_met();
             break;
         default:
             draw_closed();

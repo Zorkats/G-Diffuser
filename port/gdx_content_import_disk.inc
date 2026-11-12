@@ -1,12 +1,29 @@
 void GdxContentImport_RunOnDiskThread(void) {
     int32_t rc;
     int32_t cupCleared = 0;
+    int32_t cupSlot = -1;
+    int32_t row;
     char previousCup[sizeof(gEditCupTrackNames)];
 
     if (!gdx_snapshot_begin(1)) {
+        sImportCupRegister = 0;
         sImportRc = -1;
         sImportState = GDX_IMPORT_DONE;
         return;
+    }
+    if (sImportCupRegister) {
+        /* G-NET "Save to my tracks": the first free Edit Cup slot, chosen here on the thread that owns
+         * gEditCupTrackNames. With none free nothing is written at all (plan decision 14). */
+        for (row = 0; row < 6 && cupSlot < 0; row++) {
+            if (gEditCupTrackNames[row][0] == '\0') {
+                cupSlot = row;
+            }
+        }
+        if (cupSlot < 0) {
+            sImportCupFull = 1;
+            rc = -1;
+            goto done;
+        }
     }
     if (sImportContentType == GDX_CONTENT_TYPE_TRACK && !gdx_import_prepare_snapshot(-1)) {
         rc = -1;
@@ -30,6 +47,18 @@ void GdxContentImport_RunOnDiskThread(void) {
     }
     if (rc == 0 && sImportContentType == GDX_CONTENT_TYPE_TRACK) {
         gdx_import_store_meta(sImportName, sImportExtension, 0, sImportPayload);
+    }
+    if (rc == 0 && cupSlot >= 0) {
+        /* The track is on the disk; the cup names it the way gdx_content_cup_register_begin does. A failed
+         * CENT write keeps the old cup, and the track stays saved outside it. */
+        memcpy(previousCup, gEditCupTrackNames, sizeof(previousCup));
+        memset(gEditCupTrackNames[cupSlot], 0, sizeof(gEditCupTrackNames[cupSlot]));
+        memcpy(gEditCupTrackNames[cupSlot], sImportName, strlen(sImportName));
+        rc = Mfs_SaveFile(gWorkingDirectory, "CRS_ENTRY", "CENT", (uint8_t*) gEditCupTrackNames,
+                          sizeof(gEditCupTrackNames), 0, 0xFF, 1);
+        if (rc != 0) {
+            memcpy(gEditCupTrackNames, previousCup, sizeof(previousCup));
+        }
     }
 
     if (rc == 0 && sImportContentType == GDX_CONTENT_TYPE_TRACK && sImportExtension[3] == 'E') {
@@ -61,6 +90,7 @@ void GdxContentImport_RunOnDiskThread(void) {
 
 done:
     gdx_snapshot_end();
+    sImportCupRegister = 0;
     sImportCupCleared = cupCleared;
     sImportMfsError = gMfsError;
     sImportRc = rc;

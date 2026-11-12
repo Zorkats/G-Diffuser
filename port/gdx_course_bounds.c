@@ -30,8 +30,14 @@ float gdx_course_edit_min_y(void) {
     return GDX_COURSE_VALIDATOR_MIN_Y;
 }
 
+static int sForceExtended;
+
+void gdx_course_bounds_force_extended(int on) {
+    sForceExtended = on ? 1 : 0;
+}
+
 float gdx_course_edit_max_y(void) {
-    if (CVarGetInteger("gEnhancements.CourseEdit.ExtendedHeight", 0) != 0) {
+    if (sForceExtended || (CVarGetInteger("gEnhancements.CourseEdit.ExtendedHeight", 0) != 0)) {
         return GDX_COURSE_EXTENDED_MAX_Y;
     }
     return GDX_COURSE_VALIDATOR_MAX_Y;

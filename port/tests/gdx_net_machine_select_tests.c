@@ -158,6 +158,29 @@ static void test_opens(void) {
     CHECK(gdx_net_machine_select_track() == 23);
 }
 
+/* A room's custom track: it races in the first Edit Cup slot, under its own title as the title font draws it. */
+static void test_custom_track(void) {
+    reset_counts();
+    room_lock_in(115u);
+    sFakeRoom.track = GDX_NET_LOCK_IN_TRACK_CUSTOM;
+    /* No title: the room's view is not one a custom race can start from. */
+    CHECK(gdx_net_machine_select_poll_open() == 0);
+    CHECK(gdx_net_machine_select_active() == 0);
+
+    snprintf(sFakeRoom.title, sizeof(sFakeRoom.title), "%s", "Loop de loop");
+    CHECK(gdx_net_machine_select_poll_open() == 1);
+    CHECK(gdx_net_machine_select_track() == GDX_NET_LOCK_IN_COURSE_CUSTOM);
+    CHECK(gdx_net_machine_select_track() == 24);
+    CHECK(gdx_net_machine_select_track_title() != NULL);
+    CHECK(strcmp(gdx_net_machine_select_track_title(), "LOOP DE LOOP") == 0);
+
+    /* A stock track keeps its own name. */
+    room_lock_in(116u);
+    CHECK(gdx_net_machine_select_poll_open() == 1);
+    CHECK(gdx_net_machine_select_track() == 3);
+    CHECK(gdx_net_machine_select_track_title() == NULL);
+}
+
 /* The main menu only runs when the screen is not up, so its poll records that. */
 static void test_main_menu_poll_clears(void) {
     open_screen(120u);
@@ -498,6 +521,7 @@ static void test_waits_for_the_grid(void) {
 int main(void) {
     test_does_not_open();
     test_opens();
+    test_custom_track();
     test_main_menu_poll_clears();
     test_stays_then_leaves_when_the_state_ends();
     test_leaves_when_the_room_closes();

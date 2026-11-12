@@ -36,9 +36,18 @@ constexpr size_t kReliableWindow = 64;   // ids a sender may have unacked, and t
 constexpr size_t kInboxCap = 128;        // delivered messages waiting for PopMessage
 constexpr size_t kUnreliableOutCap = 64; // unreliable messages waiting for the next Update
 
-// 2 since the room protocol of milestone O3 (gdx_net_lobby.h). A peer on version 1 is refused with
-// VersionMismatch.
-constexpr uint16_t kProtocolVersion = 2;
+// The one protocol number of G-NET: the channel's hello and the room's discovery datagrams both carry it
+// (gdx_net_lobby.h aliases it as kLobbyVersion). Each slice that changes a message bumps it once (G-NET
+// decision 26). 2 was the room protocol of milestone O3; 3 adds custom tracks (O4.4); 4 lets the room outlive its
+// host (D28.1); 5 adds the hello cookie and pads the discovery probe (O5.1); 6 carries the successor's address in 16 bytes,
+// so an IPv6 member can take over (O5.3); 7 adds the room type, the
+// lottery commitment and its reveal, and the directory takeover secret for the successor (O6.1, O6.4, O5.10); 8 adds
+// the join proof: the host's nonce, the joiner's friend key and signature in Join, and the members' keys (O7.3); 9 adds
+// reachability (the reachable flag in Join and the Reach message) and the bans in the handover table (decisions 50
+// to 52). A peer on another version is refused
+// with VersionMismatch. Since O5.1 this number alone decides who may join, not the build string (decision 25), so
+// a change to any message or to the track encoding must bump it.
+constexpr uint16_t kProtocolVersion = 9;
 
 enum class Role : uint8_t {
     Client,
@@ -70,6 +79,19 @@ enum class QueueResult : uint8_t {
     Invalid    // null data with a nonzero length
 };
 
+// The stateless gate (G-NET decision 34). A server that owns no channel for an address reads the hello itself and
+// answers without keeping state: a challenge with a cookie bound to that address, or a version refusal. It builds a
+// channel only for a hello that echoes a valid cookie, so a spoofed address cannot take a pending slot. Neither reply
+// is larger than the hello, so the gate cannot amplify a flood. The cookie's key and lifetime belong to the owner.
+constexpr size_t kHelloBytes = 17;
+
+// Reads a hello packet: kHelloBytes long, magic, type hello. False for any other packet.
+bool ParseHello(const uint8_t* data, size_t len, uint32_t& nonce, uint16_t& version, uint64_t& cookie);
+// The challenge a client answers by sending its hello again with this cookie.
+std::vector<uint8_t> EncodeChallenge(uint32_t nonce, uint16_t version, uint64_t cookie);
+// The refusal a client on another protocol version reads as VersionMismatch. version is the server's.
+std::vector<uint8_t> EncodeVersionRefuse(uint32_t nonce, uint16_t version);
+
 const char* CloseReasonName(CloseReason reason);
 const char* QueueResultName(QueueResult result);
 
@@ -95,6 +117,11 @@ struct ChannelConfig {
     uint32_t keepaliveMs = 1000; // idle time before an empty packet keeps the peer's timer alive
 };
 
+// Bytes the UDP and IPv4 headers add to every datagram. The channel never sees them, so its byte counters add
+// this estimate per datagram (G-NET decision 46). IPv6 adds 48 and arrives with the dual-stack slice (O5.3).
+constexpr uint32_t kUdpIpv4HeaderBytes = 28;
+constexpr uint32_t kUdpIpv6HeaderBytes = 48;
+
 struct ChannelStats {
     uint32_t packetsIn = 0;
     uint32_t packetsOut = 0;
@@ -107,6 +134,20 @@ struct ChannelStats {
     uint32_t resends = 0;       // reliable messages sent again after their RTO
     uint32_t overflowDrops = 0; // unreliable messages dropped because the inbox was full
     uint32_t rttMs = 0;         // smoothed round trip in milliseconds; 0 until the first sample
+    // Wire bytes are each datagram's length plus the header estimate, counted when the datagram is sent or
+    // handed to Receive, whether or not it parses. datagramsSent equals packetsOut and datagramsReceived equals
+    // packetsIn; they sit here so the upload measurement reads from one struct.
+    uint64_t bytesSent = 0;
+    uint64_t bytesReceived = 0;
+    uint32_t datagramsSent = 0;
+    uint32_t datagramsReceived = 0;
+    // Where bytesSent went, and the four add up to it exactly. A reliable message's first send is reliable or
+    // unreliable, and each resend is retransmit. Everything else on the wire is ackKeepalive: the header estimate,
+    // the 15-byte data header that carries the ack, and the handshake, disconnect and empty keepalive packets.
+    uint64_t bytesSentReliable = 0;
+    uint64_t bytesSentUnreliable = 0;
+    uint64_t bytesSentRetransmit = 0;
+    uint64_t bytesSentAckKeepalive = 0;
 };
 
 class Channel {
@@ -149,7 +190,30 @@ public:
         return stats_;
     }
 
+    // Reliable messages queued or sent and not yet acked: the window slots in use. A track transfer sends a
+    // chunk only while this is below its share, so lobby messages always find a slot (G-NET decision 6).
+    size_t ReliableOutstanding() const {
+        return sendQueue_.size();
+    }
+
+    // The header estimate that the byte counters add to each datagram: kUdpIpv4HeaderBytes unless set. Only
+    // datagrams sent or received after the call count with the new value.
+    void SetHeaderEstimateBytes(uint32_t bytes) {
+        headerBytes_ = bytes;
+    }
+
+    uint32_t HeaderEstimateBytes() const {
+        return headerBytes_;
+    }
+
 private:
+    // The message bytes in one outgoing datagram, split the way ChannelStats counts them.
+    struct SentSplit {
+        size_t reliable = 0;
+        size_t unreliable = 0;
+        size_t retransmit = 0;
+    };
+
     // A reliable message waiting for an ack. lastSeq is the packet it most recently rode in. An ack for
     // that packet clears it. An ack for an older packet does not, which costs at most one extra resend.
     struct Pending {
@@ -179,6 +243,7 @@ private:
         std::vector<uint8_t> bytes;
         uint16_t seq = 0;
         size_t msgs = 0;
+        SentSplit split;
     };
 
     // A parsed message that still points into the datagram being received.
@@ -191,6 +256,7 @@ private:
     };
 
     void OnHello(uint32_t nonce, const uint8_t* body, size_t len, uint32_t nowMs);
+    void OnChallenge(uint32_t nonce, const uint8_t* body, size_t len, uint32_t nowMs);
     void OnAccept(uint32_t nonce, const uint8_t* body, size_t len, uint32_t nowMs);
     void OnRefuse(uint32_t nonce, const uint8_t* body, size_t len, uint32_t nowMs);
     void OnDisconnect(uint32_t nonce, const uint8_t* body, size_t len, uint32_t nowMs);
@@ -205,7 +271,7 @@ private:
     void Close(CloseReason reason, bool notifyPeer, uint32_t nowMs);
     void SendHello(uint32_t nowMs);
     void SendControl(uint8_t type, uint32_t nonce, const std::vector<uint8_t>& body, uint32_t nowMs);
-    void Emit(const std::vector<uint8_t>& bytes, uint32_t nowMs);
+    void Emit(const std::vector<uint8_t>& bytes, const SentSplit& split, uint32_t nowMs);
     void BeginData(Outgoing& out);
     void Place(Outgoing& out, size_t need, uint32_t nowMs);
     void Ship(Outgoing& out, uint32_t nowMs);
@@ -226,8 +292,10 @@ private:
     uint32_t nonce_ = 0;          // the connection nonce: ours (client) or the accepted hello's (server)
     uint32_t connectStartMs_ = 0; // client handshake started, for the handshake timeout
     uint32_t lastHelloMs_ = 0;    // last hello sent, for retries
+    uint64_t cookie_ = 0;         // client: the server's last challenge, echoed in each hello; 0 before one
     uint32_t lastRecvMs_ = 0;     // last valid packet from the peer, for the silence timeout
     uint32_t lastSendMs_ = 0;     // last datagram sent, for keepalive
+    uint32_t headerBytes_ = kUdpIpv4HeaderBytes; // added per datagram to the byte counters
 
     // Sender side.
     uint16_t nextSeq_ = 0;

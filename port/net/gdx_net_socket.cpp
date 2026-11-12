@@ -14,6 +14,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <winsock2.h>
+#include <ws2tcpip.h>
 // SIO_UDP_CONNRESET is defined in mswsock.h, not winsock2.h. Without this include the guard in
 // CreateNative compiles to nothing and the connreset switch is never sent.
 #include <mswsock.h>
@@ -93,10 +94,11 @@ void ReleaseWinsock() {
 }
 #endif
 
-// Creates a non-blocking IPv4 UDP socket, or returns kNativeInvalid.
-std::intptr_t CreateNative() {
+// Creates a non-blocking UDP socket of the family (AF_INET or AF_INET6), or returns kNativeInvalid. An IPv6
+// socket is dual-stack when dual is true and IPv6-only otherwise: the default differs per OS, so it is always set.
+std::intptr_t CreateNative(int family, bool dual) {
 #ifdef _WIN32
-    const NativeSocket sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    const NativeSocket sock = socket(family, SOCK_DGRAM, IPPROTO_UDP);
     if (sock == INVALID_SOCKET) {
         return kNativeInvalid;
     }
@@ -108,6 +110,21 @@ std::intptr_t CreateNative() {
     DWORD unused = 0;
     WSAIoctl(sock, SIO_UDP_CONNRESET, &disable, sizeof(disable), nullptr, 0, &unused, nullptr, nullptr);
 #endif
+    // Without it, Windows lets another socket bind the IPv4 side of a dual-stack port that is in use, and that
+    // socket then gets the IPv4 datagrams meant for this one. Linux refuses such a bind on its own.
+    const BOOL exclusive = TRUE;
+    if (setsockopt(sock, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, reinterpret_cast<const char*>(&exclusive),
+                   sizeof(exclusive)) != 0) {
+        closesocket(sock);
+        return kNativeInvalid;
+    }
+    if (family == AF_INET6) {
+        const DWORD v6only = dual ? 0 : 1;
+        if (setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, reinterpret_cast<const char*>(&v6only), sizeof(v6only)) != 0) {
+            closesocket(sock);
+            return kNativeInvalid;
+        }
+    }
     u_long nonBlocking = 1;
     if (ioctlsocket(sock, FIONBIO, &nonBlocking) != 0) {
         closesocket(sock);
@@ -115,9 +132,16 @@ std::intptr_t CreateNative() {
     }
     return static_cast<std::intptr_t>(sock);
 #else
-    const NativeSocket fd = socket(AF_INET, SOCK_DGRAM, 0);
+    const NativeSocket fd = socket(family, SOCK_DGRAM, 0);
     if (fd < 0) {
         return kNativeInvalid;
+    }
+    if (family == AF_INET6) {
+        const int v6only = dual ? 0 : 1;
+        if (setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only)) != 0) {
+            close(fd);
+            return kNativeInvalid;
+        }
     }
     const int flags = fcntl(fd, F_GETFL, 0);
     if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
@@ -136,44 +160,151 @@ void CloseNative(std::intptr_t handle) {
 #endif
 }
 
-// Creates a socket, binds it to want and reads back the port the OS chose. On any failure the
+// The OS form of addr for a socket of the family. An IPv4 socket takes only IPv4 addresses; an IPv6 socket
+// takes every address, IPv4 ones mapped. Returns the length to pass, or 0 when the socket cannot reach addr.
+NativeSockLen ToSockaddr(const NetAddress& addr, int family, sockaddr_storage& out) {
+    std::memset(&out, 0, sizeof(out));
+    if (family == AF_INET) {
+        if (!addr.IsV4()) {
+            return 0;
+        }
+        sockaddr_in& sa = reinterpret_cast<sockaddr_in&>(out);
+        sa.sin_family = AF_INET;
+        sa.sin_addr.s_addr = htonl(addr.Ipv4());
+        sa.sin_port = htons(addr.port);
+        return static_cast<NativeSockLen>(sizeof(sockaddr_in));
+    }
+    sockaddr_in6& sa = reinterpret_cast<sockaddr_in6&>(out);
+    sa.sin6_family = AF_INET6;
+    std::memcpy(&sa.sin6_addr, addr.ip.data(), 16);
+    sa.sin6_port = htons(addr.port);
+    return static_cast<NativeSockLen>(sizeof(sockaddr_in6));
+}
+
+NetAddress FromSockaddr(const sockaddr_storage& ss) {
+    NetAddress addr;
+    if (ss.ss_family == AF_INET) {
+        const sockaddr_in& sa = reinterpret_cast<const sockaddr_in&>(ss);
+        addr = NetAddress::FromV4(ntohl(sa.sin_addr.s_addr), ntohs(sa.sin_port));
+    } else if (ss.ss_family == AF_INET6) {
+        const sockaddr_in6& sa = reinterpret_cast<const sockaddr_in6&>(ss);
+        std::memcpy(addr.ip.data(), &sa.sin6_addr, 16);
+        addr.port = ntohs(sa.sin6_port);
+    }
+    return addr;
+}
+
+// Creates a socket of the family, binds it to want and reads back the port the OS chose. On any failure the
 // socket is closed again, so a failed Open leaves nothing behind.
-std::intptr_t OpenNative(const sockaddr_in& want, uint16_t& boundPort) {
-    const std::intptr_t handle = CreateNative();
+std::intptr_t OpenNative(const NetAddress& want, int family, bool dual, uint16_t& boundPort) {
+    sockaddr_storage sa;
+    const NativeSockLen saLen = ToSockaddr(want, family, sa);
+    if (saLen == 0) {
+        return kNativeInvalid;
+    }
+    const std::intptr_t handle = CreateNative(family, dual);
     if (handle == kNativeInvalid) {
         return kNativeInvalid;
     }
     // No SO_REUSEADDR. On Windows it lets a second process take over a UDP port that is in use.
     const NativeSocket sock = static_cast<NativeSocket>(handle);
-    if (bind(sock, reinterpret_cast<const sockaddr*>(&want), static_cast<NativeSockLen>(sizeof(want))) != 0) {
+    if (bind(sock, reinterpret_cast<const sockaddr*>(&sa), saLen) != 0) {
         CloseNative(handle);
         return kNativeInvalid;
     }
-    sockaddr_in bound;
+    sockaddr_storage bound;
     std::memset(&bound, 0, sizeof(bound));
     NativeSockLen boundLen = static_cast<NativeSockLen>(sizeof(bound));
     if (getsockname(sock, reinterpret_cast<sockaddr*>(&bound), &boundLen) != 0) {
         CloseNative(handle);
         return kNativeInvalid;
     }
-    boundPort = ntohs(bound.sin_port);
+    boundPort = FromSockaddr(bound).port;
     return handle;
 }
 
-sockaddr_in ToSockaddr(const NetAddress& addr) {
-    sockaddr_in sa;
-    std::memset(&sa, 0, sizeof(sa));
-    sa.sin_family = AF_INET;
-    sa.sin_addr.s_addr = htonl(addr.ip);
-    sa.sin_port = htons(addr.port);
-    return sa;
+int HexDigit(char c) {
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return -1;
 }
 
-NetAddress FromSockaddr(const sockaddr_in& sa) {
-    NetAddress addr;
-    addr.ip = ntohl(sa.sin_addr.s_addr);
-    addr.port = ntohs(sa.sin_port);
-    return addr;
+// Reads [begin, end) as the text of an IPv6 address: groups of one to four hex digits split by ':', with at
+// most one "::" standing for one or more zero groups. False for anything else.
+bool ParseIpv6(const char* begin, const char* end, IpBytes& out) {
+    uint16_t head[8] = {};
+    uint16_t tail[8] = {};
+    int heads = 0;
+    int tails = 0;
+    bool gap = false;
+    const char* p = begin;
+    if (end - begin >= 2 && p[0] == ':' && p[1] == ':') {
+        gap = true;
+        p += 2;
+    } else if (p != end && *p == ':') {
+        return false; // a single leading colon
+    }
+    while (p != end) {
+        unsigned value = 0;
+        int digits = 0;
+        while (p != end && HexDigit(*p) >= 0) {
+            if (++digits > 4) {
+                return false;
+            }
+            value = value * 16 + static_cast<unsigned>(HexDigit(*p));
+            p++;
+        }
+        if (digits == 0) {
+            return false;
+        }
+        if (heads + tails == 8) {
+            return false;
+        }
+        if (gap) {
+            tail[tails++] = static_cast<uint16_t>(value);
+        } else {
+            head[heads++] = static_cast<uint16_t>(value);
+        }
+        if (p == end) {
+            break;
+        }
+        if (*p != ':') {
+            return false;
+        }
+        p++;
+        if (p != end && *p == ':') {
+            if (gap) {
+                return false; // a second "::"
+            }
+            gap = true;
+            p++;
+        } else if (p == end) {
+            return false; // a single trailing colon
+        }
+    }
+    // "::" must stand for at least one group; without it all eight are needed.
+    if (gap ? heads + tails > 7 : heads != 8) {
+        return false;
+    }
+    uint16_t groups[8] = {};
+    for (int i = 0; i < heads; i++) {
+        groups[i] = head[i];
+    }
+    for (int i = 0; i < tails; i++) {
+        groups[8 - tails + i] = tail[i];
+    }
+    for (int i = 0; i < 8; i++) {
+        out[2 * i] = static_cast<uint8_t>(groups[i] >> 8);
+        out[2 * i + 1] = static_cast<uint8_t>(groups[i]);
+    }
+    return true;
 }
 
 // Reads [begin, end) as an unsigned decimal of at most five digits with no sign, no spaces and no
@@ -204,6 +335,20 @@ bool ParseDecimal(const char* begin, const char* end, unsigned maxValue, unsigne
 bool ParseAddress(const char* text, NetAddress& out) {
     if (text == nullptr) {
         return false;
+    }
+    if (text[0] == '[') {
+        const char* close = std::strchr(text, ']');
+        if (close == nullptr || close[1] != ':') {
+            return false;
+        }
+        IpBytes ip{};
+        unsigned port = 0;
+        if (!ParseIpv6(text + 1, close, ip) || !ParseDecimal(close + 2, text + std::strlen(text), 65535, port)) {
+            return false;
+        }
+        out.ip = ip;
+        out.port = static_cast<uint16_t>(port);
+        return true;
     }
     // A bare address is refused: a port is always required, so a missing one is a caller bug.
     const char* colon = std::strchr(text, ':');
@@ -237,17 +382,60 @@ bool ParseAddress(const char* text, NetAddress& out) {
             return false;
         }
     }
-    out.ip = ip;
-    out.port = static_cast<uint16_t>(port);
+    out = NetAddress::FromV4(ip, static_cast<uint16_t>(port));
     return true;
 }
 
 std::string FormatAddress(const NetAddress& addr) {
     std::string text;
-    for (int shift = 24; shift >= 0; shift -= 8) {
-        text += std::to_string((addr.ip >> shift) & 0xFFu);
-        text += (shift > 0) ? '.' : ':';
+    if (addr.IsV4()) {
+        const uint32_t ip = addr.Ipv4();
+        for (int shift = 24; shift >= 0; shift -= 8) {
+            text += std::to_string((ip >> shift) & 0xFFu);
+            text += (shift > 0) ? '.' : ':';
+        }
+        text += std::to_string(addr.port);
+        return text;
     }
+    uint16_t groups[8];
+    for (int i = 0; i < 8; i++) {
+        groups[i] = static_cast<uint16_t>((addr.ip[2 * i] << 8) | addr.ip[2 * i + 1]);
+    }
+    // The longest run of two or more zero groups, the first one on a tie (RFC 5952 4.2).
+    int bestAt = -1;
+    int bestLen = 1;
+    for (int i = 0; i < 8;) {
+        int j = i;
+        while (j < 8 && groups[j] == 0) {
+            j++;
+        }
+        if (j - i > bestLen) {
+            bestAt = i;
+            bestLen = j - i;
+        }
+        i = j == i ? i + 1 : j;
+    }
+    static const char kHex[] = "0123456789abcdef";
+    text += '[';
+    for (int i = 0; i < 8; i++) {
+        if (i == bestAt) {
+            text += "::";
+            i += bestLen - 1;
+            continue;
+        }
+        if (i > 0 && i != bestAt + bestLen) {
+            text += ':';
+        }
+        bool started = false;
+        for (int shift = 12; shift >= 0; shift -= 4) {
+            const unsigned nibble = (groups[i] >> shift) & 0xFu;
+            if (nibble != 0 || started || shift == 0) {
+                text += kHex[nibble];
+                started = true;
+            }
+        }
+    }
+    text += "]:";
     text += std::to_string(addr.port);
     return text;
 }
@@ -257,9 +445,12 @@ UdpSocket::~UdpSocket() {
 }
 
 UdpSocket::UdpSocket(UdpSocket&& other) noexcept
-    : handle_(other.handle_), localPort_(other.localPort_), scratch_(std::move(other.scratch_)) {
+    : handle_(other.handle_), localPort_(other.localPort_), ipv6_(other.ipv6_), dualStack_(other.dualStack_),
+      scratch_(std::move(other.scratch_)) {
     other.handle_ = kNoHandle;
     other.localPort_ = 0;
+    other.ipv6_ = false;
+    other.dualStack_ = false;
 }
 
 UdpSocket& UdpSocket::operator=(UdpSocket&& other) noexcept {
@@ -267,9 +458,13 @@ UdpSocket& UdpSocket::operator=(UdpSocket&& other) noexcept {
         Close();
         handle_ = other.handle_;
         localPort_ = other.localPort_;
+        ipv6_ = other.ipv6_;
+        dualStack_ = other.dualStack_;
         scratch_ = std::move(other.scratch_);
         other.handle_ = kNoHandle;
         other.localPort_ = 0;
+        other.ipv6_ = false;
+        other.dualStack_ = false;
     }
     return *this;
 }
@@ -284,13 +479,30 @@ bool UdpSocket::Open(const NetAddress& bindAddr) {
         return false;
     }
     uint16_t port = 0;
-    const std::intptr_t handle = OpenNative(ToSockaddr(bindAddr), port);
+    std::intptr_t handle = kNativeInvalid;
+    bool ipv6 = false;
+    bool dual = false;
+    if (bindAddr.IsV4()) {
+        handle = OpenNative(bindAddr, AF_INET, false, port);
+    } else if (IsZeroIp(bindAddr.ip)) {
+        handle = OpenNative(bindAddr, AF_INET6, true, port);
+        ipv6 = dual = handle != kNativeInvalid;
+        if (handle == kNativeInvalid) {
+            // No IPv6 on this computer: IPv4 alone still reaches every IPv4 peer.
+            handle = OpenNative(NetAddress::FromV4(0, bindAddr.port), AF_INET, false, port);
+        }
+    } else {
+        handle = OpenNative(bindAddr, AF_INET6, false, port);
+        ipv6 = true;
+    }
     if (handle == kNativeInvalid) {
         ReleaseWinsock();
         return false;
     }
     handle_ = handle;
     localPort_ = port;
+    ipv6_ = ipv6;
+    dualStack_ = dual;
     return true;
 }
 
@@ -301,6 +513,8 @@ void UdpSocket::Close() {
     CloseNative(handle_);
     handle_ = kNoHandle;
     localPort_ = 0;
+    ipv6_ = false;
+    dualStack_ = false;
     ReleaseWinsock();
 }
 
@@ -322,16 +536,23 @@ SendResult UdpSocket::SendTo(const NetAddress& to, const void* data, std::size_t
     if (!IsOpen() || data == nullptr || len > kMaxPayload) {
         return SendResult::Error;
     }
-    const sockaddr_in sa = ToSockaddr(to);
+    if (ipv6_ && !dualStack_ && to.IsV4()) {
+        return SendResult::Error; // an IPv6-only socket cannot reach an IPv4 peer; the OSes differ on the error
+    }
+    sockaddr_storage sa;
+    const NativeSockLen saLen = ToSockaddr(to, ipv6_ ? AF_INET6 : AF_INET, sa);
+    if (saLen == 0) {
+        return SendResult::Error; // an IPv6 address from an IPv4 socket
+    }
     const NativeSocket sock = static_cast<NativeSocket>(handle_);
 #ifdef _WIN32
     const int n = sendto(sock, static_cast<const char*>(data), static_cast<int>(len), 0,
-                         reinterpret_cast<const sockaddr*>(&sa), static_cast<int>(sizeof(sa)));
+                         reinterpret_cast<const sockaddr*>(&sa), saLen);
     if (n == SOCKET_ERROR) {
         return WSAGetLastError() == WSAEWOULDBLOCK ? SendResult::WouldBlock : SendResult::Error;
     }
 #else
-    const ssize_t n = sendto(sock, data, len, 0, reinterpret_cast<const sockaddr*>(&sa), sizeof(sa));
+    const ssize_t n = sendto(sock, data, len, 0, reinterpret_cast<const sockaddr*>(&sa), saLen);
     if (n < 0) {
         return (errno == EAGAIN || errno == EWOULDBLOCK) ? SendResult::WouldBlock : SendResult::Error;
     }
@@ -346,7 +567,7 @@ RecvResult UdpSocket::RecvFrom(void* buf, std::size_t cap, std::size_t& outLen, 
     }
     const NativeSocket sock = static_cast<NativeSocket>(handle_);
     for (int attempt = 0; attempt < kMaxRecvRetries; attempt++) {
-        sockaddr_in sa;
+        sockaddr_storage sa;
         std::memset(&sa, 0, sizeof(sa));
         NativeSockLen saLen = static_cast<NativeSockLen>(sizeof(sa));
 #ifdef _WIN32

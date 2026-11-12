@@ -86,6 +86,10 @@ bool validateState(const Generation& generation) {
     return expandState(generation, restored);
 }
 
+bool expandRuntime(const Generation& generation, Bytes& runtime) {
+    return expandState(generation, runtime);
+}
+
 bool preflightState(const Generation& generation) {
     if (!validateState(generation)) {
         return false;
@@ -113,7 +117,10 @@ bool preflightStates(const std::vector<Generation>& generations) {
     return recovery::canRestoreMetadata(records);
 }
 
-Result readState(Backend& backend, Generation& identity, const Bytes& base) {
+namespace {
+// readState and peekState differ in one step: a track never saved through the snapshot path (an unsealed base
+// with no generation) gets its generation published by readState and only built in memory by peekState.
+Result readStateWith(Backend& backend, Generation& identity, const Bytes& base, bool publishLegacy) {
     if (base.size() != BaseBytes) {
         return Result::Invalid;
     }
@@ -130,7 +137,7 @@ Result readState(Backend& backend, Generation& identity, const Bytes& base) {
         if (!captureState(loaded, restored.data()) || !legacyImage(loaded) || loaded.base != base) {
             return Result::Invalid;
         }
-        status = publish(backend, loaded);
+        status = publishLegacy ? publish(backend, loaded) : Result::Ok;
     }
     if (status != Result::Ok) {
         return status;
@@ -140,6 +147,15 @@ Result readState(Backend& backend, Generation& identity, const Bytes& base) {
     }
     identity = std::move(loaded);
     return Result::Ok;
+}
+}
+
+Result readState(Backend& backend, Generation& identity, const Bytes& base) {
+    return readStateWith(backend, identity, base, true);
+}
+
+Result peekState(Backend& backend, Generation& identity, const Bytes& base) {
+    return readStateWith(backend, identity, base, false);
 }
 
 Result loadState(Backend& backend, Generation& identity, const Bytes& base, void* runtime) {

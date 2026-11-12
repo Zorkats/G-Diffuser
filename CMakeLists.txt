@@ -64,6 +64,10 @@ endif()
 option(GDX_BUILD_COMPANION "Build the G-Diffuser Companion tool (ImGui and SDL2, no game code)"
        ${GDX_COMPANION_DEFAULT})
 
+# Test executables register with CTest where they are defined (port/CMakeLists.txt). This has to come
+# before the subdirectories, or their add_test calls are ignored. Run them with `ctest -C Release -R gdx_net`.
+enable_testing()
+
 # --- Components ---------------------------------------------------------------
 add_subdirectory(libultraship)     # runtime + Fast3D renderer
 if(GDX_BUILD_COMPANION)

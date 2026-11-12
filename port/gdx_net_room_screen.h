@@ -54,6 +54,14 @@ extern "C" {
 #define GDX_NET_ROOM_PAGE_PLAYER 6   /* one other player: mute, and for the host remove */
 #define GDX_NET_ROOM_PAGE_CLOSED 7   /* the session ended on its own */
 #define GDX_NET_ROOM_PAGE_MESSAGES 8 /* the room's last messages and the ones to send */
+#define GDX_NET_ROOM_PAGE_CODE 9     /* join by code */
+#define GDX_NET_ROOM_PAGE_OPEN 10    /* the Open rooms the directory lists */
+#define GDX_NET_ROOM_PAGE_QUICK 11   /* Quick race: asking, joining, or "No Open room. Host one?" */
+#define GDX_NET_ROOM_PAGE_NOTICE 12  /* the first-use notice: what G-NET sends, and to whom */
+#define GDX_NET_ROOM_PAGE_FRIENDS 13 /* the player's friend code and friend list */
+#define GDX_NET_ROOM_PAGE_FRIEND_ADD 14 /* a friend code to type or paste */
+#define GDX_NET_ROOM_PAGE_FRIEND 15  /* one friend: their rooms, and remove */
+#define GDX_NET_ROOM_PAGE_MET 16     /* the players of the last room, to add as friends */
 
 #define GDX_NET_ROOM_DRAW_MAX 96
 /* A paragraph breaks at this many characters. A capital of the small font is at most 7 pixels wide and a

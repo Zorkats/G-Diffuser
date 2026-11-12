@@ -3,6 +3,7 @@
 // No network and no thread: each test calls the machine as the host session would and reads back its state
 // and the messages it asked to send. Every timeout is checked one millisecond before it runs out and on it.
 
+#include "../net/gdx_net_lottery.h"
 #include "../net/gdx_net_room.h"
 
 #include <cstdint>
@@ -14,6 +15,8 @@
 namespace {
 
 using namespace gdx::net::lobby;
+using gdx::net::IsZeroIp;
+using gdx::net::MappedV4;
 
 int gChecks = 0;
 int gFails = 0;
@@ -547,6 +550,113 @@ void TestTimeouts() {
     g.After(kResultsMs); // no last place to pick: the room draws
     CHECK(g.P() == Phase::Machine && g.m.LastPicked().drawn);
     g.Verify();
+}
+
+// O6.1 and O6.4 (decision 39): an Open room with a key commits to each lottery before the first ballot, draws it
+// from the salt, and reveals the salt; a copy checks both with CheckLottery. A LAN room draws as before.
+// O5.10: the directory code is set once the room is listed, travels in `room`, and the successor keeps it.
+void TestRoomCode() {
+    std::printf("room code (O5.10)\n");
+    Rig lan;
+    CHECK(!lan.m.SetCode(5) && lan.S().code == kNoRoomCode);
+    RoomConfig config = Config(77);
+    config.type = RoomType::Code;
+    Rig r(config);
+    r.Add("Ana");
+    CHECK(r.S().code == kNoRoomCode);
+    CHECK(!r.m.SetCode(kRoomCodeValues) && r.S().code == kNoRoomCode);
+    r.After(10);
+    r.out.clear();
+    CHECK(r.m.SetCode(4242));
+    r.After(10);
+    RoomState told;
+    const Outgoing* sent = r.Last(kMsgRoom);
+    CHECK(sent != nullptr && DecodeRoomState(sent->payload.data(), sent->payload.size(), told) &&
+          told.code == 4242);
+    CHECK(r.S().code == 4242);
+}
+
+void TestCommittedLottery() {
+    std::printf("committed lottery (O6.4)\n");
+    RoomConfig config = Config(77);
+    config.type = RoomType::Open;
+    for (size_t i = 0; i < config.lotteryKey.size(); i++) {
+        config.lotteryKey[i] = static_cast<uint8_t>(i * 7 + 1);
+    }
+    Rig r(config);
+    const uint8_t ana = r.Add("Ana");
+    const uint8_t bo = r.Add("Bo");
+    const uint8_t cy = r.Add("Cy");
+    CHECK(r.S().type == RoomType::Open && IsZero32(r.S().commitment)); // nothing before a vote
+    CHECK(r.m.Start(r.now, r.out));
+    CHECK(r.P() == Phase::Voting);
+    const RoomState voting = r.S();
+    CHECK(!IsZero32(voting.commitment));
+    RoomState wire;
+    const Outgoing* state = r.Last(kMsgRoom);
+    CHECK(state != nullptr && DecodeRoomState(state->payload.data(), state->payload.size(), wire) &&
+          wire.commitment == voting.commitment && wire.type == RoomType::Open);
+    CHECK(r.m.Vote(kHostId, 3, r.now, r.out));
+    CHECK(r.m.Vote(ana, 5, r.now, r.out));
+    CHECK(r.m.Vote(bo, 9, r.now, r.out));
+    CHECK(r.m.Vote(cy, kTrackRandom, r.now, r.out));
+    CHECK(r.P() == Phase::Lottery);
+    LotteryResult sent;
+    const Outgoing* lottery = r.Last(kMsgLottery);
+    CHECK(lottery != nullptr && DecodeLottery(lottery->payload.data(), lottery->payload.size(), sent));
+    CHECK(sent == r.m.Lottery() && !IsZero32(sent.salt));
+    CHECK(gdx::net::lottery::Verify(voting.commitment, 77, 0, sent.salt));
+    CHECK(sent.salt == gdx::net::lottery::RaceSalt(config.lotteryKey, 77, 0));
+    CHECK(sent == RunCommittedLottery(sent.salt, 77, 0, sent.ballots, kPoolAll, kTrackNone));
+    CHECK(CheckLottery(voting, sent));
+    // A wrong salt, another commitment, or an Open room that did not commit all fail the check.
+    LotteryResult forged = sent;
+    forged.salt[0] ^= 1;
+    CHECK(!CheckLottery(voting, forged));
+    RoomState other = voting;
+    other.commitment[5] ^= 1;
+    CHECK(!CheckLottery(other, sent));
+    RoomState bare = voting;
+    bare.commitment = Bytes32{};
+    CHECK(!CheckLottery(bare, sent));
+    // The host may not swap the winner after the reveal either.
+    forged = sent;
+    forged.winner = static_cast<uint8_t>((sent.winner + 1) % sent.ballots.size());
+    forged.track = forged.ballots[forged.winner].track == kTrackRandom ? sent.track : forged.ballots[forged.winner].track;
+    CHECK(!CheckLottery(voting, forged));
+    // Each race has its own salt.
+    CHECK(gdx::net::lottery::RaceSalt(config.lotteryKey, 77, 0) != gdx::net::lottery::RaceSalt(config.lotteryKey, 77, 1));
+
+    // A successor keeps the room type and the directory code (O5.10), and commits with its own key.
+    CHECK(r.m.SetCode(777));
+    RoomMirror mirror;
+    mirror.roster = r.m.Roster();
+    mirror.room = r.S();
+    Bytes32 key2{};
+    key2[0] = 42;
+    std::optional<RoomMachine> promoted = RoomMachine::Promote(mirror, ana, r.now, key2);
+    CHECK(promoted.has_value() && promoted->State(r.now).type == RoomType::Open &&
+          promoted->State(r.now).code == 777);
+
+    // The same key in a LAN room commits to nothing, and the lottery checks as before.
+    RoomConfig lanConfig = config;
+    lanConfig.type = RoomType::Lan;
+    Rig l(lanConfig);
+    const uint8_t la = l.Add("Ana");
+    const uint8_t lb = l.Add("Bo");
+    const uint8_t lc = l.Add("Cy");
+    CHECK(l.m.Start(l.now, l.out));
+    const RoomState lanVoting = l.S();
+    CHECK(lanVoting.type == RoomType::Lan && IsZero32(lanVoting.commitment));
+    CHECK(l.m.Vote(kHostId, 3, l.now, l.out) && l.m.Vote(la, 5, l.now, l.out) && l.m.Vote(lb, 9, l.now, l.out) &&
+          l.m.Vote(lc, 2, l.now, l.out));
+    const LotteryResult lanResult = l.m.Lottery();
+    CHECK(IsZero32(lanResult.salt) && CheckLottery(lanVoting, lanResult));
+    CHECK(lanResult == RunLottery(77, 0, l.m.Votes(), kPoolAll, kTrackNone));
+    // A salt where the room committed to nothing is refused.
+    LotteryResult salted = lanResult;
+    salted.salt[0] = 1;
+    CHECK(!CheckLottery(lanVoting, salted));
 }
 
 void TestVote() {
@@ -1589,6 +1699,89 @@ void TestRaceLeaveAndJoin() {
     }
 }
 
+// A record Machine Create could have made (gdx_net_lobby_tests.cpp has the bounds).
+MachineRecord RecordOf(uint8_t fill) {
+    MachineRecord record{};
+    for (size_t i = 0; i < record.size(); i++) {
+        record[i] = static_cast<uint8_t>(fill ^ i);
+    }
+    record[0x00] = 1;
+    record[0x01] = 2;
+    record[0x02] = 0;
+    record[0x03] = static_cast<uint8_t>(fill % 7);
+    record[0x04] = 3;
+    record[0x05] = 6;
+    record[0x06] = 8;
+    record[0x08] = 5;
+    record[0x15 + 8] = 0;
+    return record;
+}
+
+const GridEntry* EntryOf(const Grid& grid, uint8_t id) {
+    for (const GridEntry& e : grid.humans) {
+        if (e.id == id) {
+            return &e;
+        }
+    }
+    return nullptr;
+}
+
+void TestMachineRecord() {
+    std::printf("machine record (O4.5)\n");
+    Rig r;
+    const uint8_t ana = r.Add("Ana");
+    const uint8_t bo = r.Add("Bo");
+    CHECK(r.m.Start(r.now, r.out));
+    CHECK(r.P() == Phase::Machine);
+
+    // The host's own lock never passes a decoder, so the room checks the record itself.
+    LockRequest bad = LockOf(1, 0, 50);
+    bad.hasRecord = true;
+    bad.record = RecordOf(1);
+    bad.record[0x00] = 5;
+    CHECK(!r.m.Lock(kHostId, bad, r.now, r.out));
+    CHECK(!r.Who(kHostId)->locked && r.S().locked == 0);
+
+    LockRequest mine = LockOf(5, 2, 60);
+    mine.hasRecord = true;
+    mine.record = RecordOf(4);
+    CHECK(r.m.Lock(ana, mine, r.now, r.out));
+    CHECK(r.m.Lock(bo, LockOf(9, 0, 50), r.now, r.out));
+    CHECK(r.m.Lock(kHostId, LockOf(1, 0, 50), r.now, r.out));
+    CHECK(r.P() == Phase::GridSync);
+
+    // The record travels in the grid with its racer, and only with them.
+    const Grid first = r.m.LastGrid();
+    const GridEntry* a = EntryOf(first, ana);
+    const GridEntry* b = EntryOf(first, bo);
+    const GridEntry* h = EntryOf(first, kHostId);
+    CHECK(a != nullptr && a->hasRecord && a->record == mine.record && a->machine == 5);
+    CHECK(b != nullptr && !b->hasRecord && b->record == MachineRecord{});
+    CHECK(h != nullptr && !h->hasRecord);
+    Grid wire;
+    const Outgoing* sent = r.Last(kMsgGrid);
+    CHECK(sent != nullptr && DecodeGrid(sent->payload.data(), sent->payload.size(), wire) && wire == first);
+
+    // The next race starts with no record: a racer brings theirs again on its lock-in screen. One who lets
+    // the screen time out keeps the machine of their last lock, and races its stock version.
+    r.GridAll();
+    r.After(kCountdownMs);
+    r.CapRace({ ana, bo, kHostId });
+    r.NextRace();
+    CHECK(r.m.Lock(bo, LockOf(9, 0, 50), r.now, r.out));
+    CHECK(r.m.Lock(kHostId, LockOf(1, 0, 50), r.now, r.out));
+    r.After(kMachineMs);
+    CHECK(r.P() == Phase::GridSync);
+    const Grid second = r.m.LastGrid();
+    CHECK(second.raceIndex != first.raceIndex && second.humans.size() == 3);
+    const GridEntry* late = EntryOf(second, ana);
+    CHECK(late != nullptr && late->machine == 5);
+    for (const GridEntry& e : second.humans) {
+        CHECK(!e.hasRecord && e.record == MachineRecord{});
+    }
+    r.Verify();
+}
+
 void TestSeriesPoints() {
     std::printf("series points\n");
     Rig r;
@@ -1645,12 +1838,516 @@ void TestSeriesPoints() {
 
 } // namespace
 
+// A ballot or pick for a track of the player's own: the id is the content hash, the title for display.
+TrackChoice CustomChoice(uint8_t seed) {
+    TrackChoice c;
+    c.track = kTrackCustom;
+    for (size_t i = 0; i < c.custom.id.size(); i++) {
+        c.custom.id[i] = static_cast<uint8_t>(seed + i);
+    }
+    c.custom.title = "Own track";
+    return c;
+}
+
+// Three racers through one series race, then last place (Ana) is the picker. Custom tracks are on.
+struct CustomRig : Rig {
+    uint8_t ana = kSystemId;
+    uint8_t bo = kSystemId;
+    uint8_t raced = kTrackNone;
+
+    CustomRig() : CustomRig(Config(77)) {
+    }
+
+    explicit CustomRig(const RoomConfig& config) : Rig(config) {
+        ana = Add("Ana");
+        bo = Add("Bo");
+        CHECK(m.Start(now, out));
+        raced = S().track;
+        Race({ bo, kHostId, ana });
+        After(kResultsMs);
+        CHECK(P() == Phase::Pick && S().picker == ana);
+        CHECK(m.SetCustomTracks(true, now, out));
+    }
+
+    // Ana picks her own track and every racer locks in.
+    void PickAndLock() {
+        CHECK(m.Pick(ana, CustomChoice(1), now, out));
+        CHECK(P() == Phase::Machine);
+        LockAll();
+    }
+};
+
+void TestCustomTrack() {
+    std::printf("custom track\n");
+
+    // The switch is off: a pick may not name a custom track, and the byte form never can.
+    {
+        Rig r;
+        const uint8_t ana = r.Add("Ana");
+        const uint8_t bo = r.Add("Bo");
+        CHECK(r.m.Start(r.now, r.out));
+        r.Race({ bo, kHostId, ana });
+        r.After(kResultsMs);
+        CHECK(r.P() == Phase::Pick && r.S().picker == ana);
+        CHECK(!r.m.Pick(ana, CustomChoice(1), r.now, r.out));
+        CHECK(r.m.SetCustomTracks(true, r.now, r.out));
+        CHECK(!r.m.Pick(ana, kTrackCustom, r.now, r.out)); // a custom pick needs its id and title
+        TrackChoice untitled = CustomChoice(1);
+        untitled.custom.title.clear();
+        CHECK(!r.m.Pick(ana, untitled, r.now, r.out));
+        CHECK(r.P() == Phase::Pick);
+    }
+
+    // A custom pick: the room names it, its owner holds it and nobody else does.
+    {
+        CustomRig r;
+        CHECK(r.m.Pick(r.ana, CustomChoice(1), r.now, r.out));
+        CHECK(r.P() == Phase::Machine);
+        CHECK(r.S().track == kTrackCustom && r.S().custom == CustomChoice(1).custom);
+        CHECK(r.m.CurrentTrack() == CustomChoice(1));
+        CHECK(r.m.TrackOwner() == r.ana);
+        CHECK(r.m.HoldsTrack(r.ana) && !r.m.HoldsTrack(kHostId) && !r.m.HoldsTrack(r.bo));
+        CHECK(r.m.LastPicked().track == kTrackCustom && r.m.LastPicked().by == r.ana);
+        r.Verify();
+    }
+
+    // Every racer locked while the host and Bo lack it: ASSETS waits its full length, then Bo watches.
+    {
+        CustomRig r;
+        r.PickAndLock();
+        CHECK(r.P() == Phase::Assets);
+        CHECK(Count(r.out, kMsgGrid) == 1); // only the first race's
+        CHECK(!r.m.SetRules(r.m.Rules())); // the rules froze with the locks
+        CHECK(r.m.TrackHeld(kHostId, r.now, r.out));
+        CHECK(r.P() == Phase::Assets); // Bo still lacks it
+        const uint32_t start = r.now;
+        CHECK(r.S().phaseTotalMs == kAssetsMs);
+        r.At(start + kAssetsMs - 1);
+        CHECK(r.P() == Phase::Assets);
+        r.At(start + kAssetsMs);
+        CHECK(r.P() == Phase::GridSync);
+        CHECK(!r.Who(r.bo)->inRace && !r.Who(r.bo)->locked);
+        CHECK(r.Who(r.ana)->inRace && r.Who(kHostId)->inRace);
+        CHECK(r.m.LastGrid().track == CustomChoice(1));
+        CHECK(Ids(r.m.LastGrid()).size() == 2);
+        CHECK(!r.m.TrackHeld(r.bo, r.now, r.out)); // too late: the grid is out
+        r.Verify();
+    }
+
+    // Everyone reports it before the deadline: the grid goes out at once.
+    {
+        CustomRig r;
+        r.PickAndLock();
+        CHECK(r.P() == Phase::Assets);
+        CHECK(r.m.TrackHeld(r.bo, r.now, r.out));
+        CHECK(r.P() == Phase::Assets);
+        CHECK(r.m.TrackHeld(kHostId, r.now, r.out));
+        CHECK(r.P() == Phase::GridSync);
+        CHECK(r.m.LastGrid().track == CustomChoice(1));
+        CHECK(r.OnGrid().size() == 3);
+        CHECK(!r.m.TrackFailed(r.now, r.out)); // the grid is out: too late to fall back
+        CHECK(r.S().track == kTrackCustom);
+    }
+
+    // The deadline passes and the host never got it: the room races a stock track, everyone on the grid.
+    {
+        CustomRig r;
+        r.PickAndLock();
+        CHECK(r.m.TrackHeld(r.bo, r.now, r.out));
+        r.After(kAssetsMs);
+        CHECK(r.P() == Phase::GridSync);
+        CHECK(r.S().track < kStockTracks && r.S().track != r.raced);
+        CHECK(r.m.LastGrid().track.track == r.S().track && r.m.LastGrid().track.custom == CustomTrack{});
+        CHECK(r.m.TrackOwner() == kSystemId && !r.m.HoldsTrack(r.ana));
+        CHECK(r.OnGrid().size() == 3);
+        for (uint8_t id : r.OnGrid()) {
+            CHECK(r.Who(id)->locked); // the locks stand through the fallback
+        }
+        r.Verify();
+    }
+
+    // The owner leaves during ASSETS before the host holds it: fallback with a fresh grid of those left.
+    {
+        CustomRig r;
+        r.PickAndLock();
+        r.m.Leave(r.ana, r.now, r.out);
+        CHECK(r.P() == Phase::GridSync);
+        CHECK(r.S().track < kStockTracks && r.S().track != r.raced);
+        CHECK(Ids(r.m.LastGrid()).size() == 2 && r.m.LastGrid().track.track < kStockTracks);
+    }
+
+    // The owner leaves once the host holds it: the transfer goes on from the host, and Bo is the one left.
+    {
+        CustomRig r;
+        r.PickAndLock();
+        CHECK(r.m.TrackHeld(kHostId, r.now, r.out));
+        r.m.Leave(r.ana, r.now, r.out);
+        CHECK(r.P() == Phase::Assets && r.S().track == kTrackCustom);
+        CHECK(r.m.TrackHeld(r.bo, r.now, r.out));
+        CHECK(r.P() == Phase::GridSync && r.m.LastGrid().track == CustomChoice(1));
+    }
+
+    // The owner leaves on the lock-in screen while the host lacks it: the room draws at once and stays there.
+    {
+        CustomRig r;
+        CHECK(r.m.Pick(r.ana, CustomChoice(1), r.now, r.out));
+        r.m.Leave(r.ana, r.now, r.out);
+        CHECK(r.P() == Phase::Machine && r.S().track < kStockTracks && r.S().track != r.raced);
+        r.LockAll();
+        CHECK(r.P() == Phase::GridSync && r.m.LastGrid().track.track == r.S().track);
+    }
+
+    // The host's flow cannot get it: TrackFailed falls back on the lock-in screen, and later locks skip ASSETS.
+    {
+        CustomRig r;
+        CHECK(!r.m.TrackFailed(r.now, r.out)); // nothing to fail on a pick screen
+        CHECK(r.m.Pick(r.ana, CustomChoice(1), r.now, r.out));
+        CHECK(r.m.TrackFailed(r.now, r.out));
+        CHECK(r.P() == Phase::Machine && r.S().track < kStockTracks && r.S().track != r.raced);
+        CHECK(!r.m.TrackFailed(r.now, r.out)); // a stock track cannot fail
+        CHECK(!r.m.TrackHeld(r.ana, r.now, r.out));
+        r.LockAll();
+        CHECK(r.P() == Phase::GridSync);
+    }
+
+    // TrackFailed during ASSETS sends the grid with the stock track at once.
+    {
+        CustomRig r;
+        r.PickAndLock();
+        CHECK(r.P() == Phase::Assets);
+        CHECK(r.m.TrackFailed(r.now, r.out));
+        CHECK(r.P() == Phase::GridSync && r.m.LastGrid().track.track < kStockTracks);
+        CHECK(r.OnGrid().size() == 3);
+    }
+
+    // The fallback never draws the track just raced, whatever the room.
+    for (uint32_t room = 1; room <= 200; room++) {
+        CustomRig r(Config(room));
+        CHECK(r.m.Pick(r.ana, CustomChoice(uint8_t(room)), r.now, r.out));
+        CHECK(r.m.TrackFailed(r.now, r.out));
+        CHECK(r.S().track < kStockTracks && r.S().track != r.raced);
+    }
+
+    // A custom ballot: the winner's ballot names the track and its owner.
+    {
+        Rig r;
+        r.Add("Ana");
+        r.Add("Bo");
+        r.Add("Cy");
+        CHECK(r.m.Start(r.now, r.out));
+        CHECK(r.P() == Phase::Voting);
+        CHECK(!r.m.Vote(1, CustomChoice(5), r.now, r.out)); // the switch is off
+        CHECK(r.m.SetCustomTracks(true, r.now, r.out));
+        CHECK(r.m.Vote(1, CustomChoice(5), r.now, r.out));
+        CHECK(r.m.Vote(2, CustomChoice(6), r.now, r.out));
+        CHECK(r.m.Vote(3, CustomChoice(7), r.now, r.out));
+        CHECK(r.m.Vote(kHostId, CustomChoice(8), r.now, r.out));
+        CHECK(r.P() == Phase::Lottery);
+        const LotteryResult& result = r.m.Lottery();
+        CHECK(result.track == kTrackCustom && result.winner < result.ballots.size());
+        const uint8_t owner = result.ballots[result.winner].id;
+        CHECK(r.m.TrackOwner() == owner && r.m.HoldsTrack(owner));
+        CHECK(r.m.CurrentTrack().custom == result.ballots[result.winner].custom);
+        CHECK(r.m.SkipLottery(r.now, r.out));
+        CHECK(r.P() == Phase::Machine && r.S().track == kTrackCustom);
+        r.Verify();
+    }
+}
+
+void TestSuccessorState() {
+    std::printf("successor and CPU settings in room\n");
+    Rig r;
+    // Nobody can take over until a member has an address the host can give.
+    CHECK(r.m.Successor() == kSystemId && r.S().successor == kSystemId);
+    const uint8_t ana = r.Add("Ana");
+    const uint8_t wim = r.Add("Wim", Seat::Watch);
+    CHECK(r.m.Successor() == kSystemId);
+    r.m.SetAddress(kHostId, MappedV4(1), 1); // the host is never its own successor
+    r.m.SetAddress(9, MappedV4(1), 1);       // nobody sits there
+    r.m.SetAddress(wim, MappedV4(0x0A000003), 4000);
+    r.out.clear();
+    r.After(1);
+    // The watcher is the only member with an address, so it is next (it races from the next grid, D28.3).
+    CHECK(r.m.Successor() == wim);
+    RoomState told;
+    const Outgoing* room = r.Last(kMsgRoom);
+    CHECK(room != nullptr && DecodeRoomState(room->payload.data(), room->payload.size(), told));
+    CHECK(told.successor == wim && told.successorIp == MappedV4(0x0A000003) && told.successorPort == 4000);
+    // A racer comes before any watcher.
+    r.m.SetAddress(ana, MappedV4(0x0A000002), 4001);
+    r.out.clear();
+    r.After(1);
+    room = r.Last(kMsgRoom);
+    CHECK(r.m.Successor() == ana && room != nullptr &&
+          DecodeRoomState(room->payload.data(), room->payload.size(), told) && told.successor == ana &&
+          told.successorPort == 4001);
+    // Join order, not id order: Ana leaves, and the newcomer who gets her id joined after Bo.
+    const uint8_t bo = r.Add("Bo");
+    r.m.SetAddress(bo, MappedV4(0x0A000004), 4002);
+    r.m.Leave(ana, r.now, r.out);
+    const uint8_t cy = r.Add("Cy");
+    CHECK(cy == ana && cy < bo);
+    r.m.SetAddress(cy, MappedV4(0x0A000005), 4003);
+    r.out.clear();
+    r.After(1);
+    room = r.Last(kMsgRoom);
+    CHECK(r.m.Successor() == bo && room != nullptr &&
+          DecodeRoomState(room->payload.data(), room->payload.size(), told) && told.successor == bo &&
+          told.successorIp == MappedV4(0x0A000004) && told.successorPort == 4002);
+    // Nothing changed, so nothing is sent.
+    r.out.clear();
+    r.After(1);
+    CHECK(Count(r.out, kMsgRoom) == 0);
+    // The address of a seat goes with the player: a newcomer on a freed id has none until it is set.
+    r.m.Leave(cy, r.now, r.out);
+    const uint8_t dee = r.Add("Dee");
+    CHECK(dee == cy);
+    r.m.Leave(bo, r.now, r.out);
+    r.out.clear();
+    r.After(1);
+    CHECK(r.m.Successor() == wim);
+    // Everyone with an address leaves: nobody can take over, and the room says so.
+    r.out.clear();
+    r.m.Leave(wim, r.now, r.out);
+    r.After(1);
+    room = r.Last(kMsgRoom);
+    CHECK(r.m.Successor() == kSystemId && room != nullptr &&
+          DecodeRoomState(room->payload.data(), room->payload.size(), told) && told.successor == kSystemId &&
+          IsZeroIp(told.successorIp) && told.successorPort == 0);
+    r.Verify();
+
+    // The CPU settings travel in room (decision 24).
+    Rig c;
+    CHECK(c.m.Cpu() == CpuOptions() && c.S().cpuFill && c.S().aiAggression == kAiAggressionDefault &&
+          !c.S().cpuTrackHazards);
+    CpuOptions cpu;
+    cpu.fill = false;
+    cpu.aiAggression = 300;
+    cpu.trackHazards = true;
+    CpuOptions bad = cpu;
+    bad.aiAggression = static_cast<uint16_t>(kAiAggressionMin - 1);
+    CHECK(!c.m.SetCpuOptions(bad, c.now, c.out));
+    bad.aiAggression = static_cast<uint16_t>(kAiAggressionMax + 1);
+    CHECK(!c.m.SetCpuOptions(bad, c.now, c.out));
+    CHECK(c.m.Cpu() == CpuOptions());
+    c.out.clear();
+    CHECK(c.m.SetCpuOptions(cpu, c.now, c.out));
+    room = c.Last(kMsgRoom);
+    CHECK(room != nullptr && DecodeRoomState(room->payload.data(), room->payload.size(), told) && !told.cpuFill &&
+          told.aiAggression == 300 && told.cpuTrackHazards);
+    c.out.clear();
+    CHECK(c.m.SetCpuOptions(cpu, c.now, c.out) && Count(c.out, kMsgRoom) == 0);
+    // So do the rules, before any grid.
+    RaceRules rules;
+    rules.laps = 9;
+    rules.lavaNoKill = true;
+    CHECK(c.m.SetRules(rules));
+    c.out.clear();
+    c.After(1);
+    room = c.Last(kMsgRoom);
+    CHECK(room != nullptr && DecodeRoomState(room->payload.data(), room->payload.size(), told) &&
+          told.rules == rules);
+    c.out.clear();
+    CHECK(c.m.SetRules(rules));
+    c.After(1);
+    CHECK(Count(c.out, kMsgRoom) == 0);
+    // Without CPU fill the grid has the humans alone.
+    c.Add("Ana");
+    CHECK(c.m.Start(c.now, c.out));
+    c.LockAll();
+    CHECK(c.m.LastGrid().cpus == 0 && c.m.LastGrid().humans.size() == 2);
+    // Once the grid is out, the CPU settings stay as they are.
+    CHECK(!c.m.SetCpuOptions(CpuOptions(), c.now, c.out) && c.m.Cpu() == cpu);
+    c.Verify();
+
+    // The room's starting value comes from its config.
+    RoomConfig off = Config(5);
+    off.cpuFill = false;
+    Rig d(off);
+    CHECK(!d.m.Cpu().fill && !d.S().cpuFill);
+}
+
+RoomMirror MirrorOf(const Rig& r) {
+    RoomMirror mirror;
+    mirror.roster = r.m.Roster();
+    mirror.room = r.S();
+    mirror.results = r.m.Results();
+    mirror.haveResults = !r.m.Results().entries.empty();
+    return mirror;
+}
+
+const PlayerInfo* NamedIn(const std::vector<PlayerInfo>& roster, const std::string& name) {
+    for (const PlayerInfo& p : roster) {
+        if (p.name == name) {
+            return &p;
+        }
+    }
+    return nullptr;
+}
+
+void TestPromote() {
+    std::printf("a member's mirror promoted to host (D28.3)\n");
+    // The remap: the successor becomes 0, the old host is gone, everyone else keeps their id.
+    CHECK(HandoverId(3, 3) == kHostId && HandoverId(kHostId, 3) == kSystemId && HandoverId(2, 3) == 2);
+
+    // After a final table: the results page runs out, then last place picks, under the same room id.
+    {
+        Rig r;
+        const uint8_t ana = r.Add("Ana");
+        const uint8_t bo = r.Add("Bo");
+        const uint8_t wim = r.Add("Wim", Seat::Watch);
+        r.m.SetAddress(ana, MappedV4(0x0A000001), 4001);
+        CHECK(r.m.Start(r.now, r.out));
+        r.ToRacing();
+        r.At(r.go + 80000);
+        CHECK(r.Finish(ana, 80000));
+        r.At(r.go + 81000);
+        CHECK(r.Finish(bo, 81000) && r.Retire(kHostId));
+        CHECK(r.P() == Phase::Results && Points(r, ana) == 100 && Points(r, bo) == 93);
+        CHECK(r.m.Successor() == ana);
+        r.After(2000);
+        const RoomMirror mirror = MirrorOf(r);
+
+        CHECK(!RoomMachine::Promote(mirror, kHostId, r.now).has_value());
+        CHECK(!RoomMachine::Promote(mirror, kSystemId, r.now).has_value());
+        CHECK(!RoomMachine::Promote(mirror, 9, r.now).has_value());
+        std::optional<RoomMachine> promoted = RoomMachine::Promote(mirror, ana, r.now);
+        CHECK(promoted.has_value());
+        if (!promoted.has_value()) {
+            return;
+        }
+        Rig q;
+        q.m = std::move(*promoted);
+        q.now = r.now;
+        const std::vector<PlayerInfo>& roster = q.m.Roster();
+        CHECK(roster.size() == 3 && NamedIn(roster, "Host") == nullptr);
+        CHECK(q.Who(kHostId) != nullptr && q.Who(kHostId)->name == "Ana" && q.Who(kHostId)->host &&
+              q.Who(kHostId)->points == 100 && !q.Who(kHostId)->watcher);
+        CHECK(q.Who(ana) == nullptr);
+        CHECK(q.Who(bo) != nullptr && q.Who(bo)->name == "Bo" && q.Who(bo)->points == 93 && !q.Who(bo)->host);
+        CHECK(q.Who(wim) != nullptr && q.Who(wim)->watcher);
+        const RoomState s = q.S();
+        CHECK(s.roomId == 77 && s.raceIndex == mirror.room.raceIndex && s.phase == Phase::Results);
+        CHECK(s.phaseLeftMs == kResultsMs - 2000);
+        // The table moves with the ids: the first row is now player 0's, the old host's row is gone.
+        CHECK(q.m.Results().final && q.m.Results().entries.size() == 2);
+        CHECK(q.m.Results().entries.size() == 2 && q.m.Results().entries[0].id == kHostId &&
+              q.m.Results().entries[1].id == bo);
+        // Nobody has an address in the new room until they come back.
+        CHECK(q.m.Successor() == kSystemId);
+        q.m.SetAddress(bo, MappedV4(0x0A000002), 4002);
+        CHECK(q.m.Successor() == bo);
+        q.After(kResultsMs - 2000);
+        CHECK(q.P() == Phase::Pick && q.S().picker == bo && q.S().raceIndex == mirror.room.raceIndex + 1);
+        q.Verify();
+    }
+
+    // A crash mid-race: that race scores nothing, the next one is chosen at once under a new race index.
+    {
+        Rig r;
+        const uint8_t ana = r.Add("Ana");
+        const uint8_t bo = r.Add("Bo");
+        CHECK(r.m.Start(r.now, r.out));
+        r.ToRacing();
+        r.At(r.go + 30000);
+        const RoomMirror mirror = MirrorOf(r);
+        CHECK(mirror.room.phase == Phase::Racing);
+        std::optional<RoomMachine> promoted = RoomMachine::Promote(mirror, bo, r.now);
+        CHECK(promoted.has_value());
+        if (!promoted.has_value()) {
+            return;
+        }
+        Rig q;
+        q.m = std::move(*promoted);
+        q.now = r.now;
+        // A series' first race has no last place, so the new host draws, and the lock-in screen opens.
+        CHECK(q.P() == Phase::Machine && q.S().raceIndex == mirror.room.raceIndex + 1);
+        CHECK(q.Who(kHostId)->name == "Bo" && q.Who(ana) != nullptr && q.Who(bo) == nullptr);
+        CHECK(q.Who(kHostId)->points == 0 && q.Who(ana)->points == 0);
+        // The new host is on the grid of the next race, with Ana.
+        CHECK(q.OnGrid() == std::vector<uint8_t>({ kHostId, ana }));
+        q.Verify();
+    }
+
+    // Mid-vote: the vote starts over with the same race index; the ballots cast before are gone.
+    {
+        Rig r;
+        const uint8_t a = r.Add("A");
+        r.Add("B");
+        const uint8_t c = r.Add("C");
+        r.Add("D"); // four racers stay once the old host is gone, so there is a vote
+        CHECK(r.m.Start(r.now, r.out));
+        CHECK(r.P() == Phase::Voting);
+        CHECK(r.m.Vote(a, 1, r.now, r.out));
+        std::optional<RoomMachine> promoted = RoomMachine::Promote(MirrorOf(r), c, r.now + 5000);
+        CHECK(promoted.has_value() && promoted->GetPhase() == Phase::Voting && promoted->Votes().empty());
+        CHECK(promoted.has_value() && promoted->State(r.now + 5000).raceIndex == r.S().raceIndex &&
+              promoted->State(r.now + 5000).phaseLeftMs == kVoteMs);
+    }
+
+    // A watcher successor: the host always races, so it races from the next grid.
+    {
+        Rig r;
+        const uint8_t wim = r.Add("Wim", Seat::Watch);
+        const uint8_t val = r.Add("Val", Seat::Watch);
+        std::optional<RoomMachine> promoted = RoomMachine::Promote(MirrorOf(r), wim, r.now);
+        CHECK(promoted.has_value());
+        if (!promoted.has_value()) {
+            return;
+        }
+        Rig q;
+        q.m = std::move(*promoted);
+        q.now = r.now;
+        CHECK(q.P() == Phase::Lobby && q.m.Racers() == 1 && q.m.Watchers() == 1);
+        CHECK(!q.Who(kHostId)->watcher && q.Who(val)->watcher);
+        CHECK(q.m.Start(q.now, q.out));
+        CHECK(q.P() == Phase::Machine && q.OnGrid() == std::vector<uint8_t>({ kHostId }));
+        q.LockAll();
+        CHECK(q.P() == Phase::GridSync);
+        CHECK(q.m.LastGrid().humans.size() == 1 && q.m.LastGrid().humans[0].id == kHostId);
+        q.GridAll();
+        CHECK(q.P() == Phase::Countdown);
+        q.Verify();
+    }
+
+    // Every setting the host had carries over; ready marks do not.
+    {
+        Rig r;
+        const uint8_t ana = r.Add("Ana");
+        CHECK(r.m.SetRacerCap(8, r.now, r.out) && r.m.SetCustomTracks(true, r.now, r.out));
+        CpuOptions cpu;
+        cpu.fill = false;
+        cpu.aiAggression = 250;
+        cpu.trackHazards = true;
+        CHECK(r.m.SetCpuOptions(cpu, r.now, r.out));
+        RaceRules rules;
+        rules.laps = 7;
+        rules.lavaNoKill = true;
+        rules.boostFrames = 90;
+        CHECK(r.m.SetRules(rules));
+        CHECK(r.m.SetReady(ana, true, r.now, r.out));
+        std::optional<RoomMachine> promoted = RoomMachine::Promote(MirrorOf(r), ana, r.now);
+        CHECK(promoted.has_value());
+        if (!promoted.has_value()) {
+            return;
+        }
+        const RoomState was = r.S();
+        const RoomState after = promoted->State(r.now);
+        CHECK(after.racerCap == 8 && after.customTracks && after.rules == rules && after.pool == was.pool);
+        CHECK(promoted->Cpu() == cpu && !after.cpuFill && after.aiAggression == 250 && after.cpuTrackHazards);
+        CHECK(after.phase == Phase::Lobby && after.roomId == was.roomId);
+        CHECK(!promoted->Roster()[0].ready);
+    }
+}
+
 int main() {
     TestDraws();
     TestSeats();
     TestLobby();
     TestTimeouts();
     TestVote();
+    TestCommittedLottery();
+    TestRoomCode();
     TestPick();
     TestMachine();
     TestRaceNext();
@@ -1665,6 +2362,10 @@ int main() {
     TestResultsOrder();
     TestRaceLeaveAndJoin();
     TestSeriesPoints();
+    TestMachineRecord();
+    TestCustomTrack();
+    TestSuccessorState();
+    TestPromote();
     std::printf("%d checks, %d failed\n", gChecks, gFails);
     return gFails == 0 ? 0 : 1;
 }

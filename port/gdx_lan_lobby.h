@@ -10,10 +10,14 @@
 #ifndef GDX_LAN_LOBBY_H
 #define GDX_LAN_LOBBY_H
 
+#include "gdx_net_online.h"
+#include "net/gdx_net_directory.h"
 #include "net/gdx_net_lobby_session.h"
+#include "net/gdx_net_track_pack.h"
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -46,11 +50,25 @@ struct View {
     bool haveStart = false;
     net::lobby::RaceResults results; // the table of a race, being run or over; its race index says which
     bool haveResults = false;
+    net::lobby::TrackProgress trackProgress; // this copy's hold on the room's custom track
+    std::shared_ptr<const net::transfer::TrackBuffer> raceTrack; // that track, once verified; null for a stock track
     uint32_t clockOffsetMs = 0; // the host clock minus ours; 0 on the host
     bool clockReady = false;
     std::vector<net::lobby::ShownLine> lines;
     uint32_t lineSerial = 0; // grows with every new line, so the page knows when to scroll
     std::vector<net::lobby::LanBrowser::FoundRoom> rooms;
+    // A directory room (O5.10): how its listing goes, on the host. The code itself is room.code.
+    online::ListView listing;
+    // Joining by code: the code asked for, "ABC-DEF", while the directory is asked and the room tried.
+    std::string joinCode;
+    // The friend keys of the room's members who proved one (O7.3), the host's included.
+    std::vector<net::lobby::MemberKey> keys;
+};
+
+// A player of this copy's last room who proved a friend key (O7.4): what "Add from the last room" lists.
+struct RoomMember {
+    std::string name;
+    net::lobby::Bytes32 key{};
 };
 
 // The build id peers must match: the version, and the commit when the build has one.
@@ -67,12 +85,25 @@ void SavePortSetting(uint16_t port);
 void StartBrowse(uint16_t port);
 // Binds port on every interface. false with a reason in error when the port is taken.
 bool StartHost(uint16_t port, const net::lobby::LocalProfile& me, std::string& error);
+// A room of a type (O6.1). Any type but Lan is listed in the room directory under a code, from the same socket.
+bool StartHost(uint16_t port, const net::lobby::LocalProfile& me, net::lobby::RoomType type, std::string& error);
 void StartJoin(const net::NetAddress& host, const net::lobby::LocalProfile& me, net::lobby::Seat seat);
+// Asks the directory for the room with this code value, then tries its addresses in order (O5.10).
+void StartJoinCode(uint32_t code, const net::lobby::LocalProfile& me, net::lobby::Seat seat);
+// Joins a room the directory already gave: from the Open list, Quick race or a friend's rooms (O6.5, O7.4).
+void StartJoinRecord(const net::directory::Record& record, const net::lobby::LocalProfile& me,
+                     net::lobby::Seat seat);
 
 // The player's own actions, as host or as client. The room decides; the answer shows in the next Snapshot.
 void SetReady(bool ready);
 void Vote(uint8_t track);
 void Pick(uint8_t track);
+// A ballot or a pick for a track of this copy's. Its bytes go to KeepOwnTrack first, so the room can fetch it.
+void VoteCustom(const net::lobby::CustomTrack& track);
+void PickCustom(const net::lobby::CustomTrack& track);
+// Keeps the content bytes of a track of this copy's for the room's store, which looks there before the
+// download cache. The last six stay: one Edit Cup.
+void KeepOwnTrack(const net::track::TrackId& id, std::vector<uint8_t> bytes);
 void Lock(const net::lobby::LockRequest& lock);
 void Emote(uint8_t emote);
 void RaceNext(bool raceNext);
@@ -82,10 +113,22 @@ void StartSeries();
 void SkipLottery();
 void EndSeries();
 void SetRacerCap(uint8_t cap);
+void SetCustomTracks(bool on);
+// CPUs fill the grid slots the humans leave free (D2).
+void SetCpuFill(bool on);
 void Kick(uint8_t id);
+// Removes the player and refuses their friend key for the rest of the room (O7.3). A player who joined without a
+// key is only removed.
+void Ban(uint8_t id);
+
+// The players with a friend key met in this copy's last room, or in the room it is in, each once, under the name
+// they last had. The first other player of a new room starts the list again; leaving a room, a refused join and
+// a room nobody else enters keep it.
+std::vector<RoomMember> LastRoom();
 
 // Muted players. A mute is this copy's own: the player's messages are not shown here, and nothing about it
-// travels. It ends when the player leaves, so a newcomer who is given the same id starts unmuted. Game
+// travels. It ends when the player leaves, or when a handover gives the id to someone else (a newcomer, or the
+// successor that becomes id 0), so whoever is given that id next starts unmuted. Game
 // thread only. None of the three takes the session's lock, so they may be called inside a Read.
 bool Muted(uint8_t id);
 void SetMuted(uint8_t id, bool muted);

@@ -10,6 +10,7 @@ static uint16_t gWorkingDirectory = 7;
 static int32_t gMfsError;
 static char gEditCupTrackNames[GDX_EDIT_CUP_ROWS][GDX_EDIT_CUP_NAME_SIZE];
 static int32_t sImportState, sImportRc, sImportMfsError, sImportCupCleared;
+static volatile int32_t sImportCupRegister, sImportCupFull;
 static char sImportName[21] = "TRACK", sImportExtension[5] = "CRSE";
 static int32_t sImportContentType = GDX_CONTENT_TYPE_TRACK;
 static uint32_t sImportPayloadSize = GDX_CONTENT_TRACK_PAYLOAD_SIZE;
@@ -88,6 +89,42 @@ int main(void) {
     /* The track itself was written, so its creator metadata was stored before the CENT write failed. */
     assert(sImportRc != 0 && sBundleFailedIndex == 1 && restores == 1 && ends == 1 && metaStores == 1);
     assert(strcmp(gEditCupTrackNames[0], "TRACK") == 0);
+
+    /* G-NET "Save to my tracks": a CRSD import that also takes the first free Edit Cup row. */
+    strcpy(sImportName, "ROOM TRACK");
+    strcpy(sImportExtension, "CRSD");
+    reset();
+    sImportCupRegister = 1;
+    sImportCupFull = 0;
+    GdxContentImport_RunOnDiskThread();
+    assert(sImportRc == 0 && saveCalls == 2 && restores == 1 && metaStores == 1 && ends == 1);
+    assert(strcmp(gEditCupTrackNames[0], "TRACK") == 0 && strcmp(gEditCupTrackNames[1], "ROOM TRACK") == 0);
+    assert(sImportCupRegister == 0 && sImportCupFull == 0);
+    /* Every row taken: nothing is written at all, and the full cup is the reason given. */
+    reset();
+    {
+        int row;
+        for (row = 0; row < 6; row++) {
+            snprintf(gEditCupTrackNames[row], GDX_EDIT_CUP_NAME_SIZE, "CUP %d", row);
+        }
+    }
+    sImportCupRegister = 1;
+    GdxContentImport_RunOnDiskThread();
+    assert(sImportRc != 0 && saveCalls == 0 && restores == 0 && metaStores == 0 && ends == 1);
+    assert(sImportCupFull == 1 && sImportCupRegister == 0 && strcmp(gEditCupTrackNames[5], "CUP 5") == 0);
+    /* The CENT write fails: the cup in memory goes back to what is on the disk; the track stays saved. */
+    reset();
+    sImportCupRegister = 1;
+    sImportCupFull = 0;
+    centError = 0xF1;
+    GdxContentImport_RunOnDiskThread();
+    assert(sImportRc != 0 && sImportMfsError == 0xF1 && saveCalls == 2 && restores == 1 && metaStores == 1);
+    assert(gEditCupTrackNames[1][0] == '\0' && strcmp(gEditCupTrackNames[0], "TRACK") == 0);
+    assert(sImportCupFull == 0 && sImportCupRegister == 0);
+    /* A plain CRSD import touches no cup row. */
+    reset();
+    GdxContentImport_RunOnDiskThread();
+    assert(sImportRc == 0 && saveCalls == 1 && gEditCupTrackNames[1][0] == '\0');
     puts("All native import disk failure tests passed");
     return 0;
 }

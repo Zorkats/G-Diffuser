@@ -9,8 +9,10 @@ bool EnsureUserFolders(const std::filesystem::path& dataRoot, const std::filesys
         return false;
     }
     // Music lookup stays beside the executable even when the game-data root is redirected.
+    // Downloaded tracks are a cache, never a save, so they sit beside mods/ rather than under a save path.
     const std::filesystem::path folders[] = {
-        dataRoot / "mods/~romhacks", exportRoot.parent_path() / "music", exportRoot / "machines"
+        dataRoot / "mods/~romhacks", exportRoot.parent_path() / "music", exportRoot / "machines",
+        dataRoot / "online/cache/tracks"
     };
     for (const auto& folder : folders) {
         std::error_code ec;

@@ -18,11 +18,17 @@ using gdx::net::Channel;
 using gdx::net::ChannelConfig;
 using gdx::net::ChannelStats;
 using gdx::net::CloseReason;
+using gdx::net::EncodeChallenge;
+using gdx::net::EncodeVersionRefuse;
+using gdx::net::kHelloBytes;
+using gdx::net::ParseHello;
 using gdx::net::kInboxCap;
 using gdx::net::kMaxDatagramBytes;
 using gdx::net::kMaxMessagePayload;
 using gdx::net::kProtocolVersion;
 using gdx::net::kReliableWindow;
+using gdx::net::kUdpIpv4HeaderBytes;
+using gdx::net::kUdpIpv6HeaderBytes;
 using gdx::net::kUnreliableOutCap;
 using gdx::net::LinkState;
 using gdx::net::Message;
@@ -130,6 +136,12 @@ public:
     size_t maxDatagram = 0;    // largest datagram seen on the link, for the MTU check
     std::vector<std::vector<uint8_t>> captured; // recent client-to-server datagrams, for the fuzz test
     uint32_t reordered = 0;                     // datagrams that arrived after a datagram sent later
+    // What the channels sent and what reached them, by direction: index 1 is client to server, 0 the reverse.
+    // A datagram counts as sent even when the link drops it, and each duplicate counts as its own arrival.
+    uint64_t linkBytes[2] = { 0, 0 };
+    uint32_t linkDatagrams[2] = { 0, 0 };
+    uint64_t arrivedBytes[2] = { 0, 0 };
+    uint32_t arrivedDatagrams[2] = { 0, 0 };
 
     void Step(uint32_t stepMs) {
         now += stepMs;
@@ -161,6 +173,8 @@ public:
 private:
     void Enqueue(bool toServer, const uint8_t* data, size_t len) {
         maxDatagram = std::max(maxDatagram, len);
+        linkBytes[toServer ? 1 : 0] += len;
+        linkDatagrams[toServer ? 1 : 0]++;
         if (toServer) {
             captured.emplace_back(data, data + len);
             if (captured.size() > 512) {
@@ -200,6 +214,8 @@ private:
                 last = f.sendNo;
             }
             Channel& dst = f.toServer ? server : client;
+            arrivedBytes[f.toServer ? 1 : 0] += f.bytes.size();
+            arrivedDatagrams[f.toServer ? 1 : 0]++;
             dst.Receive(f.bytes.data(), f.bytes.size(), now);
         }
     }
@@ -655,7 +671,128 @@ void CaseFuzzNeverCrashes() {
     CHECK(fresh.State() == LinkState::Disconnected);
 }
 
+// The four sent-byte parts add up to bytesSent. Message bytes are split by kind, and the rest is framing.
+bool SplitAddsUp(const ChannelStats& s) {
+    return s.bytesSentReliable + s.bytesSentUnreliable + s.bytesSentRetransmit + s.bytesSentAckKeepalive ==
+           s.bytesSent;
+}
+
+// The byte counters agree with the datagrams the link carried, in both directions, on a lossy link. The link
+// counts each datagram at the same call that the channel counts it, so the identities hold at any instant.
+void CaseWireCountersMatchTheLink() {
+    Net net(0x51A7u, ClientConfig(0xB17E5u), ServerConfig());
+    CHECK(ConnectPair(net, 2000));
+    ApplyLossy(net);
+    const StreamTally tally = StreamReliable(net, 300, 3, 60000);
+    CHECK(tally.delivered == 300);
+    // Unreliable traffic from the server, so both sides have a split to check.
+    const uint8_t ping[16] = {};
+    for (uint32_t i = 0; i < 40; i++) {
+        CHECK(net.server.SendUnreliable(kStreamType, ping, sizeof(ping)) == QueueResult::Ok);
+        net.Run(20);
+    }
+    net.Run(3000);
+
+    const ChannelStats& c = net.client.Stats();
+    const ChannelStats& s = net.server.Stats();
+    const uint64_t header = kUdpIpv4HeaderBytes;
+    CHECK(c.datagramsSent == net.linkDatagrams[1] && c.packetsOut == c.datagramsSent);
+    CHECK(c.bytesSent == net.linkBytes[1] + header * net.linkDatagrams[1]);
+    CHECK(s.datagramsSent == net.linkDatagrams[0] && s.packetsOut == s.datagramsSent);
+    CHECK(s.bytesSent == net.linkBytes[0] + header * net.linkDatagrams[0]);
+    CHECK(s.datagramsReceived == net.arrivedDatagrams[1] && s.packetsIn == s.datagramsReceived);
+    CHECK(s.bytesReceived == net.arrivedBytes[1] + header * net.arrivedDatagrams[1]);
+    CHECK(c.datagramsReceived == net.arrivedDatagrams[0] && c.packetsIn == c.datagramsReceived);
+    CHECK(c.bytesReceived == net.arrivedBytes[0] + header * net.arrivedDatagrams[0]);
+
+    CHECK(SplitAddsUp(c) && SplitAddsUp(s));
+    CHECK(c.bytesSentReliable > 0 && c.bytesSentRetransmit > 0); // 20 percent loss forced resends
+    CHECK(c.bytesSentUnreliable == 0 && c.bytesSentAckKeepalive > 0);
+    CHECK(s.bytesSentUnreliable > 0 && s.bytesSentReliable == 0 && s.bytesSentRetransmit == 0);
+    // A resent message still carries its 6-byte reliable header, so the retransmit bytes are at least that per resend.
+    CHECK(c.bytesSentRetransmit >= 6 * static_cast<uint64_t>(c.resends));
+}
+
+// The header estimate belongs to each channel: 28 by default, 48 once set, and each side counts with its own.
+void CaseHeaderEstimateIsSettable() {
+    CHECK(kUdpIpv4HeaderBytes == 28 && kUdpIpv6HeaderBytes == 48);
+    Net fresh(0x5E7u, ClientConfig(0xA11CEu), ServerConfig());
+    CHECK(fresh.client.HeaderEstimateBytes() == 28 && fresh.server.HeaderEstimateBytes() == 28);
+
+    Net net(0x5E8u, ClientConfig(0xA11CEu), ServerConfig());
+    net.client.SetHeaderEstimateBytes(kUdpIpv6HeaderBytes);
+    CHECK(net.client.HeaderEstimateBytes() == 48 && net.server.HeaderEstimateBytes() == 28);
+    CHECK(ConnectPair(net, 2000));
+    CHECK(StreamReliable(net, 50, 5, 20000).delivered == 50);
+    net.Run(1000);
+
+    const ChannelStats& c = net.client.Stats();
+    const ChannelStats& s = net.server.Stats();
+    CHECK(c.datagramsSent == net.linkDatagrams[1]);
+    CHECK(c.bytesSent == net.linkBytes[1] + 48u * net.linkDatagrams[1]);
+    CHECK(s.bytesSent == net.linkBytes[0] + 28u * net.linkDatagrams[0]);
+    CHECK(s.bytesReceived == net.arrivedBytes[1] + 28u * net.arrivedDatagrams[1]);
+    CHECK(c.bytesReceived == net.arrivedBytes[0] + 48u * net.arrivedDatagrams[0]);
+    CHECK(SplitAddsUp(c) && SplitAddsUp(s));
+}
+
+// A datagram that cannot be parsed still crossed the wire, so the receive counters include it.
+void CaseReceiveCountsEveryDatagram() {
+    Channel ch(ServerConfig(), [](const uint8_t*, size_t) {});
+    const uint8_t junk[3] = { 1, 2, 3 };
+    ch.Receive(junk, sizeof(junk), 0);
+    ch.Receive(nullptr, 0, 0);
+    const ChannelStats& s = ch.Stats();
+    CHECK(s.packetsIn == 2 && s.datagramsReceived == 2);
+    CHECK(s.malformed == 2);
+    CHECK(s.bytesReceived == (3u + 28u) + 28u);
+    CHECK(s.bytesSent == 0 && s.datagramsSent == 0 && SplitAddsUp(s));
+}
+
 } // namespace
+
+// The stateless gate's packets (decision 34). A client answers a challenge by sending its hello again at once,
+// carrying the cookie; a challenge with another nonce, or one sent to a server, changes nothing.
+void CaseChallengeEchoedInNextHello() {
+    std::vector<std::vector<uint8_t>> sent;
+    Channel client(ClientConfig(0x0A0B0C0Du), [&sent](const uint8_t* d, size_t n) { sent.emplace_back(d, d + n); });
+    CHECK(client.Connect(0));
+    CHECK(sent.size() == 1 && sent[0].size() == kHelloBytes);
+    uint32_t nonce = 0;
+    uint16_t version = 0;
+    uint64_t cookie = 1;
+    CHECK(ParseHello(sent[0].data(), sent[0].size(), nonce, version, cookie));
+    CHECK(nonce == 0x0A0B0C0Du && version == kProtocolVersion && cookie == 0);
+
+    const std::vector<uint8_t> wrongNonce = EncodeChallenge(0x0A0B0C0Eu, kProtocolVersion, 0x1122334455667788ull);
+    client.Receive(wrongNonce.data(), wrongNonce.size(), 10);
+    CHECK(sent.size() == 1 && client.Stats().wrongNonce == 1);
+
+    const std::vector<uint8_t> challenge = EncodeChallenge(0x0A0B0C0Du, kProtocolVersion, 0x1122334455667788ull);
+    CHECK(challenge.size() == kHelloBytes); // never larger than the hello it answers
+    client.Receive(challenge.data(), challenge.size(), 20);
+    CHECK(sent.size() == 2);
+    CHECK(sent.size() == 2 && ParseHello(sent[1].data(), sent[1].size(), nonce, version, cookie));
+    CHECK(cookie == 0x1122334455667788ull && client.State() == LinkState::Connecting);
+    client.Update(20 + 250); // the retry carries the cookie too
+    CHECK(sent.size() == 3 && ParseHello(sent[2].data(), sent[2].size(), nonce, version, cookie));
+    CHECK(cookie == 0x1122334455667788ull);
+
+    // A fresh Connect forgets the cookie: the server binds it to one nonce.
+    client.Disconnect(300);
+    Channel again(ClientConfig(0x0A0B0C0Fu), [&sent](const uint8_t* d, size_t n) { sent.emplace_back(d, d + n); });
+    CHECK(again.Connect(400));
+    CHECK(ParseHello(sent.back().data(), sent.back().size(), nonce, version, cookie) && cookie == 0);
+
+    // A server ignores a challenge; the refusal for another version is no larger than a hello.
+    Channel server(ServerConfig(), [&sent](const uint8_t* d, size_t n) { sent.emplace_back(d, d + n); });
+    const size_t before = sent.size();
+    server.Receive(challenge.data(), challenge.size(), 500);
+    CHECK(sent.size() == before && server.Stats().ignored == 1);
+    CHECK(EncodeVersionRefuse(1, kProtocolVersion).size() <= kHelloBytes);
+    // ParseHello reads hellos only.
+    CHECK(!ParseHello(challenge.data(), challenge.size(), nonce, version, cookie));
+}
 
 int main() {
     struct {
@@ -678,6 +815,10 @@ int main() {
         { "malformed and hostile packets are counted and dropped", CaseDefensiveCountersMoveOnBadPackets },
         { "out-of-window reliable id: packet dropped unacked", CaseOutOfWindowPacketIsNotAcked },
         { "50000 fuzzed packets: no crash, counters move", CaseFuzzNeverCrashes },
+        { "wire counters agree with the link, both directions, under loss", CaseWireCountersMatchTheLink },
+        { "header estimate: 28 by default, settable to 48 per channel", CaseHeaderEstimateIsSettable },
+        { "every received datagram is counted, parsed or not", CaseReceiveCountsEveryDatagram },
+        { "a challenge is echoed in the next hello (O5.1)", CaseChallengeEchoedInNextHello },
     };
     const int numCases = static_cast<int>(sizeof(cases) / sizeof(cases[0]));
     int failedCases = 0;

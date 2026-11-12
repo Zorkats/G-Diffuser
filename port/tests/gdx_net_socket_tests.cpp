@@ -33,8 +33,13 @@ static void Check(bool ok, const char* what, int line) {
 #define CHECK(cond) Check((cond), #cond, __LINE__)
 
 static net::NetAddress Loopback(uint16_t port) {
+    return net::NetAddress::FromV4(0x7F000001u, port);
+}
+
+// [::1]:port
+static net::NetAddress Loopback6(uint16_t port) {
     net::NetAddress addr;
-    addr.ip = 0x7F000001u;
+    addr.ip[15] = 1;
     addr.port = port;
     return addr;
 }
@@ -74,26 +79,62 @@ static void CaseAddressRoundTrip() {
     CHECK(a == b && !(a != b));
     CHECK(net::ParseAddress("1.2.3.4:5679", b));
     CHECK(a != b && !(a == b));
-    CHECK(a.ip == 0x01020304u && a.port == 5678);  // host byte order, not network order
+    CHECK(a.IsV4() && a.Ipv4() == 0x01020304u && a.port == 5678);  // host byte order, not network order
 }
 
 static void CaseAddressRejects() {
     const char* bad[] = {
-        "", "1.2.3.4", "1.2.3.4:", ":80", "hello", "localhost:80", "[::1]:80",
+        "", "1.2.3.4", "1.2.3.4:", ":80", "hello", "localhost:80",
         "1.2.3.4:65536", "1.2.3.4:99999", "1.2.3.4:123456", "1.2.3.4:080", "1.2.3.4:-1",
         "1.2.3.4:80x", "1.2.3.4:80 ", " 1.2.3.4:80", "1.2.3.4:80:90",
         "1.2.3.256:80", "1.2.3:80", "1.2.3.4.5:80", "1.2.3.4.:80", "1..3.4:80", "1.2.3.04:80", "-1.2.3.4:80",
     };
     for (const char* text : bad) {
         // The sentinel shows that a rejected parse leaves the output untouched.
-        net::NetAddress addr;
-        addr.ip = 0xDEADBEEFu;
-        addr.port = 4242;
+        net::NetAddress addr = net::NetAddress::FromV4(0xDEADBEEFu, 4242);
         const bool rejected = !net::ParseAddress(text, addr);
-        Check(rejected && addr.ip == 0xDEADBEEFu && addr.port == 4242, text, __LINE__);
+        Check(rejected && addr == net::NetAddress::FromV4(0xDEADBEEFu, 4242), text, __LINE__);
     }
     net::NetAddress addr;
     CHECK(!net::ParseAddress(nullptr, addr));
+}
+
+// O5.3: IPv6 text in brackets, written back in the RFC 5952 form; an IPv4 address is held mapped.
+static void CaseIpv6AddressText() {
+    const char* canonical[] = { "[::1]:24302", "[::]:0", "[2001:db8::1]:80", "[fe80::1:2:3:4]:1",
+                                "[2001:db8:0:1:1:1:1:1]:7", "[1:2:3:4:5:6:7:8]:65535", "[2001:db8::1:0:0:1]:5" };
+    for (const char* text : canonical) {
+        net::NetAddress addr;
+        const bool ok = net::ParseAddress(text, addr) && net::FormatAddress(addr) == text && !addr.IsV4();
+        Check(ok, text, __LINE__);
+    }
+    // Other spellings of the same address come back canonical: lower case, no leading zeros, the longest run
+    // of zero groups (the first on a tie) as "::", and a single zero group kept.
+    const char* spelled[][2] = {
+        { "[2001:DB8::A]:1", "[2001:db8::a]:1" },
+        { "[2001:0db8:0000:0000:0000:0000:0000:0001]:2", "[2001:db8::1]:2" },
+        { "[2001:db8:0:0:1:0:0:1]:5", "[2001:db8::1:0:0:1]:5" },
+        { "[2001:db8:0:1:0:0:0:1]:6", "[2001:db8:0:1::1]:6" },
+        { "[0:0:0:0:0:0:0:0]:3", "[::]:3" },
+    };
+    for (const auto& pair : spelled) {
+        net::NetAddress addr;
+        Check(net::ParseAddress(pair[0], addr) && net::FormatAddress(addr) == pair[1], pair[0], __LINE__);
+    }
+    // The mapped form of an IPv4 address is the IPv4 address.
+    net::NetAddress mapped;
+    CHECK(net::ParseAddress("[::ffff:102:304]:9", mapped));
+    CHECK(mapped.IsV4() && mapped == net::NetAddress::FromV4(0x01020304u, 9));
+    CHECK(net::FormatAddress(mapped) == "1.2.3.4:9");
+    CHECK(Loopback6(1).Ipv4() == 0 && !Loopback6(1).IsV4());
+
+    const char* bad[] = { "[::1]", "::1:80", "[::1:80", "[::1]80", "[1::2::3]:1", "[12345::]:1", "[::1]:65536",
+                          "[g::]:1", "[1:2:3:4:5:6:7:8:9]:1", "[1:2:3:4:5:6:7::8]:1", "[1:2:3:4:5:6:7]:1",
+                          "[:1::]:1", "[1::2:]:1", "[]:1", "[::ffff:1.2.3.4]:1", "[fe80::1%1]:1" };
+    for (const char* text : bad) {
+        net::NetAddress addr = Loopback(4242);
+        Check(!net::ParseAddress(text, addr) && addr == Loopback(4242), text, __LINE__);
+    }
 }
 
 static void CaseEphemeralBind() {
@@ -198,6 +239,57 @@ static void CaseExchange() {
             break;
         }
     }
+}
+
+// Sends one datagram and waits for it, checking the bytes and the sender the receiver sees.
+static bool OneDatagram(net::UdpSocket& sender, net::UdpSocket& receiver, const net::NetAddress& to,
+                        const net::NetAddress& expectFrom, unsigned char tag) {
+    const unsigned char payload[3] = { 'O', '5', tag };
+    if (sender.SendTo(to, payload, sizeof(payload)) != net::SendResult::Ok) {
+        return false;
+    }
+    unsigned char got[16];
+    std::size_t len = 0;
+    net::NetAddress from;
+    const net::RecvResult r = WaitRecv(receiver, got, sizeof(got), len, from, Deadline());
+    return r == net::RecvResult::Ok && len == sizeof(payload) && std::memcmp(got, payload, len) == 0 &&
+           from == expectFrom;
+}
+
+// O5.3: two sockets on [::1] exchange datagrams both ways.
+static void CaseIpv6Loopback() {
+    net::UdpSocket a;
+    net::UdpSocket b;
+    CHECK(a.Open(Loopback6(0)) && a.Ipv6() && !a.DualStack());
+    CHECK(b.Open(Loopback6(0)));
+    CHECK(OneDatagram(a, b, Loopback6(b.LocalPort()), Loopback6(a.LocalPort()), 1));
+    CHECK(OneDatagram(b, a, Loopback6(a.LocalPort()), Loopback6(b.LocalPort()), 2));
+    // An IPv6-only socket does not reach an IPv4 peer.
+    net::UdpSocket v4;
+    CHECK(v4.Open(Loopback(0)));
+    const unsigned char byte = 0;
+    CHECK(a.SendTo(Loopback(v4.LocalPort()), &byte, 1) == net::SendResult::Error);
+}
+
+// O5.3: one socket bound to "::" talks to an IPv4 peer and an IPv6 peer, and sees the IPv4 one as the mapped
+// address that FromV4 builds. An IPv4 socket refuses an IPv6 destination.
+static void CaseDualStack() {
+    net::UdpSocket dual;
+    CHECK(dual.Open(net::NetAddress()));
+    CHECK(dual.IsOpen() && dual.DualStack() && dual.Ipv6() && dual.LocalPort() != 0);
+    net::UdpSocket v4;
+    net::UdpSocket v6;
+    CHECK(v4.Open(Loopback(0)) && !v4.Ipv6() && !v4.DualStack());
+    CHECK(v6.Open(Loopback6(0)));
+    CHECK(OneDatagram(v4, dual, Loopback(dual.LocalPort()), Loopback(v4.LocalPort()), 4));
+    CHECK(OneDatagram(dual, v4, Loopback(v4.LocalPort()), Loopback(dual.LocalPort()), 5));
+    CHECK(OneDatagram(v6, dual, Loopback6(dual.LocalPort()), Loopback6(v6.LocalPort()), 6));
+    CHECK(OneDatagram(dual, v6, Loopback6(v6.LocalPort()), Loopback6(dual.LocalPort()), 7));
+    const unsigned char byte = 0;
+    CHECK(v4.SendTo(Loopback6(v6.LocalPort()), &byte, 1) == net::SendResult::Error);
+    // The port is taken for both families: an IPv4 socket cannot bind it beside the dual-stack one.
+    net::UdpSocket clash;
+    CHECK(!clash.Open(net::NetAddress::FromV4(0, dual.LocalPort())));
 }
 
 static void CaseOversizeDropped() {
@@ -337,10 +429,13 @@ int main() {
     } cases[] = {
         { "address parse and format round trip", CaseAddressRoundTrip },
         { "malformed addresses rejected", CaseAddressRejects },
+        { "IPv6 address text (O5.3)", CaseIpv6AddressText },
         { "ephemeral bind on 127.0.0.1", CaseEphemeralBind },
         { "empty receive returns WouldBlock", CaseEmptyReceive },
         { "closed socket refuses I/O", CaseClosedRefuses },
         { "100 datagrams exchanged, sizes 0 to 1200", CaseExchange },
+        { "two sockets on [::1] (O5.3)", CaseIpv6Loopback },
+        { "a dual-stack socket reaches IPv4 and IPv6 (O5.3)", CaseDualStack },
         { "oversize datagram dropped, no overflow", CaseOversizeDropped },
         { "send to a closed port leaves receives working", CaseSendToClosedPort },
         { "open and close cycles", CaseReopenCycles },

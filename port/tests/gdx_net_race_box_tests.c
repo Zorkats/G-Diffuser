@@ -1,7 +1,7 @@
 /* port/tests/gdx_net_race_box_tests.c -- unit tests for the quit box of a room's race (gdx_net_race_box.h).
  * Copyright (c) Zorkats
  *
- * Standalone: links gdx_net_race_box.c and gdx_net_race_words.c. The room and the race are the five functions below. Expected
+ * Standalone: links gdx_net_race_box.c and gdx_net_race_words.c. The room and the race are the six functions below. Expected
  * values are written out by hand from the header.
  *
  * The module keeps the box between calls, so every test starts from a reset and a race number of its own.
@@ -36,6 +36,7 @@ static int sFrontCalls;  /* the main menu was asked to come up on the front page
 static int sCalls;       /* the quit and the stop, in the order they came */
 static int sStopWasCall; /* which call the room's stop was, 1 for the first */
 static int sQuitWasCall;
+static int sHandOverCalls;
 
 void gdx_lan_race_room(GdxNetRaceRoom* out) {
     *out = sFakeRoom;
@@ -48,6 +49,10 @@ int gdx_net_race_own_state(void) {
 void gdx_net_race_quit(void) {
     sQuitCalls++;
     sQuitWasCall = ++sCalls;
+}
+
+void gdx_net_race_hand_over(void) {
+    sHandOverCalls++;
 }
 
 void gdx_lan_room_stop(void) {
@@ -69,7 +74,7 @@ static void racing(unsigned raceIndex, int host) {
     sFakeRoom.raceIndex = raceIndex;
     sFakeRoom.onGrid = 1;
     sOwnState = DRIVES;
-    sQuitCalls = sStopCalls = sFrontCalls = sCalls = sStopWasCall = sQuitWasCall = 0;
+    sQuitCalls = sStopCalls = sFrontCalls = sCalls = sStopWasCall = sQuitWasCall = sHandOverCalls = 0;
     gdx_net_race_box_reset();
 }
 
@@ -147,24 +152,31 @@ static void test_start_opens_it(void) {
     CHECK(sQuitCalls == 0 && sStopCalls == 0);
 }
 
-static void test_the_host_has_two_rows(void) {
+static void test_the_host_has_three_rows(void) {
     racing(12, 1);
     open_ready();
-    CHECK(gdx_net_race_box_rows() == 2);
+    CHECK(gdx_net_race_box_rows() == 3);
     CHECK(strcmp(gdx_net_race_box_text(0), "CONTINUE") == 0);
     CHECK(strcmp(gdx_net_race_box_text(1), "RETURN TO ROOM") == 0);
-    CHECK(strcmp(gdx_net_race_box_text(2), "") == 0);
-    /* The cursor goes round two rows, not three. */
+    CHECK(strcmp(gdx_net_race_box_text(2), "LEAVE THE ROOM") == 0);
     CHECK(down() == GDX_NET_RACE_BOX_MOVED);
-    CHECK(gdx_net_race_box_cursor() == 1);
-    CHECK(down() == GDX_NET_RACE_BOX_MOVED);
-    CHECK(gdx_net_race_box_cursor() == 0);
-    CHECK(up() == GDX_NET_RACE_BOX_MOVED);
     CHECK(gdx_net_race_box_cursor() == 1);
     /* The second row takes the host out of the race and leaves the room open. */
     CHECK(choose() == GDX_NET_RACE_BOX_LEFT);
-    CHECK(sQuitCalls == 1 && sStopCalls == 0 && sFrontCalls == 0);
+    CHECK(sQuitCalls == 1 && sStopCalls == 0 && sFrontCalls == 0 && sHandOverCalls == 0);
     CHECK(gdx_net_race_box_rows() == 0);
+}
+
+/* LEAVE THE ROOM on the host's copy hands the room over (D28.5): the room is not stopped, since it runs the
+ * race on for the others, and the race is left by the hand-over call alone. */
+static void test_the_host_hands_the_room_over(void) {
+    racing(13, 1);
+    open_ready();
+    CHECK(up() == GDX_NET_RACE_BOX_MOVED);
+    CHECK(gdx_net_race_box_cursor() == 2);
+    CHECK(choose() == GDX_NET_RACE_BOX_LEFT);
+    CHECK(sHandOverCalls == 1 && sStopCalls == 0 && sQuitCalls == 0 && sFrontCalls == 1);
+    CHECK(gdx_net_race_box_rows() == 0 && gdx_net_race_box_holds_input() == 0);
 }
 
 static void test_the_press_that_opened_is_not_an_answer(void) {
@@ -192,6 +204,38 @@ static void test_the_press_that_opened_is_not_an_answer(void) {
     CHECK(back() == GDX_NET_RACE_BOX_NOTHING);
     CHECK(gdx_net_race_box_rows() == 3);
     CHECK(back() == GDX_NET_RACE_BOX_CLOSED);
+}
+
+static void test_it_opens_like_the_stock_box(void) {
+    int i;
+
+    racing(21, 0);
+    CHECK(gdx_net_race_box_opening() == 0);
+    /* The stock Retry box grows over 60 frames, and so does this one. */
+    CHECK(GDX_NET_RACE_BOX_OPEN_FRAMES == 60);
+    CHECK(start() == GDX_NET_RACE_BOX_OPENED);
+    CHECK(gdx_net_race_box_opening() == GDX_NET_RACE_BOX_OPEN_FRAMES);
+    /* The timer falls by one a frame, and no press counts while it is above 0. */
+    for (i = 1; i <= GDX_NET_RACE_BOX_OPEN_FRAMES; i++) {
+        CHECK(choose() == GDX_NET_RACE_BOX_NOTHING);
+        CHECK(gdx_net_race_box_opening() == GDX_NET_RACE_BOX_OPEN_FRAMES - i);
+    }
+    /* Fully open: it is drawn whole, and the next press counts. */
+    CHECK(gdx_net_race_box_opening() == 0);
+    CHECK(gdx_net_race_box_rows() == 3);
+    CHECK(choose() == GDX_NET_RACE_BOX_CLOSED);
+    CHECK(gdx_net_race_box_opening() == 0);
+
+    /* Closed in the middle of opening (the race ended), it opens from the start the next time. */
+    racing(21, 0);
+    CHECK(start() == GDX_NET_RACE_BOX_OPENED);
+    CHECK(idle_frames(20) == 0);
+    CHECK(gdx_net_race_box_opening() == GDX_NET_RACE_BOX_OPEN_FRAMES - 20);
+    gdx_net_race_box_reset();
+    CHECK(gdx_net_race_box_opening() == 0);
+    racing(21, 0);
+    CHECK(start() == GDX_NET_RACE_BOX_OPENED);
+    CHECK(gdx_net_race_box_opening() == GDX_NET_RACE_BOX_OPEN_FRAMES);
 }
 
 static void test_continue_and_b_close_it(void) {
@@ -247,7 +291,7 @@ static void test_leave_the_room(void) {
     CHECK(gdx_net_race_box_cursor() == 2);
     CHECK(choose() == GDX_NET_RACE_BOX_LEFT);
     /* The room is left first, then the race: both once. The main menu is to show the front page. */
-    CHECK(sStopCalls == 1 && sQuitCalls == 1);
+    CHECK(sStopCalls == 1 && sQuitCalls == 1 && sHandOverCalls == 0);
     CHECK(sStopWasCall == 1 && sQuitWasCall == 2);
     CHECK(sFrontCalls == 1);
     CHECK(gdx_net_race_box_rows() == 0);
@@ -336,10 +380,12 @@ static void test_a_stick_already_leaning_does_not_move_at_once(void) {
     for (i = 0; i < GDX_NET_RACE_BOX_OPEN_FRAMES; i++) {
         CHECK(stick(-80) == GDX_NET_RACE_BOX_NOTHING);
     }
-    /* 31 frames of hold before the box, 12 while it opened: the repeat comes at 60, not now. */
+    /* 31 frames of hold before the box and 60 while it opened count as a push already made, not as a
+       hold: the first frame that takes a press is the third of the hold, and the repeat comes at 60. */
     CHECK(stick(-80) == GDX_NET_RACE_BOX_NOTHING);
     CHECK(gdx_net_race_box_cursor() == 0);
-    CHECK(hold_stick(-80, GDX_NET_RACE_BOX_REPEAT_AFTER - 31 - GDX_NET_RACE_BOX_OPEN_FRAMES - 2) == 0);
+    CHECK(hold_stick(-80, GDX_NET_RACE_BOX_REPEAT_AFTER - 4) == 0);
+    CHECK(gdx_net_race_box_cursor() == 0);
     CHECK(stick(-80) == GDX_NET_RACE_BOX_MOVED);
     CHECK(gdx_net_race_box_cursor() == 1);
 
@@ -574,7 +620,8 @@ static void test_each_row_names_its_word(void) {
     open_ready();
     CHECK(gdx_net_race_box_word(0) == GDX_NET_RACE_WORD_CONTINUE);
     CHECK(gdx_net_race_box_word(1) == GDX_NET_RACE_WORD_RETURN_TO_ROOM);
-    CHECK(gdx_net_race_box_word(2) == GDX_NET_RACE_WORD_NONE);
+    CHECK(gdx_net_race_box_word(2) == GDX_NET_RACE_WORD_LEAVE_THE_ROOM);
+    CHECK(gdx_net_race_box_word(3) == GDX_NET_RACE_WORD_NONE);
 
     for (row = 0; row < gdx_net_race_box_rows(); row++) {
         const char* text = gdx_net_race_box_text(row);
@@ -661,8 +708,10 @@ int main(int argc, char** argv) {
     }
     test_closed_until_start();
     test_start_opens_it();
-    test_the_host_has_two_rows();
+    test_the_host_has_three_rows();
+    test_the_host_hands_the_room_over();
     test_the_press_that_opened_is_not_an_answer();
+    test_it_opens_like_the_stock_box();
     test_continue_and_b_close_it();
     test_return_to_room();
     test_leave_the_room();

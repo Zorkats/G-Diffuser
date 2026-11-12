@@ -165,6 +165,8 @@ const char* SeatText(const View& view, const PlayerInfo& p, ImVec4& colour) {
     case Phase::Countdown:
     case Phase::Racing:
         return p.inRace ? "Racing" : "Watches this race";
+    case Phase::Assets:
+        return p.inRace ? "Getting the track" : "Watches this race";
     case Phase::Lottery:
     case Phase::Results:
         break;
@@ -464,6 +466,8 @@ const char* PhaseTitle(Phase phase) {
         return "Race";
     case Phase::Results:
         return "Results";
+    case Phase::Assets:
+        return "Getting the track";
     }
     return "Room";
 }
@@ -552,6 +556,7 @@ void DrawPhase(const View& view, const PlayerInfo& me, bool isHost) {
     case Phase::Machine:
         DrawMachinePhase(view, me);
         break;
+    case Phase::Assets:
     case Phase::GridSync:
         ImGui::Text("Track: %s", TrackLabel(view.room.track).c_str());
         DrawTimer(view.room);
@@ -656,7 +661,6 @@ void DrawRoom(const View& view, bool isHost) {
 }
 
 void DrawRooms(const View& view, const LocalProfile& me) {
-    const std::string build = gdx::lan::BuildId();
     if (view.rooms.empty()) {
         ImGui::TextDisabled("Searching... Rooms hosted on this network show up here.");
         return;
@@ -686,27 +690,23 @@ void DrawRooms(const View& view, const LocalProfile& me) {
         ImGui::TableNextColumn();
         ImGui::TextUnformatted(gdx::net::FormatAddress(found.address).c_str());
         ImGui::TableNextColumn();
-        const bool sameBuild = found.room.build == build;
-        ImGui::BeginDisabled(!sameBuild || !found.room.RaceSeatFree());
+        ImGui::BeginDisabled(!found.room.RaceSeatFree());
         if (ImGui::SmallButton("Join")) {
             gdx::lan::StartJoin(found.address, me, Seat::Race);
         }
         ImGui::EndDisabled();
-        if (!sameBuild) {
-            ImGui::SetItemTooltip("This room runs G-Diffuser %s. You have %s.", found.room.build.c_str(),
-                                  build.c_str());
-        } else if (!found.room.RaceSeatFree()) {
+        if (!found.room.RaceSeatFree()) {
             ImGui::SetItemTooltip("Every race seat is taken.");
         } else if (found.room.phase != Phase::Lobby) {
             ImGui::SetItemTooltip("The room is mid-series. You race from the next race on.");
         }
         ImGui::SameLine();
-        ImGui::BeginDisabled(!sameBuild || !found.room.WatchSeatFree());
+        ImGui::BeginDisabled(!found.room.WatchSeatFree());
         if (ImGui::SmallButton("Watch")) {
             gdx::lan::StartJoin(found.address, me, Seat::Watch);
         }
         ImGui::EndDisabled();
-        if (sameBuild && !found.room.WatchSeatFree()) {
+        if (!found.room.WatchSeatFree()) {
             ImGui::SetItemTooltip("Both watch seats are taken.");
         }
         ImGui::PopID();

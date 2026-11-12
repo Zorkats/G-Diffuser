@@ -11,6 +11,7 @@
 /* The race bridge (gdx_net_race_bridge.c), which has no header of its own. */
 extern int gdx_net_race_own_state(void); /* 0 the machine drives, 1 it finished, 2 it crashed or retired */
 extern void gdx_net_race_quit(void);     /* the next frame leaves the race for the room screen */
+extern void gdx_net_race_hand_over(void); /* the same, and then the host's room goes to the next host */
 
 enum { ROW_STAY = 0, ROW_ROOM = 1, ROW_LEAVE = 2 };
 enum { OWN_DRIVES = 0, OWN_OUT = 2 };
@@ -93,12 +94,16 @@ int gdx_net_race_box_frame(int start, int accept, int back, int up, int down, in
         sRaceKnown = 1;
         sRace = room.raceIndex;
     }
-    sRows = room.host ? 2 : 3;
+    sRows = GDX_NET_RACE_BOX_ROWS;
     sOwn = gdx_net_race_own_state();
 
     /* The stick is followed while the box is closed or opening too, so a stick that was already leaning
-       when the box came up does not move the cursor at once. */
+       when the box came up does not move the cursor at once. Its hold stays short until the box takes a
+       press: a lean held through the 60 frames of opening would otherwise reach its repeat just then. */
     step = cursor_step(up, down, stickY);
+    if ((!sOpen || sWait > 0) && sHold > 2) {
+        sHold = 2;
+    }
 
     if (sOwn == OWN_OUT && !sAutoSpent) {
         if (sOpen) {
@@ -130,6 +135,13 @@ int gdx_net_race_box_frame(int start, int accept, int back, int up, int down, in
         if (row == ROW_STAY) {
             return GDX_NET_RACE_BOX_CLOSED;
         }
+        if (row == ROW_LEAVE && room.host) {
+            /* The room goes on without this copy: the race reports its machine to the room first, then hands
+               the room over (gdx_net_race_bridge.c). */
+            gdx_net_room_screen_want_front();
+            gdx_net_race_hand_over();
+            return GDX_NET_RACE_BOX_LEFT;
+        }
         if (row == ROW_LEAVE) {
             gdx_lan_room_stop(); /* the room first: a copy in no room has nothing to report to it */
             gdx_net_room_screen_want_front(); /* and on to the page with the rooms, not the mode cards */
@@ -146,6 +158,10 @@ int gdx_net_race_box_frame(int start, int accept, int back, int up, int down, in
 
 int gdx_net_race_box_rows(void) {
     return sOpen ? sRows : 0;
+}
+
+int gdx_net_race_box_opening(void) {
+    return sOpen ? sWait : 0;
 }
 
 int gdx_net_race_box_cursor(void) {

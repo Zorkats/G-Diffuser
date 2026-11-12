@@ -89,15 +89,22 @@ const Generation* member(const std::vector<Generation>& members, const char* nam
     return nullptr;
 }
 
+// The folder of complete generations beside the live save. Empty when the save is not ready.
+std::filesystem::path snapshotRoot() {
+    char path[1600]{};
+    if (gdx_course_boot() < 0 || !gdx_course_state_recovery_ready() ||
+        !gdx_disk_save_recovery_path(path, sizeof(path))) {
+        return {};
+    }
+    return std::filesystem::absolute(std::filesystem::u8path(std::string(path) + ".snapshots")).lexically_normal();
+}
+
 template<class F> int repository(F fn) {
     try {
-        char path[1600]{};
-        if (gdx_course_boot() < 0 || !gdx_course_state_recovery_ready() ||
-            !gdx_disk_save_recovery_path(path, sizeof(path))) {
+        const auto root = snapshotRoot();
+        if (root.empty()) {
             return 0;
         }
-        const auto root = std::filesystem::absolute(
-            std::filesystem::u8path(std::string(path) + ".snapshots")).lexically_normal();
         gdx::recovery::FileLock lock(root.string() + ".lock");
         if (!root.is_absolute() || !lock.held()) {
             return 0;
@@ -311,6 +318,33 @@ extern "C" int gdx_snapshot_content(unsigned short directory, const char* name, 
     });
 }
 
+extern "C" int gdx_snapshot_content_peek(unsigned short directory, const char* name, const char* extension,
+                                          const void* base, GdxSnapshotContentVisit visit, void* ctx) {
+    if (!base || !visit) {
+        return 0;
+    }
+    try {
+        // No lock and no Files: both create entries beside the save. A generation is published by atomic
+        // rename, so an unlocked read sees the old file or the new one, never half of one.
+        const auto root = snapshotRoot();
+        if (root.empty()) {
+            return 0;
+        }
+        ReadOnlyFiles files(root);
+        Generation g;
+        Bytes bytes;
+        const auto* p = static_cast<const unsigned char*>(base);
+        if (!identity(g, directory, name, extension) || peekState(files, g, Bytes(p, p + BaseBytes)) != Result::Ok ||
+            !content(g, bytes)) {
+            return 0;
+        }
+        visit(bytes.data(), static_cast<unsigned long>(bytes.size()), ctx);
+        return 1;
+    } catch (...) {
+        return 0;
+    }
+}
+
 extern "C" int gdx_snapshot_export_write(const char* containerPath, unsigned int containerCrc) {
     try {
         Bytes bytes;
@@ -418,6 +452,33 @@ extern "C" int gdx_snapshot_import_publish(unsigned short directory, const char*
         std::memcpy(base, g.base.data(), BaseBytes);
         return true;
     });
+}
+
+extern "C" int gdx_snapshot_import_stage_content(const unsigned char* bytes, unsigned long length, const char* name,
+                                                  void* base) {
+    imported.clear();
+    prepared.clear();
+    if (!bytes || !length || length > MaxBytes || !name || !base) {
+        return 0;
+    }
+    try {
+        const Bytes given(bytes, bytes + length);
+        Generation g, identityCheck;
+        Bytes canonical;
+        // Only a track's content bytes: decode() alone would also take a generation carrying ghosts or a slot.
+        if (!decode(given, g) || !content(g, canonical) || canonical != given ||
+            !identity(identityCheck, 0, name, "CRSD") || !rebind(g, 1, 0, identityCheck.courseId) || !seal(g)) {
+            return 0;
+        }
+        std::memcpy(base, g.base.data(), BaseBytes);
+        prepared.push_back(g);
+        imported.push_back(std::move(g));
+        return 1;
+    } catch (...) {
+        imported.clear();
+        prepared.clear();
+        return 0;
+    }
 }
 
 extern "C" int gdx_snapshot_import_legacy(unsigned short directory, const char* name, const char* extension,

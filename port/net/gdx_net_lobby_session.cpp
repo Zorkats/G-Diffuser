@@ -1,8 +1,11 @@
 // port/net/gdx_net_lobby_session.cpp: LAN room host, client and room browser (gdx_net_lobby_session.h).
 
 #include "gdx_net_lobby_session.h"
+#include "gdx_net_friends.h"
 
 #include <algorithm>
+#include <cstring>
+#include <random>
 #include <utility>
 
 namespace gdx::net::lobby {
@@ -10,14 +13,99 @@ namespace gdx::net::lobby {
 namespace {
 
 const char* const kTooFastText = "You are sending messages too fast. Wait a moment.";
+const char* const kNoSuccessorText = "The host left, and the next host did not answer. The room is closed.";
+const char* const kBadSuccessorText = "The host left, and named a next host at an address this copy does not "
+                                      "send to. The room is closed.";
 
 uint32_t Elapsed(uint32_t nowMs, uint32_t thenMs) {
     return nowMs - thenMs; // unsigned: correct across the 49-day wrap
 }
 
-// Every channel packet starts with "GD"; anything else from an unknown address never gets a channel.
-bool LooksLikeChannelPacket(const uint8_t* data, size_t len) {
-    return data != nullptr && len >= 2 && data[0] == 'G' && data[1] == 'D';
+// The part of an address a ban holds: an IPv4 address whole, an IPv6 one by its /64, since a host's privacy
+// addresses change inside it. A loopback address is never banned: every copy on one PC shares it.
+bool BanPrefix(const IpBytes& ip, IpBytes& out) {
+    if (IsMappedV4(ip)) {
+        out = ip;
+        return ip[12] != 127;
+    }
+    IpBytes loopback{};
+    loopback[15] = 1;
+    out = ip;
+    std::fill(out.begin() + 8, out.end(), static_cast<uint8_t>(0));
+    return ip != loopback;
+}
+
+// Whether a probe could have come from this network: loopback, private, shared (100.64/10) and link-local
+// ranges, and IPv6 unique-local and link-local. The game probes only the broadcast and loopback addresses.
+bool LocalSource(const IpBytes& ip) {
+    if (IsMappedV4(ip)) {
+        const uint32_t v4 = V4Of(ip);
+        return (v4 >> 24) == 127 || (v4 >> 24) == 10 || (v4 >> 20) == 0xAC1u || (v4 >> 16) == 0xC0A8u ||
+               (v4 >> 22) == 0x191u || (v4 >> 16) == 0xA9FEu;
+    }
+    IpBytes loopback{};
+    loopback[15] = 1;
+    return ip == loopback || (ip[0] & 0xFE) == 0xFC || (ip[0] == 0xFE && (ip[1] & 0xC0) == 0x80);
+}
+
+uint64_t Rotl(uint64_t x, int b) {
+    return (x << b) | (x >> (64 - b));
+}
+
+void SipRound(uint64_t& v0, uint64_t& v1, uint64_t& v2, uint64_t& v3) {
+    v0 += v1;
+    v1 = Rotl(v1, 13);
+    v1 ^= v0;
+    v0 = Rotl(v0, 32);
+    v2 += v3;
+    v3 = Rotl(v3, 16);
+    v3 ^= v2;
+    v0 += v3;
+    v3 = Rotl(v3, 21);
+    v3 ^= v0;
+    v2 += v1;
+    v1 = Rotl(v1, 17);
+    v1 ^= v2;
+    v2 = Rotl(v2, 32);
+}
+
+// SipHash-2-4 (Aumasson and Bernstein): a keyed hash made for short inputs such as this cookie, where a
+// stranger must not be able to compute the output for an address it cannot receive on.
+// The per-datagram header the byte counters add for a link to this address (O5.3): an IPv6 header is 20 bytes
+// longer than an IPv4 one.
+uint32_t HeaderBytesFor(const NetAddress& addr) {
+    return addr.IsV4() ? kUdpIpv4HeaderBytes : kUdpIpv6HeaderBytes;
+}
+
+uint64_t SipHash24(const std::array<uint64_t, 2>& key, const uint8_t* data, size_t len) {
+    uint64_t v0 = 0x736f6d6570736575ull ^ key[0];
+    uint64_t v1 = 0x646f72616e646f6dull ^ key[1];
+    uint64_t v2 = 0x6c7967656e657261ull ^ key[0];
+    uint64_t v3 = 0x7465646279746573ull ^ key[1];
+    const size_t whole = len - len % 8;
+    for (size_t i = 0; i < whole; i += 8) {
+        uint64_t m = 0;
+        for (int b = 0; b < 8; b++) {
+            m |= static_cast<uint64_t>(data[i + b]) << (8 * b);
+        }
+        v3 ^= m;
+        SipRound(v0, v1, v2, v3);
+        SipRound(v0, v1, v2, v3);
+        v0 ^= m;
+    }
+    uint64_t last = static_cast<uint64_t>(len & 0xFF) << 56;
+    for (size_t b = 0; b < len % 8; b++) {
+        last |= static_cast<uint64_t>(data[whole + b]) << (8 * b);
+    }
+    v3 ^= last;
+    SipRound(v0, v1, v2, v3);
+    SipRound(v0, v1, v2, v3);
+    v0 ^= last;
+    v2 ^= 0xFF;
+    for (int i = 0; i < 4; i++) {
+        SipRound(v0, v1, v2, v3);
+    }
+    return v0 ^ v1 ^ v2 ^ v3;
 }
 
 const PlayerInfo* FindIn(const std::vector<PlayerInfo>& roster, uint8_t id) {
@@ -95,6 +183,12 @@ PlayerInfo HostPlayer(const LocalProfile& me) {
     return self;
 }
 
+// std::random_device reads the OS source on the toolchains we ship (see gdx_profile_state.cpp).
+uint64_t OsToken() {
+    std::random_device device;
+    return (static_cast<uint64_t>(device()) << 32) | static_cast<uint64_t>(device());
+}
+
 } // namespace
 
 bool ClockSync::Sample(uint32_t clientMs, uint32_t hostMs, uint32_t nowMs) {
@@ -143,11 +237,102 @@ struct LobbyHost::Peer {
     uint32_t rejectMs = 0;
     bool dead = false;
     size_t posesThisUpdate = 0;
+    bool nonceSent = false; // O7.3: the Nonce this link's Join must sign
+    uint32_t nonceRoom = 0;
+    Bytes32 nonce{};
 };
 
-LobbyHost::LobbyHost(std::string build, LocalProfile me, uint16_t port, const RoomConfig& config, DatagramSend send)
+LobbyHost::LobbyHost(std::string build, LocalProfile me, uint16_t port, const RoomConfig& config, DatagramSend send,
+                     TrackStore store)
     : build_(std::move(build)), me_(std::move(me)), port_(port), send_(std::move(send)),
-      machine_(config, HostPlayer(me_)) {
+      machine_(config, HostPlayer(me_)), flow_(std::move(store)), cookieKey_{ OsToken(), OsToken() },
+      tokenSource_(OsToken) {
+}
+
+LobbyHost::LobbyHost(std::string build, LocalProfile me, uint16_t port, RoomMachine machine,
+                     const std::vector<HandoverTokenEntry>& tokens, uint8_t promotedFrom, DatagramSend send,
+                     TrackStore store)
+    : build_(std::move(build)), me_(std::move(me)), port_(port), send_(std::move(send)), machine_(std::move(machine)),
+      flow_(std::move(store)), cookieKey_{ OsToken(), OsToken() }, tokenSource_(OsToken), promotedFrom_(promotedFrom) {
+    for (const HandoverTokenEntry& entry : tokens) {
+        const uint8_t id = HandoverId(entry.id, promotedFrom);
+        if (id != kSystemId && id != kHostId && id < kMaxPlayers && entry.token != 0) {
+            rejoinTokens_[id] = entry.token;
+        }
+    }
+}
+
+void LobbyHost::SetTokenSource(std::function<uint64_t()> source) {
+    tokenSource_ = source ? std::move(source) : std::function<uint64_t()>(OsToken);
+}
+
+uint64_t LobbyHost::NewToken() {
+    uint64_t token = 0;
+    for (int i = 0; i < 8 && token == 0; i++) {
+        token = tokenSource_();
+    }
+    return token != 0 ? token : 1; // 0 means "none" on the wire; only a broken source gets here
+}
+
+LobbyHost::Peer* LobbyHost::JoinedPeer(uint8_t id) const {
+    for (const std::unique_ptr<Peer>& peer : peers_) {
+        if (peer->joined && !peer->rejecting && !peer->dead && peer->id == id) {
+            return peer.get();
+        }
+    }
+    return nullptr;
+}
+
+// Each linked member holds a token of its own; the successor holds the table. A member who left could have
+// seen the table as an earlier successor, so a departure reissues every token, and so does a successor that
+// changes while the old one stays: it knows the table it was sent.
+void LobbyHost::SyncTokens() {
+    const uint8_t successor = machine_.Successor();
+    if (tableTo_ != kSystemId && tableTo_ != successor && JoinedPeer(tableTo_) != nullptr) {
+        tokensStale_ = true;
+    }
+    if (tableTo_ != kSystemId && tableTo_ != successor && !IsZero32(takeoverSecret_)) {
+        secretExposed_ = true;
+    }
+    bool changed = false;
+    for (uint8_t id = 1; id < kMaxPlayers; id++) {
+        Peer* peer = JoinedPeer(id);
+        if (peer == nullptr) {
+            changed = changed || tokens_[id] != 0;
+            tokens_[id] = 0;
+            continue;
+        }
+        if (tokensStale_ || tokens_[id] == 0) {
+            tokens_[id] = NewToken();
+            HandoverToken token;
+            token.token = tokens_[id];
+            const std::vector<uint8_t> bytes = EncodeHandoverToken(token);
+            peer->channel->SendReliable(kMsgHandoverToken, bytes.data(), bytes.size());
+            changed = true;
+        }
+    }
+    tokensStale_ = false;
+    Peer* next = successor != kSystemId ? JoinedPeer(successor) : nullptr;
+    if (next == nullptr) {
+        tableTo_ = kSystemId;
+        return;
+    }
+    if (!changed && !bansChanged_ && tableTo_ == successor) {
+        return;
+    }
+    std::vector<HandoverTokenEntry> table;
+    for (uint8_t id = 1; id < kMaxPlayers; id++) {
+        if (id != successor && tokens_[id] != 0) {
+            HandoverTokenEntry entry;
+            entry.id = id;
+            entry.token = tokens_[id];
+            table.push_back(entry);
+        }
+    }
+    const std::vector<uint8_t> bytes = EncodeHandoverTokens(table, takeoverSecret_, Bans());
+    next->channel->SendReliable(kMsgHandoverTokens, bytes.data(), bytes.size());
+    tableTo_ = successor;
+    bansChanged_ = false;
 }
 
 LobbyHost::~LobbyHost() = default;
@@ -157,12 +342,19 @@ void LobbyHost::Receive(const NetAddress& from, const uint8_t* data, size_t len,
         return;
     }
     if (IsDiscovery(data, len)) {
+        if (handedOver_) {
+            return; // the room is the successor's now
+        }
         uint32_t nonce = 0;
         if (!DecodeProbe(data, len, nonce)) {
             refused_++;
             return;
         }
         const RoomState state = machine_.State(nowMs);
+        if (state.type != RoomType::Lan && !LocalSource(from.ip)) {
+            refused_++; // a directory room tells its name and build to this network only, never to a scanner
+            return;
+        }
         RoomInfo room;
         room.port = port_;
         room.racers = static_cast<uint8_t>(machine_.Racers());
@@ -181,15 +373,68 @@ void LobbyHost::Receive(const NetAddress& from, const uint8_t* data, size_t len,
             return;
         }
     }
-    if (!LooksLikeChannelPacket(data, len)) {
+    if (handedOver_) {
+        return;
+    }
+    Gate(from, data, len, nowMs);
+}
+
+uint64_t LobbyHost::CookieFor(const NetAddress& from, uint32_t nonce, uint32_t bucket) const {
+    uint8_t bytes[26];
+    size_t n = 0;
+    for (uint8_t b : from.ip) {
+        bytes[n++] = b;
+    }
+    bytes[n++] = static_cast<uint8_t>(from.port);
+    bytes[n++] = static_cast<uint8_t>(from.port >> 8);
+    for (int b = 0; b < 4; b++) {
+        bytes[n++] = static_cast<uint8_t>(nonce >> (8 * b));
+    }
+    for (int b = 0; b < 4; b++) {
+        bytes[n++] = static_cast<uint8_t>(bucket >> (8 * b));
+    }
+    return SipHash24(cookieKey_, bytes, n);
+}
+
+// A datagram from an address with no channel (decision 34). Only a hello may open one, and only once it echoes
+// the cookie this host gave that address. Until then the host answers without keeping anything, so a flood from
+// spoofed addresses costs one reply each, no larger than the hello, and no pending slot.
+void LobbyHost::Gate(const NetAddress& from, const uint8_t* data, size_t len, uint32_t nowMs) {
+    uint32_t nonce = 0;
+    uint16_t version = 0;
+    uint64_t cookie = 0;
+    if (!ParseHello(data, len, nonce, version, cookie)) {
         refused_++;
         return;
     }
-    size_t pending = 0;
-    for (const std::unique_ptr<Peer>& peer : peers_) {
-        pending += peer->joined ? 0 : 1;
+    if (version != kProtocolVersion) {
+        const std::vector<uint8_t> refuse = EncodeVersionRefuse(nonce, kProtocolVersion);
+        send_(from, refuse.data(), refuse.size());
+        refused_++;
+        return;
     }
-    if (pending >= kPendingPeerCap) {
+    const uint32_t bucket = nowMs / kCookieBucketMs;
+    if (cookie != CookieFor(from, nonce, bucket) && cookie != CookieFor(from, nonce, bucket - 1)) {
+        const std::vector<uint8_t> challenge = EncodeChallenge(nonce, kProtocolVersion, CookieFor(from, nonce, bucket));
+        send_(from, challenge.data(), challenge.size());
+        challenged_++;
+        return;
+    }
+    IpBytes source{};
+    const bool capped = BanPrefix(from.ip, source);
+    size_t pending = 0;
+    size_t fromSource = 0;
+    for (const std::unique_ptr<Peer>& peer : peers_) {
+        if (peer->joined) {
+            continue;
+        }
+        pending++;
+        IpBytes other{};
+        if (capped && BanPrefix(peer->addr.ip, other) && other == source) {
+            fromSource++;
+        }
+    }
+    if (pending >= kPendingPeerCap || fromSource >= kPendingPerSourceCap) {
         refused_++;
         return;
     }
@@ -202,12 +447,17 @@ void LobbyHost::Receive(const NetAddress& from, const uint8_t* data, size_t len,
     const NetAddress to = from;
     peer->channel =
         std::make_unique<Channel>(config, [this, to](const uint8_t* bytes, size_t n) { send_(to, bytes, n); });
+    peer->channel->SetHeaderEstimateBytes(HeaderBytesFor(from));
     peer->channel->Receive(data, len, nowMs);
     peers_.push_back(std::move(peer));
 }
 
 void LobbyHost::Update(uint32_t nowMs) {
     if (closed_) {
+        return;
+    }
+    if (handedOver_) {
+        LingerAfterHandover(nowMs);
         return;
     }
     // First, so the channel updates below send them in this tick.
@@ -219,6 +469,9 @@ void LobbyHost::Update(uint32_t nowMs) {
         peer.channel->Update(nowMs);
         if (peer.channel->State() == LinkState::Connected) {
             peer.everConnected = true;
+            if (!peer.nonceSent && !peer.rejecting) {
+                SendNonce(peer);
+            }
         }
         Message msg;
         while (peer.channel->PopMessage(msg)) {
@@ -244,11 +497,20 @@ void LobbyHost::Update(uint32_t nowMs) {
             gone.push_back(peer->id);
         }
     }
+    for (const std::unique_ptr<Peer>& peer : peers_) {
+        if (peer->dead) {
+            uploadGone_.bytes += peer->channel->Stats().bytesSent;
+            uploadGone_.datagrams += peer->channel->Stats().datagramsSent;
+        }
+    }
     // Drop the dead links first, so the roster that follows goes only to players still here.
     peers_.erase(std::remove_if(peers_.begin(), peers_.end(), [](const std::unique_ptr<Peer>& p) { return p->dead; }),
                  peers_.end());
     for (uint8_t id : gone) {
         RemovePlayer(id, nowMs);
+    }
+    if (!RunRejoinWindow(nowMs)) {
+        return;
     }
 
     if (!pinged_ || Elapsed(nowMs, lastPingMs_) >= kPingEveryMs) {
@@ -265,6 +527,82 @@ void LobbyHost::Update(uint32_t nowMs) {
     std::vector<Outgoing> out;
     machine_.Update(nowMs, out);
     Dispatch(out);
+    SyncTrack(nowMs);
+    SyncTokens();
+    if (leaving_ && !closed_ && !RaceOn()) {
+        HandOver(nowMs);
+    }
+}
+
+// A successor that lost only its own link to a living host promotes all the same, and nobody comes back to
+// it: the others still hear the old host (decision 22). Closing is how that copy leaves the split.
+bool LobbyHost::RunRejoinWindow(uint32_t nowMs) {
+    if (promotedFrom_ == kSystemId || windowDone_) {
+        return true;
+    }
+    if (!windowStarted_) {
+        windowStarted_ = true;
+        windowStartMs_ = nowMs;
+        Note("The host left. You host the room now.");
+        return true;
+    }
+    if (Elapsed(nowMs, windowStartMs_) < kSuccessorWaitMs) {
+        return true;
+    }
+    windowDone_ = true;
+    rejoinTokens_.fill(0);
+    if (rejoined_ == 0) {
+        Close(nowMs);
+        closeText_ = "Lost the connection to the room.";
+        return false;
+    }
+    std::vector<uint8_t> missing;
+    for (const PlayerInfo& p : machine_.Roster()) {
+        if (p.id != kHostId && JoinedPeer(p.id) == nullptr) {
+            missing.push_back(p.id);
+        }
+    }
+    for (uint8_t id : missing) {
+        RemovePlayer(id, nowMs);
+    }
+    return true;
+}
+
+void LobbyHost::ApplyNews(const RoomNews& news, uint32_t nowMs, std::vector<Outgoing>& out) {
+    for (uint8_t id : news.held) {
+        machine_.TrackHeld(id, nowMs, out);
+    }
+    if (news.failed) {
+        machine_.TrackFailed(nowMs, out);
+    }
+}
+
+// The flow learns the room's track, asks, offers and reports; then each guest's stream gets what its channel
+// has room for. A track the room just dropped is cancelled at the next call.
+void LobbyHost::SyncTrack(uint32_t nowMs) {
+    const Phase phase = machine_.GetPhase();
+    const bool open = phase == Phase::Machine || phase == Phase::Assets;
+    std::vector<uint8_t> guests;
+    for (const std::unique_ptr<Peer>& peer : peers_) {
+        if (peer->joined && !peer->rejecting && !peer->dead) {
+            guests.push_back(peer->id);
+        }
+    }
+    std::vector<Outgoing> out;
+    RoomNews news;
+    flow_.Sync(machine_.CurrentTrack(), machine_.TrackOwner(), machine_.State(nowMs).raceIndex, open, guests, nowMs,
+               out, news);
+    ApplyNews(news, nowMs, out);
+    Dispatch(out);
+    for (const std::unique_ptr<Peer>& peer : peers_) {
+        if (!peer->joined || peer->rejecting || peer->dead) {
+            continue;
+        }
+        Channel& channel = *peer->channel;
+        flow_.Pump(peer->id, channel.ReliableOutstanding(), nowMs, [&channel](const std::vector<uint8_t>& payload) {
+            return channel.SendReliable(kMsgTrackChunk, payload.data(), payload.size()) == QueueResult::Ok;
+        });
+    }
 }
 
 void LobbyHost::HandleMessage(Peer& peer, const Message& msg, uint32_t nowMs) {
@@ -291,6 +629,10 @@ void LobbyHost::HandleMessage(Peer& peer, const Message& msg, uint32_t nowMs) {
         HandleJoin(peer, msg, nowMs);
         return;
     }
+    if (msg.type == kMsgRejoin) {
+        HandleRejoin(peer, msg, nowMs);
+        return;
+    }
     if (!peer.joined) {
         refused_++;
         return;
@@ -306,14 +648,32 @@ void LobbyHost::HandleMessage(Peer& peer, const Message& msg, uint32_t nowMs) {
         ok = DecodeReady(data, len, ready) && machine_.SetReady(id, ready, nowMs, out);
         break;
     }
+    case kMsgReach: {
+        bool reachable = false;
+        ok = DecodeReach(data, len, reachable);
+        if (ok) {
+            machine_.SetReachable(id, reachable);
+        }
+        break;
+    }
     case kMsgVote: {
-        uint8_t track = 0;
-        ok = DecodeVote(data, len, track) && machine_.Vote(id, track, nowMs, out);
+        TrackChoice choice;
+        ok = DecodeVote(data, len, choice) && machine_.Vote(id, choice, nowMs, out);
         break;
     }
     case kMsgPick: {
-        uint8_t track = 0;
-        ok = DecodePick(data, len, track) && machine_.Pick(id, track, nowMs, out);
+        TrackChoice choice;
+        ok = DecodePick(data, len, choice) && machine_.Pick(id, choice, nowMs, out);
+        break;
+    }
+    case kMsgTrackOffer:
+    case kMsgTrackChunk:
+    case kMsgTrackHave:
+    case kMsgTrackNeed:
+    case kMsgTrackAbort: {
+        RoomNews news;
+        ok = flow_.Receive(id, msg.type, data, len, nowMs, out, news);
+        ApplyNews(news, nowMs, out);
         break;
     }
     case kMsgLock: {
@@ -361,12 +721,18 @@ void LobbyHost::HandleJoin(Peer& peer, const Message& msg, uint32_t nowMs) {
         Reject(peer, RejectReason::BadProfile, nowMs);
         return;
     }
-    if (join.build != build_) {
-        Reject(peer, RejectReason::Build, nowMs);
+    // No build check since O5.1 (decision 25): the channel's hello already matched the protocol version, and a
+    // build that changes any message or the track encoding bumps it. The build string travels for the logs only.
+    if (join.hack != me_.hack) {
+        Reject(peer, RejectReason::Hack, nowMs);
         return;
     }
     uint8_t id = kSystemId;
     RejectReason why = RejectReason::Full;
+    if (!AdmitKey(peer, join, nowMs, why)) {
+        Reject(peer, why, nowMs);
+        return;
+    }
     std::vector<Outgoing> out;
     if (!machine_.Join(join, nowMs, id, why, out)) {
         Reject(peer, why, nowMs);
@@ -374,11 +740,178 @@ void LobbyHost::HandleJoin(Peer& peer, const Message& msg, uint32_t nowMs) {
     }
     peer.joined = true;
     peer.id = id;
+    keys_[id] = join.key;
+    machine_.SetAddress(id, peer.addr.ip, peer.addr.port);
     // The welcome goes first: the roster and the room that follow mean nothing without the player's own id.
     const std::vector<uint8_t> welcome = EncodeWelcome(id);
     peer.channel->SendReliable(kMsgWelcome, welcome.data(), welcome.size());
     Dispatch(out);
+    SendKeys();
     Note(JoinedText(join.name, join.seat == Seat::Watch));
+}
+
+void LobbyHost::SendNonce(Peer& peer) {
+    JoinNonce nonce;
+    nonce.roomId = machine_.State(0).roomId;
+    nonce.hostKey = identity_;
+    for (size_t i = 0; i < nonce.nonce.size(); i += 8) {
+        const uint64_t word = tokenSource_();
+        for (size_t b = 0; b < 8; b++) {
+            nonce.nonce[i + b] = static_cast<uint8_t>(word >> (8 * b));
+        }
+    }
+    peer.nonceSent = true;
+    peer.nonceRoom = nonce.roomId;
+    peer.nonce = nonce.nonce;
+    const std::vector<uint8_t> bytes = EncodeNonce(nonce);
+    peer.channel->SendReliable(kMsgNonce, bytes.data(), bytes.size());
+}
+
+// A key comes with a proof over this link's Nonce, or the join is refused: anyone can claim a key, and only its
+// owner can sign with it. The other checks then run on a key the joiner proved it holds. Without a key, only a
+// Friends room says no.
+bool LobbyHost::AdmitKey(const Peer& peer, const JoinRequest& join, uint32_t nowMs, RejectReason& why) const {
+    const bool friendsRoom = machine_.State(nowMs).type == RoomType::Friends;
+    IpBytes prefix{};
+    if (BanPrefix(peer.addr.ip, prefix) &&
+        std::find(bannedIps_.begin(), bannedIps_.end(), prefix) != bannedIps_.end()) {
+        why = RejectReason::Banned;
+        return false;
+    }
+    if (IsZero32(join.key)) {
+        why = RejectReason::NotFriend;
+        return !friendsRoom;
+    }
+    friends::Key key{};
+    friends::Key host{};
+    friends::Nonce nonce{};
+    friends::Signature proof{};
+    std::memcpy(key.data(), join.key.data(), key.size());
+    std::memcpy(host.data(), identity_.data(), host.size());
+    std::memcpy(nonce.data(), peer.nonce.data(), nonce.size());
+    std::memcpy(proof.data(), join.proof.data(), proof.size());
+    if (!peer.nonceSent || !friends::JoinProofCheck(key, peer.nonceRoom, host, nonce, proof)) {
+        why = RejectReason::BadProof;
+        return false;
+    }
+    if (std::find(banned_.begin(), banned_.end(), join.key) != banned_.end()) {
+        why = RejectReason::Banned;
+        return false;
+    }
+    if (friendsRoom && std::find(friends_.begin(), friends_.end(), join.key) == friends_.end()) {
+        why = RejectReason::NotFriend;
+        return false;
+    }
+    return true;
+}
+
+std::vector<MemberKey> LobbyHost::Keys() const {
+    std::vector<MemberKey> keys;
+    if (!IsZero32(identity_)) {
+        keys.push_back(MemberKey{ kHostId, identity_ });
+    }
+    for (size_t i = 0; i < kMaxPlayers; i++) {
+        const uint8_t id = static_cast<uint8_t>(i);
+        if (id != kHostId && !IsZero32(keys_[i]) && FindIn(machine_.Roster(), id) != nullptr) {
+            keys.push_back(MemberKey{ id, keys_[i] });
+        }
+    }
+    return keys;
+}
+
+void LobbyHost::SendKeys() {
+    SendToPlayers(kMsgKeys, EncodeKeys(Keys()));
+}
+
+void LobbyHost::SetMirrorKeys(const std::vector<MemberKey>& oldKeys) {
+    for (const MemberKey& entry : oldKeys) {
+        const uint8_t id = HandoverId(entry.id, promotedFrom_);
+        if (id != kSystemId && id != kHostId && id < kMaxPlayers) {
+            keys_[id] = entry.key;
+        }
+    }
+}
+
+Bytes32 LobbyHost::NonceFor(const NetAddress& addr) const {
+    for (const std::unique_ptr<Peer>& peer : peers_) {
+        if (peer->addr == addr && peer->nonceSent) {
+            return peer->nonce;
+        }
+    }
+    return Bytes32{};
+}
+
+bool LobbyHost::Ban(uint8_t id, uint32_t nowMs) {
+    if (closed_ || id == kHostId || id >= kMaxPlayers) {
+        return false;
+    }
+    for (const std::unique_ptr<Peer>& peer : peers_) {
+        if (peer->joined && peer->id == id && !peer->rejecting) {
+            const Bytes32 key = keys_[id];
+            if (!IsZero32(key) && std::find(banned_.begin(), banned_.end(), key) == banned_.end()) {
+                if (banned_.size() >= kBanMax) {
+                    banned_.erase(banned_.begin());
+                }
+                banned_.push_back(key);
+                bansChanged_ = true;
+            }
+            // The address too: a key is dropped by joining with none, which every room but a Friends room admits.
+            IpBytes prefix{};
+            if (BanPrefix(peer->addr.ip, prefix) &&
+                std::find(bannedIps_.begin(), bannedIps_.end(), prefix) == bannedIps_.end()) {
+                if (bannedIps_.size() >= kBanMax) {
+                    bannedIps_.erase(bannedIps_.begin());
+                }
+                bannedIps_.push_back(prefix);
+                bansChanged_ = true;
+            }
+            Reject(*peer, RejectReason::Banned, nowMs);
+            return true;
+        }
+    }
+    return false;
+}
+
+void LobbyHost::SetBans(const BanList& bans) {
+    const size_t keyFrom = bans.keys.size() > kBanMax ? bans.keys.size() - kBanMax : 0;
+    banned_.assign(bans.keys.begin() + static_cast<std::ptrdiff_t>(keyFrom), bans.keys.end());
+    const size_t prefixFrom = bans.prefixes.size() > kBanMax ? bans.prefixes.size() - kBanMax : 0;
+    bannedIps_.assign(bans.prefixes.begin() + static_cast<std::ptrdiff_t>(prefixFrom), bans.prefixes.end());
+    bansChanged_ = true;
+}
+
+// A member of the old room comes back to this promoted host (D28.4). It names the id it had there and the
+// token the old host gave it; the table this copy got as successor says which token each seat waits for. A
+// token is good once, and only while the window runs: RunRejoinWindow clears the rest when it ends.
+void LobbyHost::HandleRejoin(Peer& peer, const Message& msg, uint32_t nowMs) {
+    if (peer.joined) {
+        refused_++;
+        return;
+    }
+    Rejoin rejoin;
+    if (!DecodeRejoin(msg.payload.data(), msg.payload.size(), rejoin)) {
+        refused_++;
+        Reject(peer, RejectReason::Rejoin, nowMs);
+        return;
+    }
+    const uint8_t id = promotedFrom_ != kSystemId ? HandoverId(rejoin.id, promotedFrom_) : kSystemId;
+    const bool seated = id != kHostId && id < kMaxPlayers && FindIn(machine_.Roster(), id) != nullptr;
+    if (!seated || rejoinTokens_[id] == 0 || rejoinTokens_[id] != rejoin.token || JoinedPeer(id) != nullptr) {
+        Reject(peer, RejectReason::Rejoin, nowMs);
+        return;
+    }
+    rejoinTokens_[id] = 0;
+    peer.joined = true;
+    peer.id = id;
+    machine_.SetAddress(id, peer.addr.ip, peer.addr.port);
+    const std::vector<uint8_t> welcome = EncodeWelcome(id);
+    peer.channel->SendReliable(kMsgWelcome, welcome.data(), welcome.size());
+    std::vector<Outgoing> out;
+    machine_.Rejoined(id, nowMs, out);
+    Dispatch(out);
+    SendKeys();
+    rejoined_++;
+    Note(NameOf(id) + " is back in the room.");
 }
 
 void LobbyHost::Reject(Peer& peer, RejectReason reason, uint32_t nowMs) {
@@ -394,10 +927,15 @@ void LobbyHost::Reject(Peer& peer, RejectReason reason, uint32_t nowMs) {
 
 void LobbyHost::RemovePlayer(uint8_t id, uint32_t nowMs) {
     const std::string name = NameOf(id);
+    if (id < kMaxPlayers) {
+        keys_[id] = Bytes32{};
+    }
     std::vector<Outgoing> out;
     machine_.Leave(id, nowMs, out);
     Dispatch(out);
+    SendKeys();
     Note(LeftText(name));
+    tokensStale_ = true;
 }
 
 bool LobbyHost::SetReady(bool ready, uint32_t nowMs) {
@@ -414,9 +952,23 @@ bool LobbyHost::Vote(uint8_t track, uint32_t nowMs) {
     return ok;
 }
 
+bool LobbyHost::Vote(const TrackChoice& choice, uint32_t nowMs) {
+    std::vector<Outgoing> out;
+    const bool ok = !closed_ && machine_.Vote(kHostId, choice, nowMs, out);
+    Dispatch(out);
+    return ok;
+}
+
 bool LobbyHost::Pick(uint8_t track, uint32_t nowMs) {
     std::vector<Outgoing> out;
     const bool ok = !closed_ && machine_.Pick(kHostId, track, nowMs, out);
+    Dispatch(out);
+    return ok;
+}
+
+bool LobbyHost::Pick(const TrackChoice& choice, uint32_t nowMs) {
+    std::vector<Outgoing> out;
+    const bool ok = !closed_ && machine_.Pick(kHostId, choice, nowMs, out);
     Dispatch(out);
     return ok;
 }
@@ -446,6 +998,16 @@ bool LobbyHost::GridReady(const ReadyToRace& ready, uint32_t nowMs) {
     const bool ok = !closed_ && machine_.GridReady(kHostId, ready, nowMs, out);
     Dispatch(out);
     return ok;
+}
+
+LobbyHost::UploadTotals LobbyHost::Upload() const {
+    UploadTotals totals = uploadGone_;
+    totals.links = peers_.size();
+    for (const std::unique_ptr<Peer>& peer : peers_) {
+        totals.bytes += peer->channel->Stats().bytesSent;
+        totals.datagrams += peer->channel->Stats().datagramsSent;
+    }
+    return totals;
 }
 
 bool LobbyHost::RaceOn() const {
@@ -609,6 +1171,20 @@ bool LobbyHost::SetRacerCap(uint8_t cap, uint32_t nowMs) {
     return ok;
 }
 
+bool LobbyHost::SetCustomTracks(bool on, uint32_t nowMs) {
+    std::vector<Outgoing> out;
+    const bool ok = !closed_ && machine_.SetCustomTracks(on, nowMs, out);
+    Dispatch(out);
+    return ok;
+}
+
+bool LobbyHost::SetCpuOptions(const CpuOptions& cpu, uint32_t nowMs) {
+    std::vector<Outgoing> out;
+    const bool ok = !closed_ && machine_.SetCpuOptions(cpu, nowMs, out);
+    Dispatch(out);
+    return ok;
+}
+
 void LobbyHost::Kick(uint8_t id, uint32_t nowMs) {
     if (closed_ || id == kHostId) {
         return;
@@ -630,6 +1206,66 @@ void LobbyHost::Close(uint32_t nowMs) {
     }
     peers_.clear();
     closed_ = true;
+    closeText_.clear();
+}
+
+void LobbyHost::Leave(uint32_t nowMs) {
+    if (closed_ || leaving_) {
+        return;
+    }
+    leaving_ = true;
+    Note("You left the room.");
+    if (!RaceOn()) {
+        HandOver(nowMs);
+    }
+}
+
+void LobbyHost::HandOver(uint32_t nowMs) {
+    const uint8_t successor = machine_.Successor();
+    Peer* next = successor != kSystemId ? JoinedPeer(successor) : nullptr;
+    if (next == nullptr) {
+        Close(nowMs);
+        closeText_ = "You closed the room. Nobody was left to host it.";
+        return;
+    }
+    Handover handover;
+    handover.successor = successor;
+    handover.ip = next->addr.ip;
+    handover.port = next->addr.port;
+    const std::vector<uint8_t> bytes = EncodeHandover(handover);
+    for (const std::unique_ptr<Peer>& peer : peers_) {
+        if (peer->joined && !peer->rejecting) {
+            peer->channel->SendReliable(kMsgHandover, bytes.data(), bytes.size());
+        }
+    }
+    handedOver_ = true;
+    handoverMs_ = nowMs;
+    handedTo_ = successor;
+}
+
+// The members follow the Handover at once and stop answering, so most acks never come: the linger is the
+// usual way out. No disconnect goes to anyone. A member that missed the Handover hears silence, and silence
+// already leads it to the successor the room named.
+void LobbyHost::LingerAfterHandover(uint32_t nowMs) {
+    bool settled = true;
+    for (const std::unique_ptr<Peer>& peer : peers_) {
+        peer->channel->Update(nowMs);
+        Message msg;
+        while (peer->channel->PopMessage(msg)) {
+            // The room is no longer this copy's to run.
+        }
+        if (peer->joined && peer->channel->State() != LinkState::Disconnected &&
+            peer->channel->ReliableOutstanding() > 0) {
+            settled = false;
+        }
+    }
+    if (!settled && Elapsed(nowMs, handoverMs_) < kHandoverLingerMs) {
+        return;
+    }
+    const std::string next = NameOf(handedTo_);
+    peers_.clear();
+    closed_ = true;
+    closeText_ = "You left the room. " + next + " hosts it now.";
 }
 
 void LobbyHost::Dispatch(std::vector<Outgoing>& out) {
@@ -687,9 +1323,11 @@ ChannelConfig ClientConfig(uint32_t nonce) {
 } // namespace
 
 LobbyClient::LobbyClient(std::string build, LocalProfile me, Seat seat, NetAddress host, uint32_t nonce,
-                         DatagramSend send)
+                         DatagramSend send, TrackStore store)
     : build_(std::move(build)), me_(std::move(me)), seat_(seat), host_(host),
-      channel_(ClientConfig(nonce), [send, host](const uint8_t* bytes, size_t n) { send(host, bytes, n); }) {
+      channel_(ClientConfig(nonce), [send, host](const uint8_t* bytes, size_t n) { send(host, bytes, n); }),
+      flow_(std::move(store)) {
+    channel_.SetHeaderEstimateBytes(HeaderBytesFor(host));
 }
 
 void LobbyClient::Start(uint32_t nowMs) {
@@ -710,19 +1348,23 @@ void LobbyClient::Update(uint32_t nowMs) {
         return;
     }
     channel_.Update(nowMs);
+    if (rejoin_ && state_ == State::Connecting && Elapsed(nowMs, rejoinSinceMs_) >= kSuccessorWaitMs) {
+        channel_.Disconnect(nowMs);
+        CloseWith(kNoSuccessorText);
+        return;
+    }
     if (channel_.State() == LinkState::Connected) {
         everConnected_ = true;
-        if (!joinSent_) {
-            JoinRequest join;
-            join.build = build_;
-            join.name = me_.name;
-            join.colour = me_.colour;
-            join.machine = me_.machine;
-            join.seat = seat_;
-            const std::vector<uint8_t> bytes = EncodeJoin(join);
-            channel_.SendReliable(kMsgJoin, bytes.data(), bytes.size());
+        if (!joinSent_ && rejoin_) {
+            Rejoin rejoin;
+            rejoin.id = rejoinId_;
+            rejoin.token = rejoinToken_;
+            const std::vector<uint8_t> bytes = EncodeRejoin(rejoin);
+            channel_.SendReliable(kMsgRejoin, bytes.data(), bytes.size());
+            hostReachable_ = false; // a promoted host built its seats from its mirror, which holds no reachability
             joinSent_ = true;
         }
+        // A Join waits for the host's Nonce (HandleMessage), which it signs.
     }
     Message msg;
     while (state_ != State::Closed && channel_.PopMessage(msg)) {
@@ -733,6 +1375,11 @@ void LobbyClient::Update(uint32_t nowMs) {
         return;
     }
     if (state_ == State::Joined) {
+        SyncReach(); // again, in case a full send queue refused it
+        SyncTrack(nowMs);
+        flow_.Pump(channel_.ReliableOutstanding(), nowMs, [this](const std::vector<uint8_t>& payload) {
+            return channel_.SendReliable(kMsgTrackChunk, payload.data(), payload.size()) == QueueResult::Ok;
+        });
         const uint32_t every = clock_.Samples() < kClockWarmSamples ? kClockPingFastMs : kClockPingSlowMs;
         if (!clockPinged_ || Elapsed(nowMs, lastClockPingMs_) >= every) {
             clockPinged_ = true;
@@ -746,6 +1393,18 @@ void LobbyClient::Update(uint32_t nowMs) {
     }
     switch (channel_.Reason()) {
     case CloseReason::Timeout:
+        if (rejoin_ && !everConnected_) {
+            // The successor may not be hosting yet: it learns the host is gone on its own clock.
+            if (Elapsed(nowMs, rejoinSinceMs_) < kSuccessorWaitMs && channel_.Connect(nowMs)) {
+                return;
+            }
+            CloseWith(kNoSuccessorText);
+            break;
+        }
+        if (state_ == State::Joined && !PlanHandover(room_.successor, room_.successorIp, room_.successorPort, nowMs)) {
+            CloseWith(kBadSuccessorText);
+            break;
+        }
         CloseWith(everConnected_ ? "Lost the connection to the host."
                                  : "No room answered at " + FormatAddress(host_) + ".");
         break;
@@ -781,6 +1440,43 @@ void LobbyClient::HandleMessage(const Message& msg, uint32_t nowMs) {
     const uint8_t* data = msg.payload.data();
     const size_t len = msg.payload.size();
     switch (msg.type) {
+    case kMsgNonce: {
+        JoinNonce nonce;
+        if (joinSent_ || state_ != State::Connecting || !DecodeNonce(data, len, nonce)) {
+            refused_ += joinSent_ ? 0 : 1; // a Rejoin answers no Nonce: the token is its proof
+            return;
+        }
+        if (expectingKey_ && nonce.hostKey != expectKey_) {
+            CloseWith("The room at that address is not the room you asked for.");
+            return;
+        }
+        JoinRequest join;
+        join.build = build_;
+        join.name = me_.name;
+        join.colour = me_.colour;
+        join.machine = me_.machine;
+        join.seat = seat_;
+        join.hack = me_.hack;
+        join.reachable = reachable_;
+        if (!signer_ || !signer_(nonce, join.key, join.proof)) {
+            join.key = Bytes32{};
+            join.proof.fill(0);
+        }
+        const std::vector<uint8_t> bytes = EncodeJoin(join);
+        channel_.SendReliable(kMsgJoin, bytes.data(), bytes.size());
+        hostReachable_ = join.reachable;
+        joinSent_ = true;
+        return;
+    }
+    case kMsgKeys: {
+        std::vector<MemberKey> keys;
+        if (!DecodeKeys(data, len, keys)) {
+            refused_++;
+            return;
+        }
+        keys_ = std::move(keys);
+        return;
+    }
     case kMsgWelcome: {
         uint8_t id = 0;
         if (state_ != State::Connecting || !DecodeWelcome(data, len, id)) {
@@ -789,6 +1485,7 @@ void LobbyClient::HandleMessage(const Message& msg, uint32_t nowMs) {
         }
         localId_ = id;
         state_ = State::Joined;
+        SyncReach();
         return;
     }
     case kMsgReject: {
@@ -857,8 +1554,7 @@ void LobbyClient::HandleMessage(const Message& msg, uint32_t nowMs) {
         }
         // The room message that opens Phase::Lottery comes after this one, but the values the draw rests
         // on have not changed since the vote opened.
-        lotteryChecked_ =
-            RunLottery(room_.roomId, room_.raceIndex, lottery.ballots, room_.pool, room_.lastTrack) == lottery;
+        lotteryChecked_ = CheckLottery(room_, lottery);
         if (!lotteryChecked_) {
             refused_++;
             Note("The host's lottery result does not match this copy's check.");
@@ -894,6 +1590,58 @@ void LobbyClient::HandleMessage(const Message& msg, uint32_t nowMs) {
         haveResults_ = true;
         return;
     }
+    case kMsgHandoverToken: {
+        HandoverToken token;
+        if (!DecodeHandoverToken(data, len, token)) {
+            refused_++;
+            return;
+        }
+        ownToken_ = token.token;
+        return;
+    }
+    case kMsgHandoverTokens: {
+        std::vector<HandoverTokenEntry> table;
+        Bytes32 secret{};
+        BanList bans;
+        if (!DecodeHandoverTokens(data, len, table, secret, bans)) {
+            refused_++;
+            return;
+        }
+        tokenTable_ = std::move(table);
+        takeoverSecret_ = secret;
+        bans_ = std::move(bans);
+        return;
+    }
+    case kMsgHandover: {
+        // The host is leaving on purpose: no need to wait out the silence.
+        Handover handover;
+        if (state_ != State::Joined || !DecodeHandover(data, len, handover)) {
+            refused_++;
+            return;
+        }
+        if (!PlanHandover(handover.successor, handover.ip, handover.port, nowMs)) {
+            CloseWith(kBadSuccessorText);
+            return;
+        }
+        CloseWith(handover.successor == kSystemId ? "The host closed the room." : "The host left the room.");
+        return;
+    }
+    case kMsgTrackOffer:
+    case kMsgTrackChunk:
+    case kMsgTrackHave:
+    case kMsgTrackNeed:
+    case kMsgTrackAbort: {
+        // The room message ahead of this one may have named the track in this same Update.
+        SyncTrack(nowMs);
+        std::vector<Outgoing> out;
+        if (!flow_.Receive(msg.type, data, len, nowMs, out)) {
+            refused_++;
+        }
+        for (const Outgoing& reply : out) {
+            Send(reply.type, reply.payload);
+        }
+        return;
+    }
     default:
         refused_++;
         return;
@@ -920,6 +1668,70 @@ void LobbyClient::TakeRoster(std::vector<PlayerInfo> roster) {
     haveRoster_ = true;
 }
 
+// The successor promotes only with someone to host: its table names every other member that holds a token.
+// A member without a token, or a room with nobody named, has nothing to come back to.
+bool LobbyClient::PlanHandover(uint8_t successor, const IpBytes& ip, uint16_t port, uint32_t nowMs) {
+    plan_ = HandoverPlan();
+    plan_.successor = successor;
+    plan_.id = localId_;
+    plan_.sinceMs = nowMs;
+    if (successor == kSystemId || localId_ == kSystemId) {
+        return true;
+    }
+    plan_.address.ip = ip;
+    plan_.address.port = port;
+    if (successor == localId_) {
+        plan_.kind = tokenTable_.empty() ? HandoverPlan::Kind::None : HandoverPlan::Kind::Promote;
+        return true;
+    }
+    if (ownToken_ == 0 || port == 0) {
+        return true;
+    }
+    // Decision 60: the host's word is the only source of this address, as a record is of a listed one.
+    if (room_.type != RoomType::Lan && !DialableIp(ip, port, allowLoopback_)) {
+        return false;
+    }
+    plan_.kind = HandoverPlan::Kind::Rejoin;
+    plan_.token = ownToken_;
+    return true;
+}
+
+void LobbyClient::SetReachable(bool reachable) {
+    reachable_ = reachable;
+    SyncReach();
+}
+
+void LobbyClient::SyncReach() {
+    if (state_ != State::Joined || reachable_ == hostReachable_) {
+        return;
+    }
+    const std::vector<uint8_t> bytes = EncodeReach(reachable_);
+    if (channel_.SendReliable(kMsgReach, bytes.data(), bytes.size()) == QueueResult::Ok) {
+        hostReachable_ = reachable_;
+    }
+}
+
+bool LobbyClient::SetRejoin(const HandoverPlan& plan) {
+    if (plan.kind != HandoverPlan::Kind::Rejoin || plan.address != host_ || plan.token == 0 ||
+        state_ != State::Connecting || channel_.State() != LinkState::Disconnected || joinSent_) {
+        return false;
+    }
+    rejoin_ = true;
+    rejoinId_ = plan.id;
+    rejoinToken_ = plan.token;
+    rejoinSinceMs_ = plan.sinceMs;
+    return true;
+}
+
+RoomMirror LobbyClient::Mirror(uint32_t nowMs) const {
+    RoomMirror mirror;
+    mirror.roster = roster_;
+    mirror.room = Room(nowMs);
+    mirror.results = results_;
+    mirror.haveResults = haveResults_;
+    return mirror;
+}
+
 RoomState LobbyClient::Room(uint32_t nowMs) const {
     RoomState room = room_;
     const uint32_t spent = Elapsed(nowMs, roomAtMs_);
@@ -941,8 +1753,35 @@ void LobbyClient::Vote(uint8_t track) {
     Send(kMsgVote, EncodeVote(track));
 }
 
+void LobbyClient::Vote(const TrackChoice& choice) {
+    Send(kMsgVote, EncodeVote(choice));
+}
+
 void LobbyClient::Pick(uint8_t track) {
     Send(kMsgPick, EncodePick(track));
+}
+
+void LobbyClient::Pick(const TrackChoice& choice) {
+    Send(kMsgPick, EncodePick(choice));
+}
+
+bool LobbyClient::OwnsTrack() const {
+    if (room_.track != kTrackCustom) {
+        return false;
+    }
+    if (picked_.track == kTrackCustom && picked_.by == localId_ && picked_.custom.id == room_.custom.id) {
+        return true;
+    }
+    return lottery_.track == kTrackCustom && lottery_.winner < lottery_.ballots.size() &&
+           lottery_.ballots[lottery_.winner].id == localId_ && lottery_.custom.id == room_.custom.id;
+}
+
+void LobbyClient::SyncTrack(uint32_t nowMs) {
+    TrackChoice track;
+    track.track = room_.track;
+    track.custom = room_.custom;
+    const bool open = room_.phase == Phase::Machine || room_.phase == Phase::Assets;
+    flow_.Sync(track, OwnsTrack(), room_.raceIndex, open, nowMs);
 }
 
 void LobbyClient::Lock(const LockRequest& lock) {

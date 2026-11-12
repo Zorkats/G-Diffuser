@@ -24,6 +24,7 @@
  */
 
 #include "enhancements/events/GameEvents.h"
+#include "net/gdx_net_race.h"
 
 #include "libultraship/bridge/consolevariablebridge.h"
 
@@ -48,7 +49,9 @@ void OnBoostStartListener(IEvent* event) {
     // an advantage. That keeps it a *tuning* value instead of a cheat, and it is what composes
     // sensibly with the ghost and replay systems. A player-only enhancement would check
     // `e->racerId < gNumPlayers` — see GameEvents.h's note on the racerId payload field.
-    const int32_t configured = CVarGetInteger("gEnhancements.Tuning.BoostDuration", 0);
+    // In an online race every copy uses the host's value, which travels in the grid (G-NET O4.4).
+    const int32_t configured =
+        gdx_net_race_rule_boost_frames(CVarGetInteger("gEnhancements.Tuning.BoostDuration", 0));
 
     // Negative is not merely meaningless, it is dangerous: the surrounding decomp branch re-arms a
     // boost only when `racer->boostTimer == 0` (racer.c:3618), and the countdown decrements past a

@@ -2,6 +2,7 @@
 
 #include "gdx_update.h"
 #include "gdx_sha256.h"
+#include "net/gdx_net_https.h"
 
 #include <cctype>
 #include <cstdint>
@@ -45,10 +46,8 @@ static void gdx_port_logf(const char* fmt, ...) {
 
 #ifdef _WIN32
 #include <windows.h>
-#include <winhttp.h>
 #else
 #include <dirent.h>
-#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -61,17 +60,15 @@ extern "C" int gdx_update_nightly_offer(const char* remoteDate, const char* remo
 
 namespace {
 
-constexpr int kCheckTimeoutSec = 15;
+constexpr int kCheckTimeoutMs = 15 * 1000;
 // A download may be up to 512 MB, so it cannot share the 15s check timeout.
 // The cap still ends a stuck socket instead of pinning the worker.
-constexpr int kDownloadTimeoutSec = 30 * 60;
-constexpr int kMaxRedirects = 5;
+constexpr int kDownloadTimeoutMs = 30 * 60 * 1000;
 constexpr uint64_t kMaxDownloadBytes = 512ull * 1024ull * 1024ull;
 constexpr uint64_t kMaxCheckBytes = 2ull * 1024ull * 1024ull;
 constexpr uint64_t kMaxSumsBytes = 1ull * 1024ull * 1024ull;
 constexpr size_t kMaxAssetName = 200;
 constexpr size_t kMaxUrl = 2048;
-constexpr size_t kMaxRedirectUrl = 8192;
 
 constexpr const char* kErrLibcurl = "Automatic updates need libcurl; open the release page instead";
 constexpr const char* kErrVerify = "Download failed verification";
@@ -85,6 +82,8 @@ using gdx::hash::Sha256;
 using gdx::hash::sha256_init;
 using gdx::hash::sha256_update;
 using gdx::hash::sha256_final;
+
+namespace https = gdx::net::https;
 
 void to_hex(const unsigned char in[32], char out[65]) {
     static const char kHex[] = "0123456789abcdef";
@@ -211,32 +210,6 @@ bool ends_with(const char* text, const char* suffix) {
         return false;
     }
     return std::memcmp(text + n - s, suffix, s) == 0;
-}
-
-bool is_https_url(const char* url) {
-    if (url == nullptr) {
-        return false;
-    }
-    size_t n = std::strlen(url);
-    if (n < 12 || n >= kMaxRedirectUrl) {
-        return false;
-    }
-    const char* prefix = "https://";
-    for (int i = 0; prefix[i] != '\0'; i++) {
-        if (std::tolower(static_cast<unsigned char>(url[i])) != prefix[i]) {
-            return false;
-        }
-    }
-    if (url[8] == '\0' || url[8] == '/' || url[8] == '\\') {
-        return false;
-    }
-    for (size_t i = 0; i < n; i++) {
-        unsigned char c = static_cast<unsigned char>(url[i]);
-        if (c <= 0x20 || c == 0x7F || c == '\\' || c == '@') {
-            return false;
-        }
-    }
-    return true;
 }
 
 bool safe_asset_name(const char* name) {
@@ -657,599 +630,35 @@ void publish(GdxUpdateState state, const char* version, const char* notes, size_
     }
 }
 
-struct Transfer {
-    FileWriter* writer = nullptr;
-    const std::string* filePath = nullptr;
-    std::string* memory = nullptr;
-    uint64_t maxBytes = 0;
-    uint64_t written = 0;
-    bool tooLarge = false;
-    bool ioError = false;
-    bool acceptBody = false;
-    bool opened = false;
-    bool trackProgress = false;
-    char location[kMaxRedirectUrl]{};
-    bool haveLocation = false;
-    bool badLocation = false;
-};
-
-bool accept_bytes(Transfer* t, const void* data, size_t nbytes) {
-    if (nbytes == 0) {
-        return true;
+// The updater fetches only https, as it always has. The helper also admits loopback http so its own tests can reach
+// a local server, so every URL the updater hands over is checked here before the request.
+https::Response get_update(const https::Request& request) {
+    if (!https::IsHttpsUrl(request.url.c_str())) {
+        https::Response refused;
+        refused.error = https::Error::RejectedUrl;
+        refused.detail = "non-https url";
+        return refused;
     }
-    if (t->written > t->maxBytes || nbytes > t->maxBytes - t->written) {
-        t->tooLarge = true;
-        return false;
-    }
-    if (t->filePath != nullptr) {
-        if (!t->opened) {
-            t->opened = t->writer->open(*t->filePath);
-            if (!t->opened) {
-                t->ioError = true;
-                return false;
-            }
-        }
-        if (!t->writer->write(data, nbytes)) {
-            t->ioError = true;
-            return false;
-        }
-    } else if (t->memory != nullptr) {
-        t->memory->append(static_cast<const char*>(data), nbytes);
-    } else {
-        return false;
-    }
-    t->written += nbytes;
-    if (t->trackProgress) {
-        note_progress(t->written, 0, false);
-    }
-    return true;
+    return https::Get(request);
 }
 
-#ifndef _WIN32
-void note_location(Transfer* t, const char* value, size_t len) {
-    while (len > 0 && (value[len - 1] == ' ' || value[len - 1] == '\t')) {
-        len--;
-    }
-    size_t start = 0;
-    while (start < len && (value[start] == ' ' || value[start] == '\t')) {
-        start++;
-    }
-    if (start >= len || len - start >= sizeof(t->location)) {
-        t->badLocation = true;
-        t->location[0] = '\0';
-        t->haveLocation = false;
-        return;
-    }
-    std::memcpy(t->location, value + start, len - start);
-    t->location[len - start] = '\0';
-    t->haveLocation = true;
-    t->badLocation = false;
-}
-
-bool header_name_is(const char* line, size_t len, const char* name) {
-    size_t n = std::strlen(name);
-    if (len < n) {
-        return false;
-    }
-    for (size_t i = 0; i < n; i++) {
-        if (std::tolower(static_cast<unsigned char>(line[i])) != name[i]) {
-            return false;
-        }
-    }
-    return true;
-}
-#endif
-
-#ifdef _WIN32
-struct InternetHandle {
-    HINTERNET handle = nullptr;
-    ~InternetHandle() {
-        if (handle != nullptr) {
-            WinHttpCloseHandle(handle);
-        }
-    }
-    InternetHandle() = default;
-    InternetHandle(const InternetHandle&) = delete;
-    InternetHandle& operator=(const InternetHandle&) = delete;
-    void reset(HINTERNET next = nullptr) {
-        if (handle != nullptr) {
-            WinHttpCloseHandle(handle);
-        }
-        handle = next;
-    }
-};
-
-bool crack_https(const std::wstring& url, std::wstring* host, INTERNET_PORT* port, std::wstring* object) {
-    URL_COMPONENTSW parts{};
-    wchar_t hostBuf[256];
-    wchar_t pathBuf[8192];
-    wchar_t extraBuf[8192];
-    parts.dwStructSize = sizeof(parts);
-    parts.lpszHostName = hostBuf;
-    parts.dwHostNameLength = 255;
-    parts.lpszUrlPath = pathBuf;
-    parts.dwUrlPathLength = 8191;
-    parts.lpszExtraInfo = extraBuf;
-    parts.dwExtraInfoLength = 8191;
-    if (!WinHttpCrackUrl(url.c_str(), 0, 0, &parts) || parts.nScheme != INTERNET_SCHEME_HTTPS ||
-        parts.dwHostNameLength == 0 || parts.dwHostNameLength >= 255) {
-        return false;
-    }
-    hostBuf[parts.dwHostNameLength] = L'\0';
-    *host = hostBuf;
-    *port = parts.nPort;
-    object->assign(pathBuf, parts.dwUrlPathLength);
-    if (parts.dwExtraInfoLength > 0) {
-        object->append(extraBuf, parts.dwExtraInfoLength);
-    }
-    if (object->empty()) {
-        *object = L"/";
-    }
-    return true;
-}
-
-bool request_is_https(HINTERNET request) {
-    DWORD bytes = 0;
-    WinHttpQueryOption(request, WINHTTP_OPTION_URL, nullptr, &bytes);
-    if (bytes < sizeof(wchar_t) || bytes > 16384) {
-        return false;
-    }
-    std::wstring url(bytes / sizeof(wchar_t), L'\0');
-    if (!WinHttpQueryOption(request, WINHTTP_OPTION_URL, url.data(), &bytes)) {
-        return false;
-    }
-    return url.rfind(L"https://", 0) == 0 || url.rfind(L"HTTPS://", 0) == 0;
-}
-
-bool parse_content_length(HINTERNET request, uint64_t* out, bool* present) {
-    *present = false;
-    *out = 0;
-    wchar_t buf[32];
-    DWORD bytes = sizeof(buf);
-    if (!WinHttpQueryHeaders(request, WINHTTP_QUERY_CONTENT_LENGTH, WINHTTP_HEADER_NAME_BY_INDEX, buf, &bytes,
-                             WINHTTP_NO_HEADER_INDEX)) {
-        return true;
-    }
-    uint64_t value = 0;
-    for (wchar_t* p = buf; *p != L'\0'; p++) {
-        if (*p < L'0' || *p > L'9') {
-            return false;
-        }
-        uint64_t digit = (uint64_t)(*p - L'0');
-        if (value > (UINT64_MAX - digit) / 10) {
-            return false;
-        }
-        value = value * 10 + digit;
-    }
-    *present = true;
-    *out = value;
-    return true;
-}
-
-struct HopResult {
-    int status = 0;
-    bool transportOk = false;
-    bool tooLarge = false;
-    bool ioError = false;
-    bool rejectedUrl = false;
-    std::string detail;
-    char location[kMaxRedirectUrl]{};
-    bool haveLocation = false;
-};
-
-HopResult winhttp_hop(HINTERNET session, const char* url, uint64_t maxBytes, Transfer* transfer) {
-    HopResult hop;
-    if (!is_https_url(url)) {
-        hop.rejectedUrl = true;
-        hop.detail = "non-https url";
-        return hop;
-    }
-    std::wstring wideUrl = utf8_to_wide(url);
-    std::wstring host;
-    std::wstring object;
-    INTERNET_PORT port = 0;
-    if (wideUrl.empty() || !crack_https(wideUrl, &host, &port, &object)) {
-        hop.rejectedUrl = true;
-        hop.detail = "url rejected";
-        return hop;
-    }
-    InternetHandle connection;
-    connection.reset(WinHttpConnect(session, host.c_str(), port, 0));
-    if (connection.handle == nullptr) {
-        hop.detail = "connect failed";
-        return hop;
-    }
-    InternetHandle request;
-    request.reset(WinHttpOpenRequest(connection.handle, L"GET", object.c_str(), nullptr, WINHTTP_NO_REFERER,
-                                     WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE));
-    if (request.handle == nullptr) {
-        hop.detail = "open request failed";
-        return hop;
-    }
-    DWORD disable = WINHTTP_DISABLE_REDIRECTS;
-    WinHttpSetOption(request.handle, WINHTTP_OPTION_DISABLE_FEATURE, &disable, sizeof(disable));
-    DWORD policy = WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP;
-    WinHttpSetOption(request.handle, WINHTTP_OPTION_REDIRECT_POLICY, &policy, sizeof(policy));
-    if (!WinHttpAddRequestHeaders(request.handle, L"Accept: application/vnd.github+json", (DWORD)-1,
-                                  WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE)) {
-        hop.detail = "header failed";
-        return hop;
-    }
-    if (!WinHttpSendRequest(request.handle, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
-        !WinHttpReceiveResponse(request.handle, nullptr)) {
-        hop.detail = "request failed";
-        return hop;
-    }
-    if (!request_is_https(request.handle)) {
-        hop.rejectedUrl = true;
-        hop.detail = "final url was not https";
-        return hop;
-    }
-    DWORD status = 0;
-    DWORD statusBytes = sizeof(status);
-    if (!WinHttpQueryHeaders(request.handle, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                             WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusBytes, WINHTTP_NO_HEADER_INDEX)) {
-        hop.detail = "status missing";
-        return hop;
-    }
-    hop.status = (int)status;
-    hop.transportOk = true;
-    if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) {
-        DWORD locBytes = 0;
-        WinHttpQueryHeaders(request.handle, WINHTTP_QUERY_LOCATION, WINHTTP_HEADER_NAME_BY_INDEX, WINHTTP_NO_OUTPUT_BUFFER,
-                            &locBytes, WINHTTP_NO_HEADER_INDEX);
-        if (locBytes == 0 || locBytes > 16384) {
-            hop.detail = "redirect missing location";
-            return hop;
-        }
-        std::wstring location(locBytes / sizeof(wchar_t), L'\0');
-        if (!WinHttpQueryHeaders(request.handle, WINHTTP_QUERY_LOCATION, WINHTTP_HEADER_NAME_BY_INDEX, location.data(),
-                                 &locBytes, WINHTTP_NO_HEADER_INDEX)) {
-            hop.detail = "redirect location failed";
-            return hop;
-        }
-        int n = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, location.c_str(), -1, hop.location,
-                                    (int)sizeof(hop.location), nullptr, nullptr);
-        if (n <= 1) {
-            hop.detail = "redirect location rejected";
-            return hop;
-        }
-        hop.haveLocation = true;
-        return hop;
-    }
-    if (status != 200) {
-        hop.detail = "http status";
-        return hop;
-    }
-    uint64_t contentLength = 0;
-    bool haveLength = false;
-    if (!parse_content_length(request.handle, &contentLength, &haveLength)) {
-        hop.detail = "bad content length";
-        return hop;
-    }
-    if (haveLength && contentLength > maxBytes) {
-        hop.tooLarge = true;
-        hop.detail = "content length over cap";
-        return hop;
-    }
-    if (haveLength && transfer->trackProgress) {
-        note_progress(0, contentLength, true);
-    }
-    if (transfer->filePath != nullptr && !transfer->opened) {
-        transfer->opened = transfer->writer->open(*transfer->filePath);
-        if (!transfer->opened) {
-            hop.ioError = true;
-            hop.detail = "could not create file";
-            return hop;
-        }
-    }
-    uint8_t buf[65536];
-    for (;;) {
-        DWORD read = 0;
-        if (!WinHttpReadData(request.handle, buf, sizeof(buf), &read)) {
-            hop.transportOk = false;
-            hop.detail = "read failed";
-            return hop;
-        }
-        if (read == 0) {
-            break;
-        }
-        if (!accept_bytes(transfer, buf, read)) {
-            hop.tooLarge = transfer->tooLarge;
-            hop.ioError = transfer->ioError;
-            hop.detail = transfer->tooLarge ? "download cap" : "write failed";
-            return hop;
-        }
-    }
-    if (haveLength && transfer->written != contentLength) {
-        hop.detail = "short body";
-        hop.transportOk = false;
-    }
-    return hop;
-}
-
-struct HttpResult {
-    int status = 0;
-    bool ok = false;
-    bool tooLarge = false;
-    bool rejectedUrl = false;
-    bool libcurlMissing = false;
-    std::string body;
-    std::string detail;
-};
-
-HttpResult http_get(const char* url, int timeoutSec, uint64_t maxBytes, const std::string* filePath, bool progress) {
-    HttpResult result;
-    char userAgentUtf8[160];
-    std::snprintf(userAgentUtf8, sizeof(userAgentUtf8), "G-Diffuser/%s", GDX_VERSION_STRING);
-    std::wstring userAgent = utf8_to_wide(userAgentUtf8);
-    if (userAgent.empty()) {
-        result.detail = "user agent";
-        return result;
-    }
-    InternetHandle session;
-    session.reset(WinHttpOpen(userAgent.c_str(), WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
-                              WINHTTP_NO_PROXY_BYPASS, 0));
-    if (session.handle == nullptr) {
-        result.detail = "winhttp open failed";
-        return result;
-    }
-    int ms = timeoutSec > 0 ? timeoutSec * 1000 : 15000;
-    WinHttpSetTimeouts(session.handle, ms, ms, ms, ms);
-    DWORD protocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
-#ifdef WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3
-    protocols |= WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
-#endif
-    WinHttpSetOption(session.handle, WINHTTP_OPTION_SECURE_PROTOCOLS, &protocols, sizeof(protocols));
-
-    std::string current = url;
-    FileWriter writer;
-    for (int hop = 0; hop < kMaxRedirects; hop++) {
-        Transfer transfer;
-        transfer.writer = &writer;
-        transfer.filePath = filePath;
-        transfer.memory = filePath == nullptr ? &result.body : nullptr;
-        transfer.maxBytes = maxBytes;
-        transfer.trackProgress = progress;
-        HopResult once = winhttp_hop(session.handle, current.c_str(), maxBytes, &transfer);
-        result.status = once.status;
-        result.tooLarge = once.tooLarge;
-        result.rejectedUrl = once.rejectedUrl;
-        result.detail = once.detail;
-        if (once.haveLocation) {
-            if (!is_https_url(once.location)) {
-                result.rejectedUrl = true;
-                result.detail = "redirect was not https";
-                result.ok = false;
-                return result;
-            }
-            current = once.location;
-            continue;
-        }
-        result.ok = once.transportOk && once.status == 200 && !once.tooLarge && !once.ioError;
-        return result;
-    }
-    result.detail = "too many redirects";
-    return result;
-}
-#else
-constexpr int kCurlWriteData = 10001;
-constexpr int kCurlUrl = 10002;
-constexpr int kCurlErrorBuffer = 10010;
-constexpr int kCurlWriteFunction = 20011;
-constexpr int kCurlTimeout = 13;
-constexpr int kCurlUserAgent = 10018;
-constexpr int kCurlHttpHeader = 10023;
-constexpr int kCurlFollowLocation = 52;
-constexpr int kCurlSslVerifyPeer = 64;
-constexpr int kCurlConnectTimeout = 78;
-constexpr int kCurlHeaderFunction = 20079;
-constexpr int kCurlSslVerifyHost = 81;
-constexpr int kCurlNoSignal = 99;
-constexpr int kCurlHeaderData = 10029;
-constexpr int kCurlInfoResponseCode = 0x200002;
-
-// curl_slist is two pointers. curl_slist_append is outside the allowed symbol list.
-struct CurlSlist {
-    char* data;
-    CurlSlist* next;
-};
-
-struct CurlApi {
-    void* lib = nullptr;
-    void* (*easy_init)(void) = nullptr;
-    int (*easy_setopt)(void*, int, ...) = nullptr;
-    int (*easy_perform)(void*) = nullptr;
-    int (*easy_getinfo)(void*, int, ...) = nullptr;
-    void (*easy_cleanup)(void*) = nullptr;
-    const char* (*easy_strerror)(int) = nullptr;
-    int (*global_init)(long) = nullptr;
-    bool ready = false;
-    bool failed = false;
-};
-
-template <typename T>
-bool load_symbol(void* lib, const char* name, T* out) {
-    *out = reinterpret_cast<T>(dlsym(lib, name));
-    return *out != nullptr;
-}
-
-CurlApi& curl_api() {
-    static CurlApi api;
-    if (api.ready || api.failed) {
-        return api;
-    }
-    const char* paths[] = {
-#if defined(__APPLE__)
-        "/usr/lib/libcurl.4.dylib",
-#else
-        "libcurl.so.4",
-        "libcurl.so",
-#endif
-        nullptr};
-    for (int i = 0; paths[i] != nullptr && api.lib == nullptr; i++) {
-        api.lib = dlopen(paths[i], RTLD_NOW);
-    }
-    if (api.lib == nullptr) {
-        api.failed = true;
-        return api;
-    }
-    if (!load_symbol(api.lib, "curl_easy_init", &api.easy_init) ||
-        !load_symbol(api.lib, "curl_easy_setopt", &api.easy_setopt) ||
-        !load_symbol(api.lib, "curl_easy_perform", &api.easy_perform) ||
-        !load_symbol(api.lib, "curl_easy_getinfo", &api.easy_getinfo) ||
-        !load_symbol(api.lib, "curl_easy_cleanup", &api.easy_cleanup) ||
-        !load_symbol(api.lib, "curl_easy_strerror", &api.easy_strerror) ||
-        !load_symbol(api.lib, "curl_global_init", &api.global_init) || api.global_init(3) != 0) {
-        api.failed = true;
-        return api;
-    }
-    api.ready = true;
-    return api;
-}
-
-size_t curl_write(char* ptr, size_t size, size_t nmemb, void* userdata) {
-    if (size != 0 && nmemb > SIZE_MAX / size) {
-        return 0;
-    }
-    size_t nbytes = size * nmemb;
-    Transfer* transfer = static_cast<Transfer*>(userdata);
-    if (!transfer->acceptBody) {
-        return nbytes;
-    }
-    if (!accept_bytes(transfer, ptr, nbytes)) {
-        return 0;
-    }
-    return nbytes;
-}
-
-size_t curl_header(char* ptr, size_t size, size_t nmemb, void* userdata) {
-    if (size != 0 && nmemb > SIZE_MAX / size) {
-        return 0;
-    }
-    size_t nbytes = size * nmemb;
-    Transfer* transfer = static_cast<Transfer*>(userdata);
-    size_t len = nbytes;
-    while (len > 0 && (ptr[len - 1] == '\n' || ptr[len - 1] == '\r')) {
-        len--;
-    }
-    if (len >= 5 && header_name_is(ptr, len, "http/")) {
-        const char* p = ptr;
-        while (*p != '\0' && *p != ' ' && (size_t)(p - ptr) < len) {
-            p++;
-        }
-        while ((size_t)(p - ptr) < len && *p == ' ') {
-            p++;
-        }
-        int code = 0;
-        int digits = 0;
-        while ((size_t)(p - ptr) < len && std::isdigit(static_cast<unsigned char>(*p)) && digits < 3) {
-            code = code * 10 + (*p - '0');
-            p++;
-            digits++;
-        }
-        if (digits == 3 && code >= 200) {
-            transfer->acceptBody = code == 200;
-            if (code == 200 && transfer->filePath != nullptr && !transfer->opened) {
-                transfer->opened = transfer->writer->open(*transfer->filePath);
-                if (!transfer->opened) {
-                    transfer->ioError = true;
-                }
-            }
-        }
-    } else if (header_name_is(ptr, len, "location:")) {
-        note_location(transfer, ptr + 9, len - 9);
-    }
-    return nbytes;
-}
-
-struct HttpResult {
-    int status = 0;
-    bool ok = false;
-    bool tooLarge = false;
-    bool rejectedUrl = false;
-    bool libcurlMissing = false;
-    std::string body;
-    std::string detail;
-};
-
-HttpResult http_get(const char* url, int timeoutSec, uint64_t maxBytes, const std::string* filePath, bool progress) {
-    HttpResult result;
-    CurlApi& api = curl_api();
-    if (!api.ready) {
-        result.libcurlMissing = true;
-        result.detail = "libcurl unavailable";
-        return result;
-    }
-    std::string current = url;
+https::Request update_request(const char* url, int timeoutMs, uint64_t maxBytes) {
+    https::Request request;
+    request.url = url;
+    request.headers.push_back("Accept: application/vnd.github+json");
     char userAgent[160];
     std::snprintf(userAgent, sizeof(userAgent), "G-Diffuser/%s", GDX_VERSION_STRING);
-    char acceptHeader[] = "Accept: application/vnd.github+json";
-    FileWriter writer;
-    for (int hop = 0; hop < kMaxRedirects; hop++) {
-        if (!is_https_url(current.c_str())) {
-            result.rejectedUrl = true;
-            result.detail = "non-https url";
-            return result;
-        }
-        void* easy = api.easy_init();
-        if (easy == nullptr) {
-            result.detail = "curl init failed";
-            return result;
-        }
-        Transfer transfer;
-        transfer.writer = &writer;
-        transfer.filePath = filePath;
-        transfer.memory = filePath == nullptr ? &result.body : nullptr;
-        transfer.maxBytes = maxBytes;
-        transfer.trackProgress = progress;
-        char errbuf[256];
-        errbuf[0] = '\0';
-        CurlSlist headers;
-        headers.data = acceptHeader;
-        headers.next = nullptr;
-        bool optionsOk = api.easy_setopt(easy, kCurlUrl, current.c_str()) == 0 &&
-                         api.easy_setopt(easy, kCurlUserAgent, userAgent) == 0 &&
-                         api.easy_setopt(easy, kCurlHttpHeader, &headers) == 0 &&
-                         api.easy_setopt(easy, kCurlWriteFunction, curl_write) == 0 &&
-                         api.easy_setopt(easy, kCurlWriteData, &transfer) == 0 &&
-                         api.easy_setopt(easy, kCurlHeaderFunction, curl_header) == 0 &&
-                         api.easy_setopt(easy, kCurlHeaderData, &transfer) == 0 &&
-                         api.easy_setopt(easy, kCurlFollowLocation, (long)0) == 0 &&
-                         api.easy_setopt(easy, kCurlSslVerifyPeer, (long)1) == 0 &&
-                         api.easy_setopt(easy, kCurlSslVerifyHost, (long)2) == 0 &&
-                         api.easy_setopt(easy, kCurlNoSignal, (long)1) == 0 &&
-                         api.easy_setopt(easy, kCurlConnectTimeout, (long)kCheckTimeoutSec) == 0 &&
-                         api.easy_setopt(easy, kCurlTimeout, (long)timeoutSec) == 0 &&
-                         api.easy_setopt(easy, kCurlErrorBuffer, errbuf) == 0;
-        int rc = optionsOk ? api.easy_perform(easy) : 1;
-        long status = 0;
-        if (rc == 0) {
-            api.easy_getinfo(easy, kCurlInfoResponseCode, &status);
-        }
-        result.status = (int)status;
-        result.tooLarge = transfer.tooLarge;
-        result.detail = errbuf[0] != '\0' ? errbuf : (rc == 0 ? "" : "curl perform failed");
-        bool redirect = status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
-        if (rc == 0 && redirect && transfer.haveLocation && !transfer.badLocation) {
-            api.easy_cleanup(easy);
-            if (!is_https_url(transfer.location)) {
-                result.rejectedUrl = true;
-                result.detail = "redirect was not https";
-                return result;
-            }
-            current = transfer.location;
-            result.body.clear();
-            continue;
-        }
-        api.easy_cleanup(easy);
-        result.ok = optionsOk && rc == 0 && status == 200 && !transfer.tooLarge && !transfer.ioError && !transfer.badLocation;
-        return result;
-    }
-    result.detail = "too many redirects";
-    return result;
+    request.userAgent = userAgent;
+    request.timeoutMs = timeoutMs;
+    request.maxBodyBytes = maxBytes;
+    return request;
 }
-#endif
+
+// The updater accepts only 200, as it always has. The helper's ok also admits the other 2xx answers, so they are
+// refused here.
+bool got_ok(const https::Response& response) {
+    return response.ok && response.status == 200;
+}
 
 std::string install_dir() {
 #ifndef GDX_UPDATE_TESTS_STANDALONE
@@ -1352,7 +761,7 @@ bool parse_release(const std::string& json, ReleaseInfo* info) {
             continue;
         }
         if (nameLen == 10 && std::memcmp(nameText, "SHA256SUMS", 10) == 0) {
-            if (!info->sumsOk && urlLen < sizeof(info->sumsUrl) && is_https_url(urlText)) {
+            if (!info->sumsOk && urlLen < sizeof(info->sumsUrl) && https::IsHttpsUrl(urlText)) {
                 std::memcpy(info->sumsUrl, urlText, urlLen);
                 info->sumsUrl[urlLen] = '\0';
                 info->sumsOk = true;
@@ -1360,7 +769,7 @@ bool parse_release(const std::string& json, ReleaseInfo* info) {
             continue;
         }
         if (info->assetOk || platform[0] == '\0' || !gdx_update_asset_matches(nameText, platform) ||
-            !safe_asset_name(nameText) || !is_https_url(urlText) || urlLen >= sizeof(info->assetUrl) ||
+            !safe_asset_name(nameText) || !https::IsHttpsUrl(urlText) || urlLen >= sizeof(info->assetUrl) ||
             nameLen >= sizeof(info->assetName)) {
             continue;
         }
@@ -1388,13 +797,13 @@ void run_check(int manual) {
     const char* url = channel_is("nightly") ? "https://api.github.com/repos/Zorkats/G-Diffuser/releases/tags/nightly"
                                             : "https://api.github.com/repos/Zorkats/G-Diffuser/releases/latest";
 #endif
-    HttpResult response = http_get(url, kCheckTimeoutSec, kMaxCheckBytes, nullptr, false);
-    if (response.libcurlMissing) {
+    https::Response response = get_update(update_request(url, kCheckTimeoutMs, kMaxCheckBytes));
+    if (response.error == https::Error::Unsupported) {
         publish(GDX_UPDATE_ERROR, "", "", 0, kErrLibcurl, nullptr, nullptr, nullptr);
         gdx_port_logf("[update] %s\n", response.detail.c_str());
         return;
     }
-    if (!response.ok) {
+    if (!got_ok(response)) {
         publish(GDX_UPDATE_ERROR, "", "", 0, kErrCheck, nullptr, nullptr, nullptr);
         gdx_port_logf("[update] check failed (%s, status %d)\n", response.detail.c_str(), response.status);
         return;
@@ -1480,17 +889,28 @@ void run_download() {
         set_error(message);
     };
     if (install.empty() || updateDir.empty() || partPath.empty() || finalPath.empty() || !safe_asset_name(assetName) ||
-        !is_https_url(assetUrl) || !is_https_url(sumsUrl) || !ensure_dir(updateDir)) {
+        !https::IsHttpsUrl(assetUrl) || !https::IsHttpsUrl(sumsUrl) || !ensure_dir(updateDir)) {
         gdx_port_logf("[update] download path rejected\n");
         fail(install.empty() ? kErrPath : kErrDownload);
         return;
     }
-    HttpResult asset = http_get(assetUrl, kDownloadTimeoutSec, kMaxDownloadBytes, &partPath, true);
-    if (asset.libcurlMissing) {
+    FileWriter part;
+    if (!part.open(partPath)) {
+        gdx_port_logf("[update] asset download failed (could not create file)\n");
+        fail(kErrDownload);
+        return;
+    }
+    https::Request request = update_request(assetUrl, kDownloadTimeoutMs, kMaxDownloadBytes);
+    request.onBody = [&part](const void* data, size_t len) { return part.write(data, len); };
+    request.onProgress = [](uint64_t done, uint64_t total, bool haveTotal) { note_progress(done, total, haveTotal); };
+    https::Response asset = get_update(request);
+    // Windows cannot move or hash the file while this handle is open, so it closes before any check runs.
+    part.close();
+    if (asset.error == https::Error::Unsupported) {
         fail(kErrLibcurl);
         return;
     }
-    if (!asset.ok || asset.rejectedUrl || asset.tooLarge) {
+    if (!got_ok(asset)) {
         gdx_port_logf("[update] asset download failed (%s)\n", asset.detail.c_str());
         fail(kErrDownload);
         return;
@@ -1500,8 +920,8 @@ void run_download() {
         std::lock_guard<std::mutex> lock(w.mu);
         w.status.state = GDX_UPDATE_VERIFYING;
     }
-    HttpResult sums = http_get(sumsUrl, kCheckTimeoutSec, kMaxSumsBytes, nullptr, false);
-    if (!sums.ok || sums.rejectedUrl || sums.tooLarge) {
+    https::Response sums = get_update(update_request(sumsUrl, kCheckTimeoutMs, kMaxSumsBytes));
+    if (!got_ok(sums)) {
         gdx_port_logf("[update] SHA256SUMS download failed (%s)\n", sums.detail.c_str());
         fail(kErrDownload);
         return;

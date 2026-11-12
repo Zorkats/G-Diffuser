@@ -921,6 +921,11 @@ static uint8_t sBundleCent[GDX_EDIT_CUP_WIDE_SIZE]; /* merged CENT + CENL rows *
 static uint8_t sBundlePayloads[GDX_CONTENT_BUNDLE_MAX_TRACKS][GDX_CONTENT_TRACK_PAYLOAD_SIZE];
 static volatile int32_t sBundleFailedIndex = -1;
 
+/* G-NET "Save to my tracks" (gdx_content_import_room_track_begin): the single-track install also puts the
+ * track in the first free Edit Cup slot. Consumed by one install; sImportCupFull says the cup had no room. */
+static volatile int32_t sImportCupRegister = 0;
+static volatile int32_t sImportCupFull = 0;
+
 #include "gdx_content_import_disk.inc"
 
 /* Runs on the game's disk thread, dispatched from op slot 32 in decomp/src/sys/disk/75000.c. */
@@ -1767,6 +1772,169 @@ int32_t gdx_content_import_bundle_failed_index(void) {
  * ------------------------------------------------------------------------------- */
 
 #include "gdx_content_import_direct.inc"
+
+/* ---------------------------------------------------------------------------------
+ * G-NET "Save to my tracks" (plan decision 14). The track arrives staged from a room's verified copy
+ * (gdx_snapshot_import_stage_content), so the container and payload checks above have nothing to read;
+ * what is left is the disk: a free name, a free cup slot, the quota and the free space.
+ * ------------------------------------------------------------------------------- */
+
+/* 1 when name is taken by a CRSD, a CRSE or an Edit Cup slot, 0 when free, -1 when the disk cannot say. */
+static int gdx_import_room_name_taken(const char* name) {
+    const int crsd = gdx_content_file_exists(name, "CRSD");
+    const int crse = crsd < 0 ? -1 : gdx_content_file_exists(name, "CRSE");
+    int i;
+
+    if (crsd < 0 || crse < 0) {
+        return -1;
+    }
+    if (crsd != 0 || crse != 0) {
+        return 1;
+    }
+    for (i = 0; i < GDX_CONTENT_CUP_SLOT_COUNT; i++) {
+        if (strncmp(gEditCupTrackNames[i], name, GDX_CONTENT_CUP_NAME_MAX) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int gdx_import_room_cup_has_room(void) {
+    int i;
+
+    for (i = 0; i < GDX_CONTENT_CUP_SLOT_COUNT; i++) {
+        if (gEditCupTrackNames[i][0] == '\0') {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int gdx_content_import_room_track_name(const char* title, char* out, int outSize) {
+    char stem[GDX_CONTENT_CUP_NAME_MAX + 1];
+    int length = 0;
+    int i;
+
+    if (out == NULL || outSize < GDX_CONTENT_CUP_NAME_MAX + 1) {
+        return GDX_CONTENT_ERR_BAD_ARGS;
+    }
+    out[0] = '\0';
+    if (gdx_content_mfs_busy() || gdx_recovery_blocks_writes()) {
+        return GDX_CONTENT_ERR_BUSY;
+    }
+    if (gDirectoryEntryCount <= 0) {
+        return GDX_CONTENT_ERR_NO_FS;
+    }
+    /* Printable ASCII, minus the separators an MFS name (mfs_name.c) or a course id refuses. */
+    for (i = 0; title != NULL && title[i] != '\0' && length < GDX_CONTENT_CUP_NAME_MAX; i++) {
+        const unsigned char c = (unsigned char) title[i];
+
+        if (c < 0x20 || c > 0x7E || c == '/' || c == '\\' || c == '.' || c == ':' ||
+            (c == ' ' && (length == 0 || stem[length - 1] == ' '))) {
+            continue;
+        }
+        stem[length++] = (char) c;
+    }
+    while (length > 0 && stem[length - 1] == ' ') {
+        length--;
+    }
+    stem[length] = '\0';
+    if (length == 0) {
+        length = snprintf(stem, sizeof(stem), "%s", "ROOM TRACK");
+    }
+    for (i = 1; i <= 9; i++) {
+        int taken;
+
+        if (i == 1) {
+            snprintf(out, (size_t) outSize, "%s", stem);
+        } else {
+            int keep = length < GDX_CONTENT_CUP_NAME_MAX - 2 ? length : GDX_CONTENT_CUP_NAME_MAX - 2;
+
+            while (keep > 0 && stem[keep - 1] == ' ') {
+                keep--;
+            }
+            snprintf(out, (size_t) outSize, "%.*s %d", keep, stem, i);
+        }
+        taken = Mfs_ValidateFileName(out) != 0 ? 1 : gdx_import_room_name_taken(out);
+        if (taken < 0) {
+            out[0] = '\0';
+            return GDX_CONTENT_ERR_BUSY;
+        }
+        if (taken == 0) {
+            return GDX_CONTENT_OK;
+        }
+    }
+    out[0] = '\0';
+    return GDX_CONTENT_IMPORT_ERR_NO_NAME;
+}
+
+int gdx_content_import_room_track_begin(const char* name, const uint8_t* payload) {
+    GdxContentImportEntry entry;
+    uint32_t errors = 0;
+    uint32_t warnings = 0;
+    int taken;
+
+    if (name == NULL || name[0] == '\0' || strlen(name) > GDX_CONTENT_CUP_NAME_MAX || payload == NULL ||
+        Mfs_ValidateFileName((char*) name) != 0) {
+        return GDX_CONTENT_ERR_BAD_ARGS;
+    }
+    if (gdx_input_in_gameplay()) {
+        return GDX_CONTENT_IMPORT_ERR_IN_GAMEPLAY;
+    }
+    if (sImportState == GDX_IMPORT_PENDING || sCupState == GDX_CUP_PENDING) {
+        return GDX_CONTENT_IMPORT_ERR_PENDING;
+    }
+    if (gdx_content_mfs_busy() || gdx_recovery_blocks_writes()) {
+        return GDX_CONTENT_ERR_BUSY;
+    }
+    if (gDirectoryEntryCount <= 0) {
+        return GDX_CONTENT_ERR_NO_FS;
+    }
+    if (!gdx_import_room_cup_has_room()) {
+        return GDX_CONTENT_CUP_ERR_FULL;
+    }
+    taken = gdx_import_room_name_taken(name);
+    if (taken != 0) {
+        return taken < 0 ? GDX_CONTENT_ERR_BUSY : GDX_CONTENT_IMPORT_ERR_NO_NAME;
+    }
+    memset(&entry, 0, sizeof(entry));
+    entry.contentType = GDX_CONTENT_TYPE_TRACK;
+    snprintf(entry.name, sizeof(entry.name), "%s", name);
+    memcpy(entry.extension, "CRSD", 5);
+    gdx_import_check_disk_state(&entry, &errors, &warnings);
+    if (errors != 0) {
+        return GDX_CONTENT_IMPORT_ERR_VALIDATION;
+    }
+
+    /* No sidecar, no forks file, no creator record: the staged generation carries the track's metadata. */
+    sImportSnapshot = 1;
+    memset(sImportBranch, 0, sizeof(sImportBranch));
+    memset(sImportMeta, 0, sizeof(sImportMeta));
+    memset(&sImportExtInfo, 0, sizeof(sImportExtInfo));
+    sImportTitle[0] = '\0';
+    sImportSidecarBlock.count = 0;
+    memcpy(sImportPayload, payload, GDX_CONTENT_TRACK_PAYLOAD_SIZE);
+    memcpy(sImportName, entry.name, sizeof(sImportName));
+    memcpy(sImportExtension, "CRSD", 5);
+    sImportContentType = GDX_CONTENT_TYPE_TRACK;
+    sImportPayloadSize = GDX_CONTENT_TRACK_PAYLOAD_SIZE;
+    sImportRc = 0;
+    sImportMfsError = 0;
+    sImportCupCleared = 0;
+    sImportCupFull = 0;
+    sImportCupRegister = 1;
+    sImportState = GDX_IMPORT_PENDING;
+    if (GdxContentImport_EnqueueDiskOp() != 0) {
+        sImportCupRegister = 0;
+        sImportState = GDX_IMPORT_IDLE;
+        return GDX_CONTENT_ERR_BUSY;
+    }
+    return GDX_CONTENT_OK;
+}
+
+int gdx_content_import_room_track_full(void) {
+    return sImportCupFull ? 1 : 0;
+}
 
 /* ---------------------------------------------------------------------------------
  * E3 Edit-Cup registration API (menu-thread entry points; the disk-thread runner sits with the

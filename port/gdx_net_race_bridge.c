@@ -56,8 +56,51 @@
 #include "net/gdx_net_race.h"
 #include "gdx_net_race_room.h"
 #include "gdx_net_race_box.h"
+#include "gdx_net_room_course.h"
 
 extern s32 gGameMode;
+
+#ifdef EXPANSION_KIT
+extern CustomMachinesInfo gCustomMachinesInfo;
+// A machine record is the game's CustomMachine, byte for byte (G-NET O4.5).
+typedef char GdxNetRecordIsCustomMachine[(sizeof(CustomMachine) == GDX_NET_RACE_RECORD_BYTES) ? 1 : -1];
+#endif
+
+// The Create Machine record of the local player's machine for character (gdx_net_race_room.h). Read on the
+// lock-in screen, so what travels is what this player drove on the select screen.
+int gdx_net_race_local_record(int character, unsigned char* out) {
+#ifdef EXPANSION_KIT
+    const u8* src;
+    s32 slot;
+    s32 i;
+
+    if ((character < 0) || (character >= GDX_NET_RACE_MAX_RACERS) || (out == NULL)) {
+        return 0;
+    }
+    slot = Character_GetSlotFromCharacter(character);
+    if (gCustomMachinesInfo.characterCustomState[slot] <= 0) {
+        return 0; // stock, or a super machine: those race stock in a room
+    }
+    src = (const u8*) &gCustomMachinesInfo.customMachines[slot];
+    for (i = 0; i < GDX_NET_RACE_RECORD_BYTES; i++) {
+        out[i] = src[i];
+    }
+    return 1;
+#else
+    (void) character;
+    (void) out;
+    return 0;
+#endif
+}
+
+// The game's machines go back to the player's own once a room's race is over: Create Machine records,
+// unlocked super machines and the machine stat editor (func_8008D33C).
+static void gdx_net_race_machines_restore(void) {
+    if (gdx_net_race_machines_set()) {
+        gdx_net_race_clear_machines();
+        func_8008D33C();
+    }
+}
 extern s32 gNumPlayers;
 extern s8 gTitleDemoState;
 extern s32 gRaceIntroTimer;
@@ -99,6 +142,7 @@ static s32 sArmed;
 static u32 sArmMs;     // when it was armed: the load time is counted from here
 static s32 sRoomRace;  // the race being run is sRoom's, or was until a Retry
 static s32 sLeave;     // the next frame goes back to the room page
+static s32 sHandOver;  // and the host's room goes to the next host once the race is reported (D28.5)
 static s32 sReadySent; // the room has our digest for this race
 static s32 sUpdates;   // frames of this race that ran
 static s32 sElapsedMs; // since the room's start time, on the host clock; negative before it
@@ -136,11 +180,21 @@ int gdx_net_race_arm(unsigned raceIndex) {
     if (sGrid.racers == 0) {
         return 0;
     }
+    // A custom track races from the room's copy in memory, decoded now so the race reads nothing from disk.
+    if (!gdx_net_room_course_prepare(room.track)) {
+        gdx_dbg_logf("[net-race] race %d: this copy cannot race the room's custom track\n", (int) raceIndex);
+        return 0;
+    }
     sRoom = room;
     sArmed = 1;
     sArmMs = gdx_lan_now_ms();
     gdx_single_race_force_next(room.laps, sGrid.racers);
     return 2;
+}
+
+// Course_Load asks whether the course it loads is the room's: the room's race is armed or being run.
+int gdx_net_race_room_course_held(void) {
+    return (sArmed || sRoomRace) ? 1 : 0;
 }
 
 // The seed every copy starts the room's race from (gdx_det_race_init, the first thing Race_Init does).
@@ -274,6 +328,15 @@ void gdx_net_race_quit(void) {
     }
 }
 
+// The host chose LEAVE THE ROOM in the quit box: the race is left as by gdx_net_race_quit, and once this
+// copy's machine and its CPUs are reported the room goes on without it (gdx_lan_room_hand_over).
+void gdx_net_race_hand_over(void) {
+    if (sRoomRace && gdx_net_race_online()) {
+        sLeave = 1;
+        sHandOver = 1;
+    }
+}
+
 // What became of this copy's own machine, for the quit box: 0 it drives, 1 it finished, 2 it crashed or
 // retired.
 int gdx_net_race_own_state(void) {
@@ -310,7 +373,14 @@ static void gdx_net_race_leave(void) {
             }
         }
     }
-    sArmed = sLeave = sRoomRace = 0;
+    if (sHandOver) {
+        gdx_lan_room_hand_over(); // after the reports above, which the room takes first
+        gdx_dbg_logf("[net-race] race %d: the host leaves the room, which goes on without it\n",
+                     (int) sRoom.raceIndex);
+    }
+    sArmed = sLeave = sRoomRace = sHandOver = 0;
+    gdx_net_room_course_end();
+    gdx_net_race_machines_restore();
     gdx_net_race_set_online(0);
     gdx_net_race_set_active(0);
     // The main menu comes up on the room screen, which says what happens next or why the room closed.
@@ -341,6 +411,13 @@ s32 gdx_net_race_begin(s32 stockRacers) {
             sLeave = 1; // not the race the lock-in screen started
             return stockRacers;
         }
+        // A custom track's race runs on the room's course or not at all.
+        if ((sRoom.track == GDX_NET_ROOM_COURSE_TRACK_CUSTOM) &&
+            (!gdx_net_room_course_active() || gdx_net_room_course_refused())) {
+            gdx_dbg_logf("[net-race] race %d: the room's custom track did not load\n", (int) sRoom.raceIndex);
+            sLeave = 1;
+            return stockRacers;
+        }
         for (slot = 0; slot < sGrid.racers; slot++) {
             local = gdx_net_race_local_slot(sRoom.self, slot);
             gRacers[local].character = sGrid.character[slot];
@@ -356,7 +433,12 @@ s32 gdx_net_race_begin(s32 stockRacers) {
         rules.lavaNoKill = sRoom.lavaNoKill;
         rules.magnetRange = sRoom.magnetRange;
         rules.magnetStrength = sRoom.magnetStrength;
+        rules.boostFrames = sRoom.boostFrames;
         gdx_net_race_set_rules(&rules);
+        // Every copy builds the field's machines alike: a record where every human on that character
+        // brought the same one, the stock machine everywhere else (decision 10).
+        gdx_net_race_set_machines(sRoom.machine, sRoom.hasRecord, &sRoom.record[0][0], sRoom.humans);
+        func_8008D33C();
         gdx_net_race_set_online(1);
         gdx_net_race_set_active(1);
         gdx_net_race_link(sRoom.raceIndex, sRoom.self);
@@ -368,6 +450,7 @@ s32 gdx_net_race_begin(s32 stockRacers) {
         sElapsedMs = -1;
         return sGrid.racers;
     }
+    gdx_net_race_machines_restore();
 
     if (sRoomRace) {
         // A Retry would run the room's race again on this copy alone. Its place is the room page.

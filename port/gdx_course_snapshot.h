@@ -60,4 +60,16 @@ class Files final : public Backend {
     std::filesystem::path root;
     bool ready = false;
 };
+
+// Reads generations the way Files does, but never creates root and never publishes, so a reader that only
+// needs a track's identity (a room vote, G-NET decision 8) leaves the save folder exactly as it found it.
+// A missing root reads as Missing.
+class ReadOnlyFiles final : public Backend {
+  public:
+    explicit ReadOnlyFiles(std::filesystem::path root);
+    Result read(const std::string&, Bytes&) override;
+    bool publish(const std::string&, const Bytes&) override;
+  private:
+    std::filesystem::path root;
+};
 }

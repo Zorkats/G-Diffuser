@@ -530,14 +530,8 @@ Result resolve(Backend& backend, uint64_t disk, uint16_t directory, const std::s
     return Result::Ok;
 }
 
-Files::Files(std::filesystem::path path) : root(std::move(path)) {
-    ready = root.is_absolute() && recovery::prepareDirectory(root);
-}
-
-Result Files::read(const std::string& name, Bytes& bytes) {
-    if (!ready || !validKey(name)) {
-        return Result::Io;
-    }
+namespace {
+Result readKey(const std::filesystem::path& root, const std::string& name, Bytes& bytes) {
     std::error_code ec;
     const auto status = std::filesystem::symlink_status(root / name, ec);
     if (status.type() == std::filesystem::file_type::not_found) {
@@ -547,6 +541,31 @@ Result Files::read(const std::string& name, Bytes& bytes) {
         return Result::Io;
     }
     return recovery::readFile(root / name, bytes, MaxBytes) ? Result::Ok : Result::Io;
+}
+}
+
+Files::Files(std::filesystem::path path) : root(std::move(path)) {
+    ready = root.is_absolute() && recovery::prepareDirectory(root);
+}
+
+Result Files::read(const std::string& name, Bytes& bytes) {
+    if (!ready || !validKey(name)) {
+        return Result::Io;
+    }
+    return readKey(root, name, bytes);
+}
+
+ReadOnlyFiles::ReadOnlyFiles(std::filesystem::path path) : root(std::move(path)) {}
+
+Result ReadOnlyFiles::read(const std::string& name, Bytes& bytes) {
+    if (!root.is_absolute() || !validKey(name)) {
+        return Result::Io;
+    }
+    return readKey(root, name, bytes);
+}
+
+bool ReadOnlyFiles::publish(const std::string&, const Bytes&) {
+    return false;
 }
 
 bool Files::publish(const std::string& name, const Bytes& bytes) {

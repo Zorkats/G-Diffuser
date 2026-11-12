@@ -1365,6 +1365,81 @@ void TestRules() {
     gdx_net_race_reset();
 }
 
+void TestMachineRecords() {
+    std::printf("machine records (O4.5)\n");
+    constexpr int kBytes = GDX_NET_MACHINE_RECORD_BYTES;
+    unsigned char a[kBytes];
+    unsigned char b[kBytes];
+    unsigned char out[kBytes];
+    for (int i = 0; i < kBytes; i++) {
+        a[i] = static_cast<unsigned char>(i + 1);
+        b[i] = a[i];
+    }
+    b[kBytes - 1] ^= 1; // one byte apart
+    const auto equals = [&](const unsigned char* want) { return std::equal(out, out + kBytes, want); };
+
+    gdx_net_race_clear_machines();
+    CHECK(gdx_net_race_machines_set() == 0 && gdx_net_race_machine_record(3, out) == 0);
+
+    // Humans: two on 3 with the same record, two on 7 with records a byte apart, one with a record and one
+    // without on 9, one stock on 12, and a machine number past the roster.
+    const unsigned char machine[8] = { 3, 3, 7, 7, 9, 9, 12, 40 };
+    const unsigned char has[8] = { 1, 1, 1, 1, 1, 0, 0, 1 };
+    unsigned char records[8][kBytes];
+    const unsigned char* const rows[8] = { a, a, b, a, a, a, a, a };
+    for (int i = 0; i < 8; i++) {
+        std::copy(rows[i], rows[i] + kBytes, records[i]);
+    }
+    gdx_net_race_set_machines(machine, has, &records[0][0], 8);
+    CHECK(gdx_net_race_machines_set() == 1);
+    std::fill(out, out + kBytes, static_cast<unsigned char>(0xEE));
+    CHECK(gdx_net_race_machine_record(3, out) == 1 && equals(a));
+    CHECK(gdx_net_race_machine_record(7, out) == 0); // two records: both race stock
+    CHECK(gdx_net_race_machine_record(9, out) == 0); // one racer without a record: stock for both
+    CHECK(gdx_net_race_machine_record(12, out) == 0);
+    CHECK(gdx_net_race_machine_record(0, out) == 0); // a CPU's machine
+    CHECK(gdx_net_race_machine_record(-1, out) == 0 && gdx_net_race_machine_record(30, out) == 0);
+    CHECK(gdx_net_race_machine_record(3, nullptr) == 0);
+
+    // The order does not matter: no record first, a record second.
+    const unsigned char pair[2] = { 9, 9 };
+    const unsigned char oneHas[2] = { 0, 1 };
+    const unsigned char bothHave[2] = { 1, 1 };
+    unsigned char pairRecords[2][kBytes] = {};
+    std::copy(a, a + kBytes, pairRecords[1]);
+    gdx_net_race_set_machines(pair, oneHas, &pairRecords[0][0], 2);
+    CHECK(gdx_net_race_machine_record(9, out) == 0);
+    // Nor does the order of two different records.
+    std::copy(b, b + kBytes, pairRecords[0]);
+    gdx_net_race_set_machines(pair, bothHave, &pairRecords[0][0], 2);
+    CHECK(gdx_net_race_machine_record(9, out) == 0);
+    std::copy(a, a + kBytes, pairRecords[0]);
+    gdx_net_race_set_machines(pair, bothHave, &pairRecords[0][0], 2);
+    CHECK(gdx_net_race_machine_record(9, out) == 1 && equals(a));
+
+    // A race reset keeps the table: the game builds its machines from it after the reset.
+    gdx_net_race_reset();
+    CHECK(gdx_net_race_machines_set() == 1 && gdx_net_race_machine_record(9, out) == 1);
+
+    // A new table replaces the old one whole.
+    gdx_net_race_set_machines(machine, nullptr, nullptr, 8);
+    CHECK(gdx_net_race_machines_set() == 1 && gdx_net_race_machine_record(9, out) == 0 &&
+          gdx_net_race_machine_record(3, out) == 0);
+    gdx_net_race_set_machines(nullptr, has, &records[0][0], 8);
+    CHECK(gdx_net_race_machines_set() == 1 && gdx_net_race_machine_record(3, out) == 0);
+    gdx_net_race_set_machines(machine, has, &records[0][0], 0);
+    CHECK(gdx_net_race_machine_record(3, out) == 0);
+    // A character the new field does not have loses the old table's record.
+    gdx_net_race_set_machines(machine, has, &records[0][0], 8);
+    CHECK(gdx_net_race_machine_record(3, out) == 1);
+    const unsigned char other[1] = { 20 };
+    gdx_net_race_set_machines(other, has, &records[0][0], 1);
+    CHECK(gdx_net_race_machine_record(3, out) == 0 && gdx_net_race_machine_record(20, out) == 1 && equals(a));
+
+    gdx_net_race_clear_machines();
+    CHECK(gdx_net_race_machines_set() == 0 && gdx_net_race_machine_record(3, out) == 0);
+}
+
 void TestDigest() {
     std::printf("digest: SHA-256 of what is fed\n");
     static const unsigned char kAbc[32] = { 0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40,
@@ -1440,6 +1515,7 @@ int main() {
     TestIntroTogether();
     TestRules();
     TestDigest();
+    TestMachineRecords();
     std::printf("%d checks, %d failed\n", gChecks, gFails);
     return gFails == 0 ? 0 : 1;
 }

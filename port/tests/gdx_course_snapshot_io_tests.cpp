@@ -6,10 +6,14 @@
 #include "gdx_course_settings.h"
 #include "gdx_dev_gates.h"
 #include "gdx_recovery_metadata.h"
+#include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <string>
+#include <utility>
+#include <vector>
 
 extern "C" void* GdxSnapshotTest_Create(int count);
 #ifdef GDX_SNAPSHOT_MFS_TEST
@@ -26,6 +30,21 @@ unsigned long long disk = 17;
 void* fiber = reinterpret_cast<void*>(1);
 bool blocked = false;
 bool relativeRecoveryPath = false;
+
+// Every entry under a folder with its size, to prove a reader wrote nothing.
+std::vector<std::pair<std::string, unsigned long long>> Listing(const std::filesystem::path& folder) {
+    std::vector<std::pair<std::string, unsigned long long>> entries;
+    for (const auto& item : std::filesystem::recursive_directory_iterator(folder)) {
+        entries.emplace_back(item.path().lexically_relative(folder).generic_string(),
+                             item.is_regular_file() ? item.file_size() : 0ull);
+    }
+    std::sort(entries.begin(), entries.end());
+    return entries;
+}
+
+void CollectBytes(const unsigned char* bytes, unsigned long length, void* ctx) {
+    static_cast<std::vector<unsigned char>*>(ctx)->assign(bytes, bytes + length);
+}
 }
 extern "C" {
 int gGdxDevGateCache[GDX_GATE_COUNT];
@@ -96,6 +115,35 @@ int main(int argc, char** argv) {
     Bytes base(BaseBytes), restored(gdx_course_snapshot_runtime_bytes(), 0x31);
     GdxBranchEditPoint legacyTail[GDX_BRANCH_EDIT_MAX_POINTS - 64]{};
     assert(gdx_course_snapshot_capture(GdxSnapshotTest_Create(6), base.data(), legacyTail) == 7);
+    {
+        // G-NET decision 8: a room vote reads a track's identity and leaves the save folder as it found it,
+        // even for a track that has no generation yet (gdx_snapshot_content would publish one here).
+        char recovery[1600]{};
+        assert(gdx_disk_save_recovery_path(recovery, sizeof(recovery)));
+        const auto snapshots = std::filesystem::absolute(std::string(recovery) + ".snapshots");
+        const auto before = Listing(root);
+        Bytes peeked, stored, again;
+        assert(gdx_snapshot_content_peek(3, "GHOST00", "GOST", base.data(), CollectBytes, &peeked) && !peeked.empty());
+        assert(Listing(root) == before);
+#ifndef GDX_SNAPSHOT_MFS_TEST
+        assert(!std::filesystem::exists(snapshots) && !std::filesystem::exists(snapshots.string() + ".lock"));
+#endif
+        // An unsealed base is its own proof: one changed byte is another track, not a broken one.
+        auto changed = base;
+        changed[40] ^= 1;
+        assert(gdx_snapshot_content_peek(3, "GHOST00", "GOST", changed.data(), CollectBytes, &again) && again != peeked);
+        again.clear();
+        assert(!gdx_snapshot_content_peek(3, "GHOST00", "GOS", base.data(), CollectBytes, &again));
+        assert(!gdx_snapshot_content_peek(3, "GHOST00", "GOST", nullptr, CollectBytes, &again));
+        assert(!gdx_snapshot_content_peek(3, "GHOST00", "GOST", base.data(), nullptr, &again));
+        assert(again.empty() && Listing(root) == before);
+        // The writing reader publishes the generation and gives the same bytes; the peek then reads that file.
+        assert(gdx_snapshot_content(3, "GHOST00", "GOST", base.data(), CollectBytes, &stored) && stored == peeked);
+        const auto published = Listing(root);
+        assert(published != before && std::filesystem::is_directory(snapshots));
+        assert(gdx_snapshot_content_peek(3, "GHOST00", "GOST", base.data(), CollectBytes, &again) && again == peeked);
+        assert(Listing(root) == published);
+    }
     assert(gdx_snapshot_load(3, "GHOST00", "GOST", base.data(), restored.data()));
     assert(restored[1] == 6);
     for (const int count : {64, 65, 77, 127}) {
@@ -125,6 +173,15 @@ int main(int argc, char** argv) {
     assert(!gdx_snapshot_preview(4, "LONG", base.data(), x, z, 127, &previewForks));
 
     assert(gdx_snapshot_validate(3, "LONG", "CRSD", base.data()));
+    {
+        // A sealed track: the peek reads its stored generation, and a sealed base with no generation is unknown.
+        const auto before = Listing(root);
+        Bytes peeked, stored;
+        assert(gdx_snapshot_content_peek(3, "LONG", "CRSD", base.data(), CollectBytes, &peeked));
+        assert(gdx_snapshot_content(3, "LONG", "CRSD", base.data(), CollectBytes, &stored) && stored == peeked);
+        assert(!gdx_snapshot_content_peek(4, "LONG", "CRSD", base.data(), CollectBytes, &stored));
+        assert(Listing(root) == before);
+    }
     assert(!gdx_snapshot_validate(4, "LONG", "CRSD", base.data()));
     assert(!gdx_snapshot_validate(3, "OTHER", "CRSD", base.data()));
     assert(gdx_course_title_set("LONG.CRSD", "Unsaved live edit") == 0);
@@ -151,6 +208,41 @@ int main(int argc, char** argv) {
     assert(restored[1] == 127);
     assert(gdx_snapshot_alias(7, "LONG", "CRSD", portableBase.data(), 8, "COPY", "CRSE"));
     assert(gdx_snapshot_load(8, "COPY", "CRSE", portableBase.data(), restored.data()));
+    {
+        // G-NET "Save to my tracks": the canonical content a room carries is staged under a new name and
+        // installs as a sealed track of that name, the way the disk thread's import does it.
+        Bytes wire;
+        assert(gdx_snapshot_content(7, "LONG", "CRSD", portableBase.data(), CollectBytes, &wire));
+        std::vector<unsigned char> kept(portableBase.size(), 0xCD);
+        assert(gdx_snapshot_import_stage_content(wire.data(), static_cast<unsigned long>(wire.size()), "KEPT",
+                                                 kept.data()));
+        assert(kept[8] & 0x80);
+        assert(gdx_snapshot_import_publish(7, "KEPT", "CRSD", kept.data()));
+        assert(gdx_snapshot_import_restore(7, "KEPT", "CRSD", kept.data()));
+        std::fill(restored.begin(), restored.end(), 0);
+        assert(gdx_snapshot_load(7, "KEPT", "CRSD", kept.data(), restored.data()));
+        assert(restored[1] == 127);
+        // The staged name is the only one it installs under.
+        assert(!gdx_snapshot_import_publish(7, "LONG", "CRSD", kept.data()));
+
+        // Refused: bytes that are not exactly a canonical content, a name the disk cannot hold, no room for
+        // the base. A refusal also leaves nothing staged.
+        std::vector<unsigned char> other(portableBase.size(), 0);
+        Bytes changed = wire;
+        changed[changed.size() / 2] ^= 1;
+        assert(!gdx_snapshot_import_stage_content(changed.data(), static_cast<unsigned long>(changed.size()), "KEPT",
+                                                  other.data()));
+        Bytes longer = wire;
+        longer.push_back(0);
+        assert(!gdx_snapshot_import_stage_content(longer.data(), static_cast<unsigned long>(longer.size()), "KEPT",
+                                                  other.data()));
+        assert(!gdx_snapshot_import_stage_content(wire.data(), static_cast<unsigned long>(wire.size()), "BAD/NAME",
+                                                  other.data()));
+        assert(!gdx_snapshot_import_stage_content(wire.data(), static_cast<unsigned long>(wire.size()), "KEPT",
+                                                  nullptr));
+        assert(!gdx_snapshot_import_stage_content(nullptr, 0, "KEPT", other.data()));
+        assert(!gdx_snapshot_import_publish(7, "KEPT", "CRSD", other.data()));
+    }
     assert(!gdx_snapshot_import_stage(path.c_str(), 0));
     assert(!gdx_snapshot_import_publish(9, "LONG", "CRSD", portableBase.data()));
 #ifdef GDX_SNAPSHOT_MFS_TEST

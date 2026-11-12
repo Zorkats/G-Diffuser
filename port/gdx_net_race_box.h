@@ -9,16 +9,16 @@
  *   RETURN TO ROOM    leaves the race for the room screen. The machine is retired for the room unless it
  *                     had finished, and the player waits there for the results.
  *   LEAVE THE ROOM    leaves the room as well, for the front page of the room screen, where the rooms
- *                     are. A client only: the host closes the room from the room screen, where that is
- *                     asked twice.
+ *                     are. On the host's copy it hands the room over (D28.5, decision 17): the room runs
+ *                     this race to its results in the background, then goes to the next host.
  *
  * One press of A or START chooses, as in the stock box, and B closes. While the box is open the stick and
  * the buttons belong to it: the copy's own machine gets no input and coasts (gdx_net_race_box_holds_input).
  *
  * The room and the race decide everything. This module keeps the box: open or closed, the cursor, and
- * what a press does. The five functions it calls (gdx_lan_race_room, gdx_net_race_own_state,
- * gdx_net_race_quit, gdx_lan_room_stop, gdx_net_room_screen_want_front) are its whole view of the game,
- * so the tests replace them.
+ * what a press does. The six functions it calls (gdx_lan_race_room, gdx_net_race_own_state,
+ * gdx_net_race_quit, gdx_net_race_hand_over, gdx_lan_room_stop, gdx_net_room_screen_want_front) are its
+ * whole view of the game, so the tests replace them.
  *
  * The functions take and return plain numbers: the game's menu code is built without the port's headers
  * and declares them itself (decomp/src/overlays/ovl_i3/menus.c).
@@ -35,8 +35,10 @@ extern "C" {
 /* The most rows the box has. */
 #define GDX_NET_RACE_BOX_ROWS 3
 
-/* Frames after the box opens before it takes a press: the press that opened it is not also an answer. */
-#define GDX_NET_RACE_BOX_OPEN_FRAMES 12
+/* Frames the box takes to open. It grows from its centre as the stock Retry box does, over the same 60
+ * frames (sGeneralRaceMenuScissorBoxTimer in menus.c), and takes no press until it is fully open: the press
+ * that opened it is not also an answer. */
+#define GDX_NET_RACE_BOX_OPEN_FRAMES 60
 
 /* Frames after the copy's own machine is out before the box comes up by itself. The stock Retry box
  * waits as long (sPlayerRetireTimer in menus.c). */
@@ -62,8 +64,12 @@ enum {
  * that runs (before GO, after the end, in no room) the box is closed and nothing opens it. */
 int gdx_net_race_box_frame(int start, int accept, int back, int up, int down, int stickY);
 
-/* The rows to draw: 0 while the box is closed, 2 on the host's copy, 3 on a client's. */
+/* The rows to draw: 0 while the box is closed, else 3. */
 int gdx_net_race_box_rows(void);
+
+/* Frames until the box is fully open: GDX_NET_RACE_BOX_OPEN_FRAMES on the frame it opened, down to 0, and 0
+ * while it is closed. The drawing shrinks the stock scissor by this many pixels on each side. */
+int gdx_net_race_box_opening(void);
 
 /* The row the cursor is on, 0 at the top. */
 int gdx_net_race_box_cursor(void);

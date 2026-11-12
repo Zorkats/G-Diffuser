@@ -2,15 +2,16 @@
  * (gdx_net_track_choice.h).
  * Copyright (c) Zorkats
  *
- * Standalone: links gdx_net_track_choice.c and gdx_net_text.c. The room session is the three functions of
- * gdx_net_room_view.h the module calls and the port menu is one more, all written here, so no socket, thread
- * or game code is involved. Expected texts, colours and positions are written out by hand.
+ * Standalone: links gdx_net_track_choice.c and gdx_net_text.c. The room session is the functions of
+ * gdx_net_room_view.h the module calls, the Edit Cup is the two of gdx_net_own_tracks.h and the port menu is one
+ * more, all written here, so no socket, thread, save or game code is involved. Expected texts, colours and positions are written out by hand.
  *
  * The module keeps its state between calls, as it does between screens of the game, so every test starts by
  * closing the screen and polling an empty session.
  */
 
 #include "../gdx_net_track_choice.h"
+#include "../gdx_net_own_tracks.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -54,6 +55,52 @@ void gdx_menu_request_close(void) {
     sMenuCloseCalls++;
 }
 
+/* The Edit Cup: which slots hold a track a room can race, and their identities and titles. */
+static int sOwnOk[GDX_NET_OWN_TRACK_SLOTS];
+static unsigned char sOwnId[GDX_NET_OWN_TRACK_SLOTS][GDX_NET_ROOM_TRACK_ID_BYTES];
+static char sOwnTitle[GDX_NET_OWN_TRACK_SLOTS][GDX_NET_ROOM_TITLE_BYTES];
+static int sForgetCalls;
+static int sVoteCustomCalls;
+static int sPickCustomCalls;
+static unsigned char sSentId[GDX_NET_ROOM_TRACK_ID_BYTES];
+static char sSentTitle[GDX_NET_ROOM_TITLE_BYTES];
+
+int gdx_net_own_track(int slot, unsigned char* id, char* title, int titleSize) {
+    if (slot < 0 || slot >= GDX_NET_OWN_TRACK_SLOTS || !sOwnOk[slot]) {
+        return 0;
+    }
+    if (id != NULL) {
+        memcpy(id, sOwnId[slot], GDX_NET_ROOM_TRACK_ID_BYTES);
+    }
+    if (title != NULL && titleSize > 0) {
+        snprintf(title, (size_t) titleSize, "%s", sOwnTitle[slot]);
+    }
+    return 1;
+}
+
+void gdx_net_own_tracks_forget(void) {
+    sForgetCalls++;
+}
+
+void gdx_lan_room_vote_custom(const unsigned char* id, const char* title) {
+    sVoteCustomCalls++;
+    memcpy(sSentId, id, sizeof(sSentId));
+    snprintf(sSentTitle, sizeof(sSentTitle), "%s", title);
+}
+
+void gdx_lan_room_pick_custom(const unsigned char* id, const char* title) {
+    sPickCustomCalls++;
+    memcpy(sSentId, id, sizeof(sSentId));
+    snprintf(sSentTitle, sizeof(sSentTitle), "%s", title);
+}
+
+/* Slot holds a track whose identity is 32 bytes of fill, titled title. */
+static void own_track(int slot, unsigned char fill, const char* title) {
+    sOwnOk[slot] = 1;
+    memset(sOwnId[slot], fill, GDX_NET_ROOM_TRACK_ID_BYTES);
+    snprintf(sOwnTitle[slot], sizeof(sOwnTitle[slot]), "%s", title);
+}
+
 /* A room of count players with ids 0 to count - 1 named "P00" on; id 0 hosts and the last watchers of them
  * hold watch seats. Every stock track is in the pool and the room is setting up its race 3. */
 static void fake_room(int mode, int phase, int localId, int count, int watchers) {
@@ -94,6 +141,12 @@ static void reset(void) {
     sPickCalls = 0;
     sPickTrack = -1;
     sMenuCloseCalls = 0;
+    memset(sOwnOk, 0, sizeof(sOwnOk));
+    sForgetCalls = 0;
+    sVoteCustomCalls = 0;
+    sPickCustomCalls = 0;
+    memset(sSentId, 0, sizeof(sSentId));
+    sSentTitle[0] = '\0';
 }
 
 /* A vote of four racers and a watcher, seen by racer 2, with the course select open for it. */
@@ -119,6 +172,15 @@ static void set_ballot(int index, int id, int track) {
 static void set_lottery(int index, int id, int track) {
     sFake.lottery[index].id = (unsigned char) id;
     sFake.lottery[index].track = (unsigned char) track;
+}
+
+/* A custom ballot of player id for the track whose identity is 32 bytes of fill. */
+static void set_custom(GdxNetRoomBallot* ballot, int id, unsigned char fill, const char* title) {
+    memset(ballot, 0, sizeof(*ballot));
+    ballot->id = (unsigned char) id;
+    ballot->track = GDX_NET_ROOM_TRACK_CUSTOM;
+    memset(ballot->custom, fill, sizeof(ballot->custom));
+    snprintf(ballot->title, sizeof(ballot->title), "%s", title);
 }
 
 /* ---- the lines ---- */
@@ -967,6 +1029,149 @@ static void test_draw_show(void) {
     CHECK(draw_count() == 0);
 }
 
+/* ---- custom tracks: the Edit Cup in a room that takes them ---- */
+
+static void test_custom_tracks(void) {
+    static const char* const kEditCup[6] = { "2", "0", "0", "0", "0", "0" };
+    static const char* const kStockCup[6] = { "0", "1", "0", "0", "0", "0" };
+    static const char* const kWonCup[6] = { "1", "0", "0", "0", "0", "0" };
+    unsigned char want[GDX_NET_ROOM_TRACK_ID_BYTES];
+
+    /* A room without custom tracks takes no Edit Cup track, even one that could be sent. */
+    open_vote();
+    own_track(0, 0xA1, "My Loop");
+    gdx_net_track_choice_update();
+    CHECK(gdx_net_track_choice_custom_tracks() == 0);
+    CHECK(gdx_net_track_choice_allowed(24) == 0);
+    CHECK(gdx_net_track_choice_confirm(24) == 0);
+    CHECK(sVoteCustomCalls == 0 && sVoteCalls == 0);
+    /* Every choice reads the Edit Cup afresh. */
+    CHECK(sForgetCalls == 1);
+
+    /* A room with them: each slot that holds a track a room can race, and no other. */
+    reset();
+    fake_room(GDX_NET_ROOM_MODE_JOINED, GDX_NET_ROOM_PHASE_VOTING, 2, 5, 1);
+    sFake.customTracks = 1;
+    own_track(0, 0xA1, "My Loop");
+    own_track(5, 0xA6, "Last Slot");
+    CHECK(gdx_net_track_choice_custom_tracks() == 0); /* the screen is not the room's yet */
+    CHECK(gdx_net_track_choice_poll_open() == 1);
+    CHECK(gdx_net_track_choice_update() == GDX_NET_TRACK_CHOICE_CHOOSE);
+    CHECK(gdx_net_track_choice_custom_tracks() == 1);
+    CHECK(gdx_net_track_choice_allowed(24) == 1 && gdx_net_track_choice_allowed(29) == 1);
+    CHECK(gdx_net_track_choice_allowed(25) == 0 && gdx_net_track_choice_allowed(28) == 0);
+    CHECK(gdx_net_track_choice_allowed(23) == 1 && gdx_net_track_choice_allowed(30) == 0);
+    CHECK(gdx_net_track_choice_allowed(GDX_NET_ROOM_TRACK_CUSTOM) == 0);
+
+    /* The lines on the Edit Cup: a slot with nothing to send says so, one with a track says nothing. */
+    at(GDX_NET_TRACK_CHOICE_EDIT_CUP, 1);
+    CHECK(small_text_is(160, 221, "THIS SLOT HAS NO TRACK TO SEND", GDX_NET_ROOM_COLOUR_RED,
+                        GDX_NET_ROOM_ALIGN_CENTRE));
+    at(GDX_NET_TRACK_CHOICE_EDIT_CUP, 0);
+    CHECK(text_at(160, 221) == NULL);
+    at(GDX_NET_TRACK_CHOICE_EDIT_CUP, -1);
+    CHECK(text_at(160, 221) == NULL);
+
+    /* An empty slot is not sent; a track is, by its identity and title, once. */
+    CHECK(gdx_net_track_choice_confirm(25) == 0);
+    CHECK(gdx_net_track_choice_confirm(24) == 1);
+    memset(want, 0xA1, sizeof(want));
+    CHECK(sVoteCustomCalls == 1 && sVoteCalls == 0 && sPickCustomCalls == 0);
+    CHECK(memcmp(sSentId, want, sizeof(want)) == 0 && strcmp(sSentTitle, "My Loop") == 0);
+    CHECK(gdx_net_track_choice_confirm(29) == 0);
+    CHECK(sVoteCustomCalls == 1);
+
+    /* Until the room has the ballot, the one sent is marked on the Edit Cup. */
+    CHECK(gdx_net_track_choice_update() == GDX_NET_TRACK_CHOICE_WAIT);
+    {
+        static const char* const kNone[6] = { "0", "0", "0", "0", "0", "0" };
+
+        CHECK(counts_are(kNone, 0));
+    }
+
+    /* The votes so far: two for this copy's first slot, one for another copy's track and one stock. The
+       Edit Cup counts this copy's own tracks; another copy's track counts in no cup. */
+    sFake.ballotCount = 4;
+    set_custom(&sFake.ballots[0], 1, 0xA1, "My Loop");
+    set_custom(&sFake.ballots[1], 2, 0xA1, "My Loop");
+    set_custom(&sFake.ballots[2], 3, 0xB0, "Their Track");
+    set_ballot(3, 0, 1);
+    sFake.players[2].voted = 1;
+    gdx_net_track_choice_update();
+    CHECK(small_text_is(150, 221, "VOTES IN THIS CUP", GDX_NET_ROOM_COLOUR_DIM, GDX_NET_ROOM_ALIGN_RIGHT));
+    CHECK(counts_are(kEditCup, 0));
+    at(0, -1);
+    CHECK(counts_are(kStockCup, -1));
+
+    /* The lottery drew this copy's track: the screen turns to its Edit Cup slot and marks it. */
+    sFake.phase = GDX_NET_ROOM_PHASE_LOTTERY;
+    sFake.track = GDX_NET_ROOM_TRACK_CUSTOM;
+    memset(sFake.trackId, 0xA1, sizeof(sFake.trackId));
+    snprintf(sFake.trackTitle, sizeof(sFake.trackTitle), "My Loop");
+    sFake.lotteryTrack = GDX_NET_ROOM_TRACK_CUSTOM;
+    sFake.lotteryCount = 2;
+    set_custom(&sFake.lottery[0], 2, 0xA1, "My Loop");
+    set_custom(&sFake.lottery[1], 3, 0xB0, "Their Track");
+    sFake.lotteryWinner = 0;
+    CHECK(gdx_net_track_choice_update() == GDX_NET_TRACK_CHOICE_SHOW);
+    CHECK(gdx_net_track_choice_shown_track() == 24);
+    CHECK(gdx_net_track_choice_foreign_title() == NULL);
+    CHECK(has_text("YOUR BALLOT WON"));
+    CHECK(counts_are(kWonCup, 0));
+
+    /* Another copy's track won: this copy lacks it, so its title stands for it. */
+    memset(sFake.trackId, 0xB0, sizeof(sFake.trackId));
+    snprintf(sFake.trackTitle, sizeof(sFake.trackTitle), "Their Track");
+    sFake.lotteryWinner = 1;
+    CHECK(gdx_net_track_choice_update() == GDX_NET_TRACK_CHOICE_SHOW);
+    CHECK(gdx_net_track_choice_shown_track() == -1);
+    CHECK(gdx_net_track_choice_foreign_title() != NULL &&
+          strcmp(gdx_net_track_choice_foreign_title(), "THEIR TRACK") == 0);
+    CHECK(has_text("THE BALLOT OF P03 WON"));
+    CHECK(small_text_is(160, 221, "A CUSTOM TRACK. THE ROOM SENDS IT.", GDX_NET_ROOM_COLOUR_DIM,
+                        GDX_NET_ROOM_ALIGN_CENTRE));
+    CHECK(!has_text("VOTES IN THIS CUP"));
+    /* A stock track has no foreign title. */
+    sFake.track = 7;
+    sFake.lotteryTrack = 7;
+    gdx_net_track_choice_update();
+    CHECK(gdx_net_track_choice_foreign_title() == NULL);
+    /* Nor has a screen that is not the room's. */
+    sFake.track = GDX_NET_ROOM_TRACK_CUSTOM;
+    sFake.lotteryTrack = GDX_NET_ROOM_TRACK_CUSTOM;
+    gdx_net_track_choice_update();
+    CHECK(gdx_net_track_choice_foreign_title() != NULL);
+    gdx_net_track_choice_close();
+    CHECK(gdx_net_track_choice_foreign_title() == NULL);
+
+    /* The host turns custom tracks off while the player chooses: the Edit Cup is no longer taken. */
+    reset();
+    fake_room(GDX_NET_ROOM_MODE_JOINED, GDX_NET_ROOM_PHASE_VOTING, 2, 5, 1);
+    sFake.customTracks = 1;
+    own_track(0, 0xA1, "My Loop");
+    gdx_net_track_choice_poll_open();
+    gdx_net_track_choice_update();
+    CHECK(gdx_net_track_choice_allowed(24) == 1);
+    sFake.customTracks = 0;
+    gdx_net_track_choice_update();
+    CHECK(gdx_net_track_choice_allowed(24) == 0);
+    CHECK(gdx_net_track_choice_confirm(24) == 0);
+    CHECK(sVoteCustomCalls == 0);
+
+    /* The pick goes out as a pick. */
+    reset();
+    fake_room(GDX_NET_ROOM_MODE_JOINED, GDX_NET_ROOM_PHASE_PICK, 2, 3, 0);
+    sFake.picker = 2;
+    sFake.customTracks = 1;
+    own_track(3, 0xC3, "Pick Me");
+    gdx_net_track_choice_poll_open();
+    gdx_net_track_choice_update();
+    CHECK(gdx_net_track_choice_confirm(27) == 1);
+    memset(want, 0xC3, sizeof(want));
+    CHECK(sPickCustomCalls == 1 && sVoteCustomCalls == 0 && sPickCalls == 0);
+    CHECK(memcmp(sSentId, want, sizeof(want)) == 0 && strcmp(sSentTitle, "Pick Me") == 0);
+}
+
 /* Every text fits the 48 bytes of a draw item and uses only what its font has. */
 static void test_texts_fit(void) {
     int count;
@@ -1007,6 +1212,7 @@ int main(void) {
     test_draw_choose();
     test_draw_wait();
     test_draw_show();
+    test_custom_tracks();
     test_texts_fit();
 
     if (sFailures != 0) {

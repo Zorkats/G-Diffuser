@@ -24,6 +24,10 @@ float gdx_course_edit_min_y(void);
 /* Highest y accepted by Course Edit, save validation, and content import. */
 float gdx_course_edit_max_y(void);
 
+/* G-NET room race (gdx_net_room_course.h): while on, the highest y is the extended ceiling whatever the player's
+ * setting, so a track the room verified passes the checksum on every copy alike. */
+void gdx_course_bounds_force_extended(int on);
+
 #ifdef __cplusplus
 }
 #endif

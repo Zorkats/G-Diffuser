@@ -4,15 +4,20 @@
 
 #include "gdx_net_track_choice.h"
 
+#include "gdx_net_own_tracks.h"
+
 #include <stdio.h>
 #include <string.h>
 
 #define STOCK_TRACKS 24 /* net::lobby::kStockTracks */
 #define CUP_TRACKS 6
 #define STOCK_CUPS 4
+#define EDIT_FIRST GDX_NET_TRACK_CHOICE_EDIT_TRACK
+#define EDIT_END (GDX_NET_TRACK_CHOICE_EDIT_TRACK + GDX_NET_OWN_TRACK_SLOTS)
 
 /* Layout, in 320 x 240 screen pixels. The course select keeps its header at the top, the track's name on row
- * 200 and its subtitle on row 210; the two rows under them are free in a room, which shows no Edit Cup. */
+ * 200 and its subtitle on row 210; the two rows under them are the room's. An Edit Cup track's captions keep to
+ * row 210 in a room. */
 #define MIDDLE 160
 #define MARGIN_RIGHT 300
 #define TIMER_Y 44 /* where the room screen has it */
@@ -38,6 +43,7 @@ static GdxNetRoomView sView; /* the room as of the last update that was not LEAV
 static GdxNetRoomView sNext; /* the room as of the last update */
 static GdxNetRoomDrawItem sItems[ITEMS_MAX];
 static int sItemCount;
+static char sForeignTitle[GDX_NET_ROOM_TEXT_BYTES];
 
 static int in_room(const GdxNetRoomView* view) {
     return view->mode == GDX_NET_ROOM_MODE_HOSTING || view->mode == GDX_NET_ROOM_MODE_JOINED;
@@ -105,6 +111,8 @@ int gdx_net_track_choice_poll_open(void) {
     sDeclined = 0;
     sRequested = 0;
     sRaceIndex = sView.raceIndex;
+    /* The Edit Cup is read again for every choice: a track may have been changed between two. */
+    gdx_net_own_tracks_forget();
     gdx_menu_request_close();
     return 1;
 }
@@ -115,6 +123,35 @@ void gdx_net_track_choice_request(void) {
 
 int gdx_net_track_choice_active(void) {
     return sActive;
+}
+
+int gdx_net_track_choice_custom_tracks(void) {
+    return sActive && sView.customTracks;
+}
+
+/* The slot of this copy's Edit Cup that holds the track with this identity, or -1. */
+static int own_slot(const unsigned char* id) {
+    unsigned char slotId[GDX_NET_ROOM_TRACK_ID_BYTES];
+    int slot;
+
+    for (slot = 0; slot < GDX_NET_OWN_TRACK_SLOTS; slot++) {
+        if (gdx_net_own_track(slot, slotId, NULL, 0) && memcmp(slotId, id, sizeof(slotId)) == 0) {
+            return slot;
+        }
+    }
+    return -1;
+}
+
+/* A ballot's track as the course select numbers it: a custom one of this copy's is its Edit Cup track, 24 to 29,
+ * and one of another copy's stays GDX_NET_ROOM_TRACK_CUSTOM. */
+static int track_of(const GdxNetRoomBallot* ballot) {
+    int slot;
+
+    if (ballot->track != GDX_NET_ROOM_TRACK_CUSTOM) {
+        return ballot->track;
+    }
+    slot = own_slot(ballot->custom);
+    return slot >= 0 ? EDIT_FIRST + slot : GDX_NET_ROOM_TRACK_CUSTOM;
 }
 
 void gdx_net_track_choice_close(void) {
@@ -152,8 +189,9 @@ static int state_of(const GdxNetRoomView* view) {
         }
         if (view->phase == GDX_NET_ROOM_PHASE_LOTTERY) {
             /* The track travels with the room's state; the ballots follow in a message of their own. */
-            return (view->track >= 0 && view->track < STOCK_TRACKS) ? GDX_NET_TRACK_CHOICE_SHOW
-                                                                     : GDX_NET_TRACK_CHOICE_WAIT;
+            return ((view->track >= 0 && view->track < STOCK_TRACKS) || view->track == GDX_NET_ROOM_TRACK_CUSTOM)
+                       ? GDX_NET_TRACK_CHOICE_SHOW
+                       : GDX_NET_TRACK_CHOICE_WAIT;
         }
         return GDX_NET_TRACK_CHOICE_LEAVE;
     }
@@ -182,25 +220,57 @@ int gdx_net_track_choice_update(void) {
 }
 
 int gdx_net_track_choice_shown_track(void) {
-    return sView.track;
+    int slot;
+
+    if (sView.track != GDX_NET_ROOM_TRACK_CUSTOM) {
+        return sView.track;
+    }
+    slot = own_slot(sView.trackId);
+    return slot >= 0 ? EDIT_FIRST + slot : -1;
+}
+
+const char* gdx_net_track_choice_foreign_title(void) {
+    if (!sActive || sState != GDX_NET_TRACK_CHOICE_SHOW || gdx_net_track_choice_shown_track() >= 0) {
+        return NULL;
+    }
+    gdx_net_text_filter(GDX_NET_ROOM_FONT_TITLE, sView.trackTitle, sForeignTitle, (int) sizeof(sForeignTitle));
+    return sForeignTitle;
 }
 
 int gdx_net_track_choice_allowed(int track) {
     if (track == GDX_NET_ROOM_TRACK_RANDOM) {
         return 1;
     }
+    if (track >= EDIT_FIRST && track < EDIT_END) {
+        return sView.customTracks && gdx_net_own_track(track - EDIT_FIRST, NULL, NULL, 0);
+    }
     return track >= 0 && track < STOCK_TRACKS && ((sView.pool >> track) & 1u) != 0;
+}
+
+/* Sends the ballot or the pick. A custom track goes by its identity and title. */
+static void send_choice(int track) {
+    unsigned char id[GDX_NET_ROOM_TRACK_ID_BYTES];
+    char title[GDX_NET_ROOM_TITLE_BYTES];
+
+    if (track >= EDIT_FIRST && track < EDIT_END) {
+        gdx_net_own_track(track - EDIT_FIRST, id, title, (int) sizeof(title));
+        if (sKind == GDX_NET_TRACK_CHOICE_VOTE) {
+            gdx_lan_room_vote_custom(id, title);
+        } else {
+            gdx_lan_room_pick_custom(id, title);
+        }
+    } else if (sKind == GDX_NET_TRACK_CHOICE_VOTE) {
+        gdx_lan_room_vote(track);
+    } else {
+        gdx_lan_room_pick(track);
+    }
 }
 
 int gdx_net_track_choice_confirm(int track) {
     if (!sActive || sSent || sState != GDX_NET_TRACK_CHOICE_CHOOSE || !gdx_net_track_choice_allowed(track)) {
         return 0;
     }
-    if (sKind == GDX_NET_TRACK_CHOICE_VOTE) {
-        gdx_lan_room_vote(track);
-    } else {
-        gdx_lan_room_pick(track);
-    }
+    send_choice(track);
     sSent = 1;
     sSentTrack = track;
     /* Shown as waiting from now on, also by a screen that is held before the next update: the host's own
@@ -257,7 +327,7 @@ static int count_votes(const GdxNetRoomBallot* ballots, int count, int track) {
     int i;
 
     for (i = 0; i < count; i++) {
-        votes += ballots[i].track == track ? 1 : 0;
+        votes += track_of(&ballots[i]) == track ? 1 : 0;
     }
     return votes;
 }
@@ -268,16 +338,18 @@ static int ballot_of(const GdxNetRoomBallot* ballots, int count, int id) {
 
     for (i = 0; i < count; i++) {
         if (ballots[i].id == id) {
-            return ballots[i].track;
+            return track_of(&ballots[i]);
         }
     }
     return GDX_NET_ROOM_TRACK_NONE;
 }
 
 /* The votes of the place the cursor is on: one count for each of a cup's six tracks, in their order, or the
- * count of the ballots that let the room draw. The track given as marked stands out. */
+ * count of the ballots that let the room draw. The Edit Cup's counts are those of this copy's own tracks. The
+ * track given as marked stands out. */
 static void put_counts(int cup, const GdxNetRoomBallot* ballots, int count, int marked) {
     char text[GDX_NET_ROOM_TEXT_BYTES];
+    int first;
     int i;
 
     if (cup == GDX_NET_TRACK_CHOICE_RANDOM_CUP) {
@@ -287,13 +359,17 @@ static void put_counts(int cup, const GdxNetRoomBallot* ballots, int count, int 
         put_info(marked == GDX_NET_ROOM_TRACK_RANDOM ? GDX_NET_ROOM_COLOUR_GOLD : GDX_NET_ROOM_COLOUR_WHITE, text);
         return;
     }
-    if (cup < 0 || cup >= STOCK_CUPS) {
+    if (cup == GDX_NET_TRACK_CHOICE_EDIT_CUP) {
+        first = EDIT_FIRST;
+    } else if (cup >= 0 && cup < STOCK_CUPS) {
+        first = cup * CUP_TRACKS;
+    } else {
         return;
     }
     put_text(COUNTS_LABEL_RIGHT, INFO_Y, GDX_NET_ROOM_FONT_SMALL, GDX_NET_ROOM_ALIGN_RIGHT, GDX_NET_ROOM_COLOUR_DIM,
              "VOTES IN THIS CUP");
     for (i = 0; i < CUP_TRACKS; i++) {
-        const int track = cup * CUP_TRACKS + i;
+        const int track = first + i;
         const int votes = count_votes(ballots, count, track);
 
         snprintf(text, sizeof(text), "%d", votes);
@@ -313,6 +389,10 @@ static void draw_choose(int cup, int trackNo) {
     } else if (cup >= 0 && cup < STOCK_CUPS && trackNo >= 0 && trackNo < CUP_TRACKS &&
                !gdx_net_track_choice_allowed(cup * CUP_TRACKS + trackNo)) {
         put_info(GDX_NET_ROOM_COLOUR_RED, "THE ROOM DOES NOT RACE THIS TRACK");
+    } else if (cup == GDX_NET_TRACK_CHOICE_EDIT_CUP && trackNo >= 0 && trackNo < CUP_TRACKS &&
+               !gdx_net_track_choice_allowed(EDIT_FIRST + trackNo)) {
+        /* An empty slot, or a track that cannot be read or would be refused by the racers who download it. */
+        put_info(GDX_NET_ROOM_COLOUR_RED, "THIS SLOT HAS NO TRACK TO SEND");
     }
 }
 
@@ -366,8 +446,16 @@ static void draw_show(void) {
     }
     if (winner->track == GDX_NET_ROOM_TRACK_RANDOM) {
         put_info(GDX_NET_ROOM_COLOUR_DIM, "A RANDOM TRACK WAS DRAWN");
-    } else {
+    } else if (sView.track != GDX_NET_ROOM_TRACK_CUSTOM) {
         put_counts(sView.track / CUP_TRACKS, sView.lottery, sView.lotteryCount, sView.track);
+    } else {
+        const int shown = gdx_net_track_choice_shown_track();
+
+        if (shown >= 0) {
+            put_counts(GDX_NET_TRACK_CHOICE_EDIT_CUP, sView.lottery, sView.lotteryCount, shown);
+        } else {
+            put_info(GDX_NET_ROOM_COLOUR_DIM, "A CUSTOM TRACK. THE ROOM SENDS IT.");
+        }
     }
 }
 

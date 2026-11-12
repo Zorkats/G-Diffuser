@@ -18,6 +18,7 @@ must remain with binary packages.
 | discord-rpc | Discord Rich Presence (optional, off by default) | `LICENSES/MIT-discord-rpc.txt` |
 | RapidJSON | JSON serialization inside discord-rpc | `LICENSES/MIT-rapidjson.txt` |
 | Lua | Embedded scripting language runtime | `LICENSES/MIT-Lua.txt` |
+| miniupnpc | UPnP port mapping for G-NET rooms (desktop builds) | `LICENSES/BSD-3-Clause-miniupnpc.txt` |
 
 ## Runtime and extraction dependencies
 

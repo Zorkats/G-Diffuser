@@ -225,6 +225,31 @@ int gdx_content_cup_unregister_begin(int32_t slot);
 int gdx_content_cup_pending(void);
 int gdx_content_cup_result(int32_t* outMfsError);
 
+/* ---------------------------------------------------------------------------------
+ * G-NET "Save to my tracks" (plan decision 14): a room's track, staged from its content bytes by
+ * gdx_snapshot_import_stage_content, installed through the single-track import (op 30) and put in
+ * the first free Edit Cup slot. Completion is the import's own pending/result pair.
+ * ------------------------------------------------------------------------------- */
+
+#define GDX_CONTENT_IMPORT_ERR_NO_NAME (-103) /* no free disk name for the track */
+#define GDX_CONTENT_CUP_ERR_FULL (-113)       /* every Edit Cup slot holds a track: nothing is written */
+
+/* A disk name for a track titled title, in out (at least GDX_CONTENT_CUP_NAME_MAX + 1 bytes): the title
+ * without what a disk name or a course id cannot hold, trimmed, else "ROOM TRACK"; then " 2" to " 9" in
+ * place of its end while the name is taken by a CRSD, a CRSE or an Edit Cup slot. GDX_CONTENT_OK, or
+ * GDX_CONTENT_IMPORT_ERR_NO_NAME, GDX_CONTENT_ERR_BUSY, GDX_CONTENT_ERR_NO_FS with out empty. */
+int gdx_content_import_room_track_name(const char* title, char* out, int outSize);
+
+/* Queues the install of the staged track under name, which must be free (see above), with payload the
+ * fixed image gdx_snapshot_import_stage_content gave. The cup is checked again on the disk thread: if it
+ * filled up meanwhile, nothing is written and gdx_content_import_room_track_full() says so. Returns
+ * GDX_CONTENT_OK once queued; GDX_CONTENT_CUP_ERR_FULL, GDX_CONTENT_IMPORT_ERR_NO_NAME or a shared code
+ * otherwise. */
+int gdx_content_import_room_track_begin(const char* name, const uint8_t* payload);
+
+/* 1 when the last finished install of a room's track found no free Edit Cup slot. */
+int gdx_content_import_room_track_full(void);
+
 #ifdef __cplusplus
 }
 #endif

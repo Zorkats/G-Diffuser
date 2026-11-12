@@ -7,15 +7,26 @@
 // without a network in gdx_net_room_tests.cpp; here they are followed from the host to the clients.
 
 #include "../net/gdx_net_channel.h"
+#include "../net/gdx_net_friends.h"
 #include "../net/gdx_net_lobby.h"
 #include "../net/gdx_net_lobby_session.h"
+#include "../net/gdx_net_track_pack.h"
 
+#include "gdx_course_branch_format.h"
+#include "gdx_course_registry.h"
+#include "gdx_course_settings.h"
+
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <deque>
 #include <functional>
 #include <limits>
+#include <map>
 #include <memory>
+#include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -45,10 +56,7 @@ uint32_t Ip(int a, int b, int c, int d) {
 }
 
 NetAddress Addr(uint32_t ip, uint16_t port) {
-    NetAddress a;
-    a.ip = ip;
-    a.port = port;
-    return a;
+    return NetAddress::FromV4(ip, port);
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -85,7 +93,7 @@ public:
         std::vector<Datagram> now;
         now.swap(queue_);
         for (const Datagram& d : now) {
-            const bool broadcast = d.to.ip == 0xFFFFFFFFu;
+            const bool broadcast = d.to.Ipv4() == 0xFFFFFFFFu;
             for (Endpoint& e : endpoints_) {
                 if (!e.alive || e.addr.port != d.to.port || (!broadcast && e.addr.ip != d.to.ip)) {
                     continue;
@@ -151,7 +159,9 @@ RoomConfig ConfigFor(uint32_t roomId) {
     return config;
 }
 
-// One host and any number of clients on the fake network, ticked together every 16 ms.
+// One host and any number of clients on the fake network, ticked together every 16 ms. A test can destroy
+// the host (DropHost) and let the clients follow their handover plans (FollowPlans): the successor's host then
+// runs on that client's address as `next`, and each member that comes back replaces its client object.
 struct Lan {
     FakeNet net;
     uint32_t now = 1000;
@@ -159,28 +169,69 @@ struct Lan {
     std::unique_ptr<LobbyHost> host;
     std::vector<std::unique_ptr<LobbyClient>> clients;
     std::vector<NetAddress> clientAddrs;
+    std::vector<LocalProfile> profiles;
+    std::vector<TrackStore> stores;
+    std::vector<bool> followed;
+    std::unique_ptr<LobbyHost> next; // the successor's host, once one promoted
+    size_t nextAt = 0;               // the client whose address it runs on
     // Each client's clock is the host's plus its skew: two computers never share one.
     std::vector<uint32_t> skew;
     uint32_t nextSkew = 0; // the skew of the next client added
     std::vector<std::unique_ptr<LanBrowser>> browsers;
+    HackIdentity clientHack; // the ROM hack of the next client added
+    JoinSigner clientSigner;  // the signer of the next client added, then cleared (O7.3)
+    Bytes32 clientKey{};      // that signer's key
+    std::optional<Bytes32> clientExpect; // the host key the next client added expects, then cleared
+    std::optional<NetAddress> clientAt;   // the address the next client added runs on, then cleared
+    std::vector<Bytes32> clientKeys;     // each client's friend key; all zero for one with no signer
+    bool clientReach = false;            // the next client added reports itself reachable, then cleared (R4)
+    std::vector<bool> reach;             // each client's reachability, kept across a rejoin
 
-    explicit Lan(const std::string& hostName = "Host", uint32_t roomId = 77) {
-        host = std::make_unique<LobbyHost>(kBuild, Profile(hostName, 0xFF0000, 0), kDefaultPort, ConfigFor(roomId),
-                                           net.SenderFor(hostAddr));
+    explicit Lan(const std::string& hostName = "Host", uint32_t roomId = 77, const HackIdentity& hostHack = {},
+                 TrackStore hostStore = TrackStore(), RoomType type = RoomType::Lan) {
+        LocalProfile hostProfile = Profile(hostName, 0xFF0000, 0);
+        hostProfile.hack = hostHack;
+        RoomConfig config = ConfigFor(roomId);
+        config.type = type;
+        host = std::make_unique<LobbyHost>(kBuild, hostProfile, kDefaultPort, config, net.SenderFor(hostAddr),
+                                           std::move(hostStore));
         net.Add(hostAddr,
                 [this](const NetAddress& from, const uint8_t* d, size_t n) { host->Receive(from, d, n, now); });
     }
 
     LobbyClient& AddClient(const std::string& name, Seat seat = Seat::Race, const std::string& build = kBuild,
-                           uint32_t colour = 0x00FF00) {
+                           uint32_t colour = 0x00FF00, TrackStore store = TrackStore()) {
         const size_t index = clients.size();
-        const NetAddress addr =
-            Addr(Ip(192, 168, 1, static_cast<int>(20 + index)), static_cast<uint16_t>(50000 + index));
-        clients.push_back(std::make_unique<LobbyClient>(build, Profile(name, colour, 3), seat, hostAddr,
-                                                        0x1000u + static_cast<uint32_t>(index), net.SenderFor(addr)));
+        const NetAddress addr = clientAt.value_or(
+            Addr(Ip(192, 168, 1, static_cast<int>(20 + index)), static_cast<uint16_t>(50000 + index)));
+        clientAt.reset();
+        LocalProfile profile = Profile(name, colour, 3);
+        profile.hack = clientHack;
+        clients.push_back(std::make_unique<LobbyClient>(build, profile, seat, hostAddr,
+                                                        0x1000u + static_cast<uint32_t>(index), net.SenderFor(addr),
+                                                        store));
         clientAddrs.push_back(addr);
+        profiles.push_back(profile);
+        stores.push_back(store);
         skew.push_back(nextSkew);
+        clientKeys.push_back(clientSigner ? clientKey : Bytes32{});
+        reach.push_back(clientReach);
+        clients.back()->SetReachable(clientReach);
+        clientReach = false;
+        if (clientSigner) {
+            clients.back()->SetSigner(std::move(clientSigner));
+            clientSigner = nullptr;
+            clientKey = Bytes32{};
+        }
+        if (clientExpect.has_value()) {
+            clients.back()->ExpectHostKey(*clientExpect);
+            clientExpect.reset();
+        }
         net.Add(addr, [this, index](const NetAddress& from, const uint8_t* d, size_t n) {
+            if (next != nullptr && nextAt == index) {
+                next->Receive(from, d, n, now + skew[index]);
+                return;
+            }
             clients[index]->Receive(from, d, n, now + skew[index]);
         });
         clients.back()->Start(now + skew[index]);
@@ -208,7 +259,12 @@ struct Lan {
         for (int i = 0; i < frames; i++) {
             now += 16;
             net.Step();
-            host->Update(now);
+            if (host != nullptr) {
+                host->Update(now);
+            }
+            if (next != nullptr) {
+                next->Update(now + skew[nextAt]);
+            }
             for (size_t i = 0; i < clients.size(); i++) {
                 clients[i]->Update(now + skew[i]);
             }
@@ -221,6 +277,68 @@ struct Lan {
     // Runs until the clients have settled: 1.5 s of frames covers the handshake, join and roster.
     void Settle() {
         Tick(90);
+    }
+
+    // The host copy is gone without a word: a crash, or a cable pulled.
+    void DropHost() {
+        net.Cut(hostAddr);
+        host.reset();
+    }
+
+    // Each client that closed follows its plan once, as the LAN worker does.
+    void FollowPlans() {
+        followed.resize(clients.size(), false);
+        for (size_t i = 0; i < clients.size(); i++) {
+            LobbyClient& c = *clients[i];
+            if (followed[i] || c.GetState() != LobbyClient::State::Closed) {
+                continue;
+            }
+            followed[i] = true;
+            const HandoverPlan plan = c.NextHost();
+            const uint32_t t = now + skew[i];
+            if (plan.kind == HandoverPlan::Kind::Promote) {
+                std::optional<RoomMachine> machine = RoomMachine::Promote(c.Mirror(t), plan.id, t);
+                CHECK(machine.has_value() && next == nullptr);
+                if (machine.has_value() && next == nullptr) {
+                    next = std::make_unique<LobbyHost>(kBuild, profiles[i], clientAddrs[i].port, std::move(*machine),
+                                                       c.HandoverTable(), plan.id, net.SenderFor(clientAddrs[i]),
+                                                       stores[i]);
+                    next->SetIdentity(clientKeys[i]);
+                    next->SetMirrorKeys(c.Keys());
+                    next->SetBans(c.Bans()); // as the LAN worker does (decision 52)
+                    nextAt = i;
+                }
+            } else if (plan.kind == HandoverPlan::Kind::Rejoin) {
+                auto back = std::make_unique<LobbyClient>(kBuild, profiles[i], Seat::Race, plan.address,
+                                                          0x2000u + static_cast<uint32_t>(i),
+                                                          net.SenderFor(clientAddrs[i]), stores[i]);
+                CHECK(back->SetRejoin(plan));
+                back->SetReachable(reach[i]);
+                back->Start(t);
+                clients[i] = std::move(back);
+            }
+        }
+    }
+
+    void TickFollow(int frames) {
+        for (int i = 0; i < frames; i++) {
+            Tick();
+            FollowPlans();
+        }
+    }
+
+    // True when the successor's host and every client still in its room are in the phase.
+    bool NextIn(Phase phase) const {
+        if (next == nullptr || next->Room(now + skew[nextAt]).phase != phase) {
+            return false;
+        }
+        for (size_t i = 0; i < clients.size(); i++) {
+            if (i != nextAt && clients[i]->GetState() == LobbyClient::State::Joined &&
+                clients[i]->Room(now + skew[i]).phase != phase) {
+                return false;
+            }
+        }
+        return true;
     }
 
     // The race that is running goes to its cap with nobody over the line. order is the host game's order
@@ -464,14 +582,15 @@ void TestJoinCodec() {
     CHECK(!DecodeWelcome(b.data(), b.size(), id) && id == 13);
 
     RejectReason reason = RejectReason::Full;
-    for (uint8_t value = 1; value <= 6; value++) {
+    for (uint8_t value = 1; value <= 11; value++) {
         b = EncodeReject(static_cast<RejectReason>(value));
         CHECK(DecodeReject(b.data(), b.size(), reason) && static_cast<uint8_t>(reason) == value);
         CHECK(RejectReasonText(reason)[0] != '\0');
     }
+    CHECK(static_cast<uint8_t>(RejectReason::Rejoin) == 8 && static_cast<uint8_t>(RejectReason::BadProof) == 11);
     const uint8_t zero = 0;
-    const uint8_t seven = 7;
-    CHECK(!DecodeReject(&zero, 1, reason) && !DecodeReject(&seven, 1, reason));
+    const uint8_t twelve = 12;
+    CHECK(!DecodeReject(&zero, 1, reason) && !DecodeReject(&twelve, 1, reason));
 
     bool flag = false;
     b = EncodeReady(true);
@@ -498,13 +617,16 @@ Grid SampleGrid() {
     return grid;
 }
 
-// The bytes of a grid message: 18 of header, then three per human.
+// The bytes of a grid message with a stock track: 23 of header, then four per human with no machine record.
 constexpr size_t kGridLaps = 6;
 constexpr size_t kGridFlags = 7;
 constexpr size_t kGridRange = 8;
-constexpr size_t kGridCpus = 16;
-constexpr size_t kGridCount = 17;
-constexpr size_t kGridHumans = 18;
+constexpr size_t kGridBoost = 16;
+constexpr size_t kGridTrack = 20;
+constexpr size_t kGridCpus = 21;
+constexpr size_t kGridCount = 22;
+constexpr size_t kGridHumans = 23;
+constexpr size_t kGridStride = 4;
 
 void TestRaceCodec() {
     std::printf("codec: the grid, the start and the clock\n");
@@ -527,8 +649,9 @@ void TestRaceCodec() {
 
     const Grid grid = SampleGrid();
     const std::vector<uint8_t> g = EncodeGrid(grid);
-    CHECK(g.size() == kGridHumans + 3 * grid.humans.size());
+    CHECK(g.size() == kGridHumans + kGridStride * grid.humans.size());
     CHECK(g[kGridLaps] == 5 && g[kGridCpus] == 27 && g[kGridCount] == 3 && g[kGridHumans] == 3);
+    CHECK(g[kGridTrack] == 0 && g[kGridHumans + 3] == 0); // a stock track 0, and no record
     Grid got;
     CHECK(DecodeGrid(g.data(), g.size(), got) && got == grid);
     const auto refuses = [&g](size_t at, uint8_t value) {
@@ -543,7 +666,10 @@ void TestRaceCodec() {
     CHECK(refuses(kGridCpus, 28)); // three humans and 28 CPUs: one racer too many
     CHECK(refuses(kGridCount, 0) && refuses(kGridCount, 2) && refuses(kGridCount, 4)); // the count and the bytes
     CHECK(refuses(kGridHumans, static_cast<uint8_t>(kMaxPlayers))); // no such player
-    CHECK(refuses(kGridHumans + 3, 3));                              // the same player twice
+    CHECK(refuses(kGridHumans + kGridStride, 3));                    // the same player twice
+    CHECK(refuses(kGridHumans + 3, 2));                              // a record flag is 0 or 1
+    CHECK(refuses(kGridTrack, kTrackRandom) && refuses(kGridTrack, kTrackNone) && refuses(kGridTrack, 24));
+    CHECK(refuses(kGridBoost, 0xFF) || refuses(kGridBoost + 3, 0xFF)); // far above kBoostFramesMax
     CHECK(refuses(kGridHumans + 1, static_cast<uint8_t>(kRosterMachines)));
     CHECK(refuses(kGridHumans + 2, static_cast<uint8_t>(kMachineSkins)));
     for (size_t cut = 0; cut < g.size(); cut++) {
@@ -1034,15 +1160,18 @@ void TestRoomCodec() {
     RoomState stateOut;
     CHECK(DecodeRoomState(stateBytes.data(), stateBytes.size(), stateOut) && stateOut == state);
     CHECK(stateOut.cpusOut);
-    // The CPU machines are in the race or out of it: the last byte is 0 or 1 and nothing else.
+    // The CPU machines are in the race or out of it: that byte is 0 or 1 and nothing else. After it come
+    // the custom-track switch (1), the CPU flags (1), AI aggression (2), the rules (14) and the successor
+    // with its address (19), the room type (1), the lottery commitment (32) and the room code (4).
     {
         RoomState plain = state;
         plain.cpusOut = false;
         CHECK(!(plain == state));
         std::vector<uint8_t> bytes = EncodeRoomState(plain);
-        CHECK(bytes.size() == stateBytes.size() && bytes.back() == 0 && stateBytes.back() == 1);
+        const size_t at = bytes.size() - 75;
+        CHECK(bytes.size() == stateBytes.size() && bytes[at] == 0 && stateBytes[at] == 1);
         CHECK(DecodeRoomState(bytes.data(), bytes.size(), stateOut) && stateOut == plain && !stateOut.cpusOut);
-        bytes.back() = 2;
+        bytes[at] = 2;
         RoomState kept;
         kept.roomId = 99;
         CHECK(!DecodeRoomState(bytes.data(), bytes.size(), kept) && kept.roomId == 99);
@@ -1095,6 +1224,97 @@ void TestRoomCodec() {
     badState = state;
     badState.locked = 10;
     CHECK(refusesState(badState));
+
+    // Version 4: the settings a successor needs, and the successor itself (D28.1).
+    {
+        RoomState full = state;
+        full.cpuFill = false;
+        full.aiAggression = kAiAggressionMax;
+        full.cpuTrackHazards = true;
+        full.rules.laps = 7;
+        full.rules.ignoreTrackSettings = true;
+        full.rules.lavaNoKill = true;
+        full.rules.magnetRange = 150.5f;
+        full.rules.magnetStrength = 0.75f;
+        full.rules.boostFrames = 420;
+        full.successor = 5;
+        full.successorIp = MappedV4(0xC0A8010A); // 192.168.1.10
+        full.successorPort = 41234;
+        const std::vector<uint8_t> fullBytes = EncodeRoomState(full);
+        CHECK(fullBytes.size() == stateBytes.size());
+        RoomState fullOut;
+        CHECK(DecodeRoomState(fullBytes.data(), fullBytes.size(), fullOut) && fullOut == full);
+        CHECK(!fullOut.cpuFill && fullOut.cpuTrackHazards && fullOut.aiAggression == 400 && fullOut.successor == 5 &&
+              fullOut.successorIp == MappedV4(0xC0A8010A) && fullOut.successorPort == 41234 && fullOut.rules == full.rules);
+        CheckEdges(fullBytes, [](const uint8_t* d, size_t n) {
+            RoomState o;
+            return DecodeRoomState(d, n, o);
+        });
+        // An IPv6 successor (O5.3) travels in the same 16 bytes.
+        RoomState six = full;
+        six.successorIp = IpBytes{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x2a };
+        const std::vector<uint8_t> sixBytes = EncodeRoomState(six);
+        RoomState sixOut;
+        CHECK(sixBytes.size() == fullBytes.size() && DecodeRoomState(sixBytes.data(), sixBytes.size(), sixOut) &&
+              sixOut == six && sixOut.successorIp[15] == 0x2a && !IsMappedV4(sixOut.successorIp));
+        // The defaults: CPUs fill the grid, stock aggression, no hazard avoidance, no successor.
+        const RoomState plain;
+        CHECK(plain.cpuFill && plain.aiAggression == kAiAggressionDefault && !plain.cpuTrackHazards &&
+              plain.successor == kSystemId && IsZeroIp(plain.successorIp) && plain.successorPort == 0 &&
+              plain.rules == RaceRules());
+        // The CPU flags byte takes two bits and nothing else.
+        std::vector<uint8_t> flagged = fullBytes;
+        const size_t cpuFlagsAt = fullBytes.size() - 73;
+        CHECK(flagged[cpuFlagsAt] == 2);
+        for (uint8_t bad : { uint8_t{ 4 }, uint8_t{ 0x80 }, uint8_t{ 0xFF } }) {
+            flagged[cpuFlagsAt] = bad;
+            CHECK(!DecodeRoomState(flagged.data(), flagged.size(), fullOut));
+        }
+        flagged[cpuFlagsAt] = 3;
+        CHECK(DecodeRoomState(flagged.data(), flagged.size(), fullOut) && fullOut.cpuFill && fullOut.cpuTrackHazards);
+    }
+    badState = state;
+    badState.aiAggression = kAiAggressionMin - 1;
+    CHECK(refusesState(badState));
+    badState.aiAggression = kAiAggressionMax + 1;
+    CHECK(refusesState(badState));
+    badState.aiAggression = 0;
+    CHECK(refusesState(badState));
+    badState = state;
+    badState.rules.laps = 0;
+    CHECK(refusesState(badState));
+    badState = state;
+    badState.rules.magnetRange = kMagnetRangeMax + 1.0f;
+    CHECK(refusesState(badState));
+    badState = state;
+    badState.rules.magnetStrength = std::numeric_limits<float>::quiet_NaN();
+    CHECK(refusesState(badState));
+    badState = state;
+    badState.rules.boostFrames = kBoostFramesMax + 1;
+    CHECK(refusesState(badState));
+    // A successor is a member other than the host, with a port; nobody comes with no address at all.
+    badState = state;
+    badState.successor = kHostId;
+    badState.successorPort = 1;
+    CHECK(refusesState(badState));
+    badState.successor = static_cast<uint8_t>(kMaxPlayers);
+    CHECK(refusesState(badState));
+    badState.successor = 3;
+    badState.successorPort = 0;
+    CHECK(refusesState(badState));
+    badState = state;
+    badState.successorIp = MappedV4(1);
+    CHECK(refusesState(badState));
+    badState = state;
+    badState.successorPort = 1;
+    CHECK(refusesState(badState));
+    {
+        RoomState lastSeat = state;
+        lastSeat.successor = static_cast<uint8_t>(kMaxPlayers - 1);
+        lastSeat.successorPort = 1;
+        const std::vector<uint8_t> v = EncodeRoomState(lastSeat);
+        CHECK(DecodeRoomState(v.data(), v.size(), stateOut) && stateOut == lastSeat);
+    }
     for (uint8_t phase = 0; phase < kPhaseCount; phase++) {
         CHECK(PhaseName(static_cast<Phase>(phase))[0] != '\0');
     }
@@ -1369,6 +1589,489 @@ void TestSanitizeAndFilter() {
     CHECK(FilterChat("a b x!", mine) == "a b x!");
 }
 
+CustomTrack CustomOf(uint8_t fill, const std::string& title) {
+    CustomTrack custom;
+    for (size_t i = 0; i < custom.id.size(); i++) {
+        custom.id[i] = static_cast<uint8_t>(fill + i);
+    }
+    custom.title = title;
+    return custom;
+}
+
+// A record Machine Create could have made: every field the room checks in range, and a name with its NUL. The
+// other bytes vary with fill.
+MachineRecord RecordOf(uint8_t fill) {
+    MachineRecord record{};
+    for (size_t i = 0; i < record.size(); i++) {
+        record[i] = static_cast<uint8_t>(fill ^ i);
+    }
+    record[0x00] = static_cast<uint8_t>(fill % 3);
+    record[0x01] = static_cast<uint8_t>((fill / 3) % 3);
+    record[0x02] = static_cast<uint8_t>((fill / 9) % 3);
+    record[0x03] = static_cast<uint8_t>(fill % 7);
+    record[0x04] = static_cast<uint8_t>((fill + 1) % 7);
+    record[0x05] = static_cast<uint8_t>((fill + 2) % 7);
+    record[0x06] = static_cast<uint8_t>(1 + fill % 8);
+    record[0x08] = static_cast<uint8_t>(1 + fill % 5);
+    record[0x15 + 8] = 0;
+    return record;
+}
+
+void TestMachineRecordBounds() {
+    std::printf("machine record bounds (O4.5)\n");
+    for (int fill = 0; fill < 256; fill++) {
+        CHECK(MachineRecordOk(RecordOf(static_cast<uint8_t>(fill))));
+    }
+    const auto with = [](size_t at, uint8_t value) {
+        MachineRecord record = RecordOf(0);
+        record[at] = value;
+        return MachineRecordOk(record);
+    };
+    // Grades are 0 to 4.
+    CHECK(with(0x00, 4) && !with(0x00, 5) && with(0x01, 4) && !with(0x01, 5) && with(0x02, 4) && !with(0x02, 5));
+    // The weightings: body 4 (5) + boost 4 (8) is 13, the most Machine Create allows; one grip step more is 14.
+    MachineRecord heavy = RecordOf(0);
+    heavy[0x00] = 4;
+    heavy[0x01] = 4;
+    heavy[0x02] = 0;
+    CHECK(MachineRecordOk(heavy));
+    heavy[0x02] = 1;
+    CHECK(!MachineRecordOk(heavy));
+    heavy[0x00] = 3;
+    CHECK(MachineRecordOk(heavy)); // 4 + 8 + 1
+    heavy[0x01] = 3;
+    heavy[0x02] = 4;
+    CHECK(!MachineRecordOk(heavy)); // 4 + 6 + 8 is 18
+    // Seven of each part.
+    for (size_t part : { size_t{ 0x03 }, size_t{ 0x04 }, size_t{ 0x05 } }) {
+        CHECK(with(part, 6) && !with(part, 7) && !with(part, 0xFF));
+    }
+    // Logos 1 to 8, decals 1 to 5, stored one above the option.
+    CHECK(!with(0x06, 0) && with(0x06, 1) && with(0x06, 8) && !with(0x06, 9));
+    CHECK(!with(0x08, 0) && with(0x08, 1) && with(0x08, 5) && !with(0x08, 6));
+    // The colours, the number and the checksum are any bytes.
+    CHECK(with(0x07, 0xFF) && with(0x09, 0xFF) && with(0x14, 0xFF) && with(0x1E, 0xFF) && with(0x1F, 0xFF));
+    // A name ends within its nine bytes.
+    MachineRecord name = RecordOf(0);
+    for (size_t i = 0x15; i < 0x1E; i++) {
+        name[i] = 'A';
+    }
+    CHECK(!MachineRecordOk(name));
+    name[0x1D] = 0;
+    CHECK(MachineRecordOk(name));
+    name[0x1D] = 'A';
+    name[0x15] = 0;
+    CHECK(MachineRecordOk(name)); // an empty name
+
+    // A decoder refuses a record out of range, in a lock and in a grid.
+    MachineRecord bad = RecordOf(0);
+    bad[0x03] = 7;
+    LockRequest lock = LockOf(5, 0, 50);
+    lock.hasRecord = true;
+    lock.record = bad;
+    std::vector<uint8_t> v = EncodeLock(lock);
+    LockRequest lockOut;
+    CHECK(!DecodeLock(v.data(), v.size(), lockOut));
+    lock.record = RecordOf(0);
+    v = EncodeLock(lock);
+    CHECK(DecodeLock(v.data(), v.size(), lockOut) && lockOut == lock);
+    // With no record the bytes are not there to check.
+    lock.hasRecord = false;
+    lock.record = MachineRecord{};
+    v = EncodeLock(lock);
+    CHECK(v.size() == 4 && DecodeLock(v.data(), v.size(), lockOut) && !lockOut.hasRecord);
+    Grid grid = SampleGrid();
+    grid.humans[0].hasRecord = true;
+    grid.humans[0].record = bad;
+    v = EncodeGrid(grid);
+    Grid gridOut;
+    CHECK(!DecodeGrid(v.data(), v.size(), gridOut));
+    grid.humans[0].record = RecordOf(7);
+    v = EncodeGrid(grid);
+    CHECK(DecodeGrid(v.data(), v.size(), gridOut) && gridOut == grid);
+}
+
+void TestCustomTrackWire() {
+    std::printf("codec: custom tracks, machine records, hack identity, boost length\n");
+    CHECK(kLobbyVersion == kProtocolVersion && kProtocolVersion == 9); // O5.1, O5.3, O6.1, O7.3 and R4 bumped it
+    CHECK(static_cast<uint8_t>(Phase::Assets) == 9 && kPhaseCount == 10);
+    CHECK(std::string(PhaseName(Phase::Assets)) == "Getting the track");
+    CHECK(static_cast<uint8_t>(RejectReason::Hack) == 7 && RejectReasonText(RejectReason::Hack)[0] != '\0');
+    CHECK(kMsgTrackOffer == 26 && kMsgTrackAbort == 30);
+
+    CHECK(TrackTitleOk("A") && TrackTitleOk(std::string(kTrackTitleMax, 'Z')) && TrackTitleOk("Big Blue 2"));
+    CHECK(!TrackTitleOk("") && !TrackTitleOk(std::string(kTrackTitleMax + 1, 'Z')) && !TrackTitleOk("Tab\tx"));
+
+    // A vote and a pick name a custom track by its identity and title; a stock track keeps its one byte.
+    const CustomTrack mine = CustomOf(0x40, "Loop City");
+    TrackChoice choice;
+    choice.track = kTrackCustom;
+    choice.custom = mine;
+    std::vector<uint8_t> v = EncodeVote(choice);
+    CHECK(v.size() == 1 + kTrackIdBytes + 1 + mine.title.size() && v[0] == kTrackCustom);
+    TrackChoice back;
+    CHECK(DecodeVote(v.data(), v.size(), back) && back == choice);
+    back = TrackChoice();
+    CHECK(DecodePick(v.data(), v.size(), back) && back == choice);
+    CheckEdges(v, [](const uint8_t* d, size_t n) {
+        TrackChoice o;
+        return DecodeVote(d, n, o);
+    });
+    uint8_t one = 0;
+    CHECK(!DecodeVote(v.data(), v.size(), one)); // the one-byte form never takes a custom track
+    TrackChoice stock;
+    stock.track = 9;
+    v = EncodeVote(stock);
+    CHECK(v.size() == 1 && DecodeVote(v.data(), v.size(), back) && back == stock && back.custom == CustomTrack());
+    stock.track = kTrackRandom;
+    v = EncodePick(stock);
+    CHECK(DecodePick(v.data(), v.size(), back) && back.track == kTrackRandom);
+    for (uint8_t bad : { uint8_t{ 24 }, kTrackNone }) {
+        TrackChoice b;
+        b.track = bad;
+        v = EncodeVote(b);
+        CHECK(!DecodeVote(v.data(), v.size(), back));
+    }
+    for (const std::string& title : { std::string(), std::string(kTrackTitleMax + 1, 'x'), std::string("a\nb") }) {
+        TrackChoice b = choice;
+        b.custom.title = title;
+        v = EncodeVote(b);
+        TrackChoice kept;
+        kept.track = 3;
+        CHECK(!DecodeVote(v.data(), v.size(), kept) && kept.track == 3);
+    }
+
+    // Ballots, the lottery and the pick result.
+    const std::vector<Ballot> ballots = { { 0, 4, {} }, { 2, kTrackCustom, mine }, { 5, kTrackRandom, {} } };
+    std::vector<Ballot> ballotsOut;
+    v = EncodeVotes(ballots);
+    CHECK(DecodeVotes(v.data(), v.size(), ballotsOut) && ballotsOut == ballots);
+    CheckEdges(v, [](const uint8_t* d, size_t n) {
+        std::vector<Ballot> o;
+        return DecodeVotes(d, n, o);
+    });
+    LotteryResult lottery;
+    lottery.ballots = ballots;
+    lottery.winner = 1;
+    lottery.track = kTrackCustom;
+    lottery.custom = mine;
+    v = EncodeLottery(lottery);
+    LotteryResult lotteryOut;
+    CHECK(DecodeLottery(v.data(), v.size(), lotteryOut) && lotteryOut == lottery);
+    CheckEdges(v, [](const uint8_t* d, size_t n) {
+        LotteryResult o;
+        return DecodeLottery(d, n, o);
+    });
+    const auto refusesLottery = [](const LotteryResult& l) {
+        const std::vector<uint8_t> e = EncodeLottery(l);
+        LotteryResult o;
+        return !DecodeLottery(e.data(), e.size(), o);
+    };
+    LotteryResult badLottery = lottery;
+    badLottery.custom = CustomOf(0x41, "Loop City"); // not the winning ballot's track
+    CHECK(refusesLottery(badLottery));
+    badLottery = lottery;
+    badLottery.winner = 2; // a Random ballot won: the draw is stock
+    CHECK(refusesLottery(badLottery));
+    badLottery = LotteryResult();
+    badLottery.track = kTrackCustom;
+    badLottery.custom = mine; // nobody voted: the draw is stock
+    CHECK(refusesLottery(badLottery));
+    // The same ballots give the same custom winner on every copy.
+    const LotteryResult run = RunLottery(77, 3, ballots, kPoolAll, kTrackNone);
+    CHECK(run.ballots[run.winner].track != kTrackCustom || (run.track == kTrackCustom && run.custom == mine));
+    CHECK(run.track == kTrackCustom || run.custom == CustomTrack());
+    {
+        const std::vector<Ballot> only = { { 4, kTrackCustom, mine } };
+        const LotteryResult solo = RunLottery(77, 3, only, kPoolAll, kTrackNone);
+        CHECK(solo.track == kTrackCustom && solo.custom == mine && solo.winner == 0);
+        v = EncodeLottery(solo);
+        CHECK(DecodeLottery(v.data(), v.size(), lotteryOut) && lotteryOut == solo);
+    }
+
+    Picked picked;
+    picked.track = kTrackCustom;
+    picked.by = 2;
+    picked.custom = mine;
+    v = EncodePicked(picked);
+    Picked pickedOut;
+    CHECK(DecodePicked(v.data(), v.size(), pickedOut) && pickedOut == picked);
+    CheckEdges(v, [](const uint8_t* d, size_t n) {
+        Picked o;
+        return DecodePicked(d, n, o);
+    });
+    Picked badPick = picked;
+    badPick.drawn = true;
+    v = EncodePicked(badPick);
+    CHECK(!DecodePicked(v.data(), v.size(), pickedOut));
+    badPick = picked;
+    badPick.by = kSystemId;
+    v = EncodePicked(badPick);
+    CHECK(!DecodePicked(v.data(), v.size(), pickedOut));
+
+    // The room: a custom track in play, and the host's switch.
+    RoomState room;
+    room.phase = Phase::Assets;
+    room.track = kTrackCustom;
+    room.custom = mine;
+    room.lastTrack = kTrackCustom;
+    room.customTracks = true;
+    v = EncodeRoomState(room);
+    RoomState roomOut;
+    CHECK(DecodeRoomState(v.data(), v.size(), roomOut) && roomOut == room && roomOut.customTracks);
+    // The switch is the byte before the version 4 tail: CPU flags, aggression, rules, successor (36 bytes),
+    // then the version 7 room type, commitment and code (37 bytes).
+    const size_t switchAt = v.size() - 74;
+    CHECK(v[switchAt] == 1);
+    CheckEdges(v, [](const uint8_t* d, size_t n) {
+        RoomState o;
+        return DecodeRoomState(d, n, o);
+    });
+    v[switchAt] = 2;
+    CHECK(!DecodeRoomState(v.data(), v.size(), roomOut));
+    room.customTracks = false;
+    room.custom.title.clear();
+    v = EncodeRoomState(room);
+    CHECK(!DecodeRoomState(v.data(), v.size(), roomOut));
+
+    // A lock and a grid entry carry an optional machine record.
+    LockRequest lock = LockOf(29, 3, 70);
+    v = EncodeLock(lock);
+    CHECK(v.size() == 4 && v[3] == 0);
+    lock.hasRecord = true;
+    lock.record = RecordOf(0x5A);
+    v = EncodeLock(lock);
+    CHECK(v.size() == 4 + kMachineRecordBytes && v[3] == 1);
+    LockRequest lockOut;
+    CHECK(DecodeLock(v.data(), v.size(), lockOut) && lockOut == lock);
+    CheckEdges(v, [](const uint8_t* d, size_t n) {
+        LockRequest o;
+        return DecodeLock(d, n, o);
+    });
+    v[3] = 2;
+    CHECK(!DecodeLock(v.data(), v.size(), lockOut));
+
+    // The grid: the boost length, a custom track and the records.
+    Grid grid = SampleGrid();
+    grid.rules.boostFrames = 300;
+    grid.track.track = kTrackCustom;
+    grid.track.custom = mine;
+    grid.humans[1].hasRecord = true;
+    grid.humans[1].record = RecordOf(0x11);
+    v = EncodeGrid(grid);
+    Grid gridOut;
+    CHECK(DecodeGrid(v.data(), v.size(), gridOut) && gridOut == grid && gridOut.rules.boostFrames == 300);
+    CheckEdges(v, [](const uint8_t* d, size_t n) {
+        Grid o;
+        return DecodeGrid(d, n, o);
+    });
+    Grid badGrid = grid;
+    badGrid.rules.boostFrames = kBoostFramesMax + 1;
+    v = EncodeGrid(badGrid);
+    CHECK(!DecodeGrid(v.data(), v.size(), gridOut));
+    badGrid.rules.boostFrames = kBoostFramesMax;
+    v = EncodeGrid(badGrid);
+    CHECK(DecodeGrid(v.data(), v.size(), gridOut) && gridOut.rules.boostFrames == kBoostFramesMax);
+    for (uint8_t bad : { kTrackRandom, kTrackNone }) {
+        badGrid = grid;
+        badGrid.track.track = bad;
+        badGrid.track.custom = CustomTrack();
+        v = EncodeGrid(badGrid);
+        CHECK(!DecodeGrid(v.data(), v.size(), gridOut));
+    }
+    RaceRules rules;
+    rules.boostFrames = kBoostFramesMax;
+    CHECK(RulesOk(rules));
+    rules.boostFrames = kBoostFramesMax + 1;
+    CHECK(!RulesOk(rules));
+
+    // The join carries the hack: the stock game is an empty name and zero bytes.
+    CHECK(HackOk(HackIdentity()));
+    HackIdentity hack;
+    hack.name = "Big Blue Remix";
+    hack.hash[0] = 0xAB;
+    hack.hash[31] = 0xCD;
+    CHECK(HackOk(hack));
+    JoinRequest join;
+    join.build = kBuild;
+    join.name = "Ana";
+    join.hack = hack;
+    v = EncodeJoin(join);
+    JoinRequest joinOut;
+    CHECK(DecodeJoin(v.data(), v.size(), joinOut) && joinOut.hack == hack && joinOut.name == "Ana");
+    CheckEdges(v, [](const uint8_t* d, size_t n) {
+        JoinRequest o;
+        return DecodeJoin(d, n, o);
+    });
+    JoinRequest badJoin = join;
+    badJoin.hack.name.clear(); // a hash with no name
+    CHECK(!HackOk(badJoin.hack));
+    v = EncodeJoin(badJoin);
+    CHECK(!DecodeJoin(v.data(), v.size(), joinOut));
+    badJoin = join;
+    badJoin.hack.name = std::string(kHackNameMax + 1, 'h');
+    v = EncodeJoin(badJoin);
+    CHECK(!DecodeJoin(v.data(), v.size(), joinOut));
+    badJoin = join;
+    badJoin.hack.name = "bad\x01name";
+    v = EncodeJoin(badJoin);
+    CHECK(!DecodeJoin(v.data(), v.size(), joinOut));
+    badJoin = join;
+    badJoin.hack.name = "Caf\xC3\xA9 Mix"; // a file name may be UTF-8
+    v = EncodeJoin(badJoin);
+    CHECK(DecodeJoin(v.data(), v.size(), joinOut) && joinOut.hack == badJoin.hack);
+}
+
+void TestHackIdentity() {
+    std::printf("the host admits only its own ROM hack\n");
+    HackIdentity hack;
+    hack.name = "Remix";
+    hack.hash[5] = 0x42;
+    {
+        // A stock room refuses a hacked copy and takes a stock one.
+        Lan lan;
+        lan.clientHack = hack;
+        LobbyClient& hacked = lan.AddClient("Hacked");
+        lan.clientHack = HackIdentity();
+        LobbyClient& plain = lan.AddClient("Plain");
+        lan.Settle();
+        CHECK(hacked.GetState() == LobbyClient::State::Closed);
+        CHECK(hacked.CloseText() == RejectReasonText(RejectReason::Hack));
+        CHECK(plain.GetState() == LobbyClient::State::Joined);
+        CHECK(lan.host->Roster().size() == 2);
+    }
+    {
+        // A hacked room takes the same hack, and refuses the stock game and the same name with other bytes.
+        Lan lan("Host", 78, hack);
+        lan.clientHack = hack;
+        LobbyClient& same = lan.AddClient("Same");
+        lan.clientHack = HackIdentity();
+        LobbyClient& plain = lan.AddClient("Plain");
+        HackIdentity other = hack;
+        other.hash[5] = 0x43;
+        lan.clientHack = other;
+        LobbyClient& near = lan.AddClient("Near");
+        lan.Settle();
+        CHECK(same.GetState() == LobbyClient::State::Joined);
+        CHECK(plain.GetState() == LobbyClient::State::Closed && plain.CloseText() == RejectReasonText(RejectReason::Hack));
+        CHECK(near.GetState() == LobbyClient::State::Closed && near.CloseText() == RejectReasonText(RejectReason::Hack));
+        CHECK(lan.host->Roster().size() == 2);
+    }
+}
+
+void TestHandoverCodec() {
+    std::printf("codec: handover token, tokens, handover, rejoin\n");
+    // A member's own token: all 64 bits travel, and zero is never a token.
+    HandoverToken token;
+    token.token = 0x0123456789ABCDEFull;
+    std::vector<uint8_t> v = EncodeHandoverToken(token);
+    HandoverToken tokenOut;
+    CHECK(v.size() == 8 && v[0] == 0xEF && v[7] == 0x01);
+    CHECK(DecodeHandoverToken(v.data(), v.size(), tokenOut) && tokenOut == token);
+    CheckEdges(v, [](const uint8_t* d, size_t n) {
+        HandoverToken o;
+        return DecodeHandoverToken(d, n, o);
+    });
+    token.token = ~0ull;
+    v = EncodeHandoverToken(token);
+    CHECK(DecodeHandoverToken(v.data(), v.size(), tokenOut) && tokenOut.token == ~0ull);
+    tokenOut.token = 7;
+    v = EncodeHandoverToken(HandoverToken());
+    CHECK(!DecodeHandoverToken(v.data(), v.size(), tokenOut) && tokenOut.token == 7);
+
+    // The successor's copy of every other member's token.
+    const std::vector<HandoverTokenEntry> tokens = { { 1, 0x1111222233334444ull },
+                                                     { 4, 0x8000000000000001ull },
+                                                     { static_cast<uint8_t>(kMaxPlayers - 1), 9 } };
+    v = EncodeHandoverTokens(tokens);
+    std::vector<HandoverTokenEntry> tokensOut;
+    CHECK(v.size() == 1 + 3 * 9 + 32 + 2 && DecodeHandoverTokens(v.data(), v.size(), tokensOut) && tokensOut == tokens);
+    CheckEdges(v, [](const uint8_t* d, size_t n) {
+        std::vector<HandoverTokenEntry> o;
+        return DecodeHandoverTokens(d, n, o);
+    });
+    v = EncodeHandoverTokens({});
+    CHECK(DecodeHandoverTokens(v.data(), v.size(), tokensOut) && tokensOut.empty());
+    const auto refusesTokens = [](const std::vector<HandoverTokenEntry>& t) {
+        const std::vector<uint8_t> e = EncodeHandoverTokens(t);
+        std::vector<HandoverTokenEntry> o = { { 3, 3 } };
+        return !DecodeHandoverTokens(e.data(), e.size(), o) && o.size() == 1 && o[0].id == 3;
+    };
+    CHECK(refusesTokens({ { 1, 5 }, { 1, 6 } }));                               // the same id twice
+    CHECK(refusesTokens({ { 4, 5 }, { 2, 6 } }));                               // out of order
+    CHECK(refusesTokens({ { 2, 0 } }));                                          // a zero token
+    CHECK(refusesTokens({ { static_cast<uint8_t>(kMaxPlayers), 5 } }));         // not a member id
+    {
+        std::vector<HandoverTokenEntry> tooMany;
+        for (uint8_t id = 0; id <= kMaxPlayers; id++) {
+            tooMany.push_back({ id, 1u + id });
+        }
+        CHECK(refusesTokens(tooMany));
+        tooMany.pop_back();
+        v = EncodeHandoverTokens(tooMany);
+        CHECK(DecodeHandoverTokens(v.data(), v.size(), tokensOut) && tokensOut.size() == kMaxPlayers);
+    }
+
+    // The host leaves now: a successor with a port, or nobody at all.
+    Handover handover;
+    handover.successor = 2;
+    handover.ip = MappedV4(0x0A000002);
+    handover.port = 50000;
+    v = EncodeHandover(handover);
+    Handover handoverOut;
+    CHECK(v.size() == 19 && DecodeHandover(v.data(), v.size(), handoverOut) && handoverOut == handover);
+    CheckEdges(v, [](const uint8_t* d, size_t n) {
+        Handover o;
+        return DecodeHandover(d, n, o);
+    });
+    Handover six = handover;
+    six.ip = IpBytes{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7 };
+    v = EncodeHandover(six);
+    CHECK(DecodeHandover(v.data(), v.size(), handoverOut) && handoverOut == six);
+    v = EncodeHandover(Handover());
+    CHECK(DecodeHandover(v.data(), v.size(), handoverOut) && handoverOut.successor == kSystemId);
+    const auto refusesHandover = [](uint8_t successor, uint32_t ip, uint16_t port) {
+        Handover h;
+        h.successor = successor;
+        h.ip = ip == 0 ? IpBytes{} : MappedV4(ip);
+        h.port = port;
+        const std::vector<uint8_t> e = EncodeHandover(h);
+        Handover o;
+        o.port = 77;
+        return !DecodeHandover(e.data(), e.size(), o) && o.port == 77;
+    };
+    CHECK(refusesHandover(kHostId, 1, 1));
+    CHECK(refusesHandover(static_cast<uint8_t>(kMaxPlayers), 1, 1));
+    CHECK(refusesHandover(2, 1, 0));
+    CHECK(refusesHandover(kSystemId, 1, 0));
+    CHECK(refusesHandover(kSystemId, 0, 1));
+
+    // A member comes back under its old id.
+    Rejoin rejoin;
+    rejoin.id = 6;
+    rejoin.token = 0xFEEDFACECAFEBEEFull;
+    v = EncodeRejoin(rejoin);
+    Rejoin rejoinOut;
+    CHECK(v.size() == 9 && DecodeRejoin(v.data(), v.size(), rejoinOut) && rejoinOut == rejoin);
+    CheckEdges(v, [](const uint8_t* d, size_t n) {
+        Rejoin o;
+        return DecodeRejoin(d, n, o);
+    });
+    const auto refusesRejoin = [](uint8_t id, uint64_t t) {
+        Rejoin r;
+        r.id = id;
+        r.token = t;
+        const std::vector<uint8_t> e = EncodeRejoin(r);
+        Rejoin o;
+        o.id = 9;
+        return !DecodeRejoin(e.data(), e.size(), o) && o.id == 9;
+    };
+    CHECK(refusesRejoin(kHostId, 5));                               // the host never rejoins
+    CHECK(refusesRejoin(static_cast<uint8_t>(kMaxPlayers), 5));
+    CHECK(refusesRejoin(3, 0));
+    CHECK(!refusesRejoin(static_cast<uint8_t>(kMaxPlayers - 1), 1));
+}
+
 void TestDecoderSweep() {
     std::printf("decoder sweep\n");
     // Random bytes and random single-byte damage to valid messages: every decoder either refuses or returns a
@@ -1416,6 +2119,61 @@ void TestDecoderSweep() {
         EncodeResults({ 3, true, { { 1, ResultKind::Finished, 91000, 100 }, { 0, ResultKind::Unfinished, 0, 93 },
                                    { 2, ResultKind::Retired, 0, 0 } } }),
     };
+    std::vector<std::vector<uint8_t>> extra;
+    {
+        const CustomTrack custom = CustomOf(0x20, "Sweep");
+        TrackChoice choice;
+        choice.track = kTrackCustom;
+        choice.custom = custom;
+        extra.push_back(EncodeVote(choice));
+        const std::vector<Ballot> withCustom = { { 1, kTrackCustom, custom } };
+        extra.push_back(EncodeVotes(withCustom));
+        LotteryResult won;
+        won.ballots = withCustom;
+        won.winner = 0;
+        won.track = kTrackCustom;
+        won.custom = custom;
+        extra.push_back(EncodeLottery(won));
+        Picked picked;
+        picked.track = kTrackCustom;
+        picked.by = 1;
+        picked.custom = custom;
+        extra.push_back(EncodePicked(picked));
+        LockRequest lock = LockOf(5, 1, 60);
+        lock.hasRecord = true;
+        lock.record = RecordOf(3);
+        extra.push_back(EncodeLock(lock));
+        RoomState customRoom = state;
+        customRoom.track = kTrackCustom;
+        customRoom.custom = custom;
+        customRoom.customTracks = true;
+        extra.push_back(EncodeRoomState(customRoom));
+        Grid grid = SampleGrid();
+        grid.track = choice;
+        grid.rules.boostFrames = 250;
+        grid.humans[0].hasRecord = true;
+        grid.humans[0].record = RecordOf(9);
+        extra.push_back(EncodeGrid(grid));
+        JoinRequest hacked = join;
+        hacked.hack.name = "Hack";
+        hacked.hack.hash[0] = 1;
+        extra.push_back(EncodeJoin(hacked));
+        RoomState handedOver = state;
+        handedOver.cpuFill = false;
+        handedOver.cpuTrackHazards = true;
+        handedOver.aiAggression = 250;
+        handedOver.rules.laps = 5;
+        handedOver.successor = 2;
+        handedOver.successorIp = MappedV4(0x7F000001);
+        handedOver.successorPort = 7777;
+        extra.push_back(EncodeRoomState(handedOver));
+        extra.push_back(EncodeHandoverToken({ 0x0102030405060708ull }));
+        extra.push_back(EncodeHandoverTokens({ { 1, 11 }, { 2, 0xFFFFFFFFFFull } }));
+        extra.push_back(EncodeHandover({ 2, MappedV4(0x7F000001), 7777 }));
+        extra.push_back(EncodeRejoin({ 2, 0xABCDEFull }));
+    }
+    std::vector<std::vector<uint8_t>> allSeeds = seeds;
+    allSeeds.insert(allSeeds.end(), extra.begin(), extra.end());
     int accepted = 0;
     for (int round = 0; round < 30000; round++) {
         std::vector<uint8_t> bytes;
@@ -1425,7 +2183,7 @@ void TestDecoderSweep() {
                 v = static_cast<uint8_t>(Next(seed));
             }
         } else {
-            bytes = seeds[Next(seed) % seeds.size()];
+            bytes = allSeeds[Next(seed) % allSeeds.size()];
             if (!bytes.empty()) {
                 bytes[Next(seed) % bytes.size()] = static_cast<uint8_t>(Next(seed));
             }
@@ -1435,7 +2193,7 @@ void TestDecoderSweep() {
         JoinRequest j;
         if (DecodeJoin(d, n, j)) {
             accepted++;
-            CHECK(NameOk(j.name) && MachineOk(j.machine) && ColourOk(j.colour));
+            CHECK(NameOk(j.name) && MachineOk(j.machine) && ColourOk(j.colour) && HackOk(j.hack));
             CHECK(EncodeJoin(j) == bytes);
         }
         std::vector<PlayerInfo> r;
@@ -1448,7 +2206,33 @@ void TestDecoderSweep() {
         if (DecodeRoomState(d, n, s)) {
             accepted++;
             CHECK(static_cast<uint8_t>(s.phase) < kPhaseCount && s.phaseLeftMs <= s.phaseTotalMs && PoolOk(s.pool));
+            CHECK(s.track == kTrackCustom ? TrackTitleOk(s.custom.title) : s.custom == CustomTrack());
+            CHECK(RulesOk(s.rules) && s.aiAggression >= kAiAggressionMin && s.aiAggression <= kAiAggressionMax);
+            CHECK(s.successor == kSystemId ? IsZeroIp(s.successorIp) && s.successorPort == 0
+                                           : s.successor != kHostId && s.successor < kMaxPlayers && s.successorPort != 0);
+            CHECK(s.code == kNoRoomCode || (s.code < kRoomCodeValues && s.type != RoomType::Lan));
             CHECK(EncodeRoomState(s) == bytes);
+        }
+        HandoverToken mine;
+        if (DecodeHandoverToken(d, n, mine)) {
+            CHECK(mine.token != 0 && EncodeHandoverToken(mine) == bytes);
+        }
+        std::vector<HandoverTokenEntry> held;
+        Bytes32 heldSecret{};
+        if (DecodeHandoverTokens(d, n, held, heldSecret)) {
+            bool fine = held.size() <= kMaxPlayers;
+            for (size_t i = 0; i < held.size(); i++) {
+                fine = fine && held[i].id < kMaxPlayers && held[i].token != 0 && (i == 0 || held[i - 1].id < held[i].id);
+            }
+            CHECK(fine && EncodeHandoverTokens(held, heldSecret) == bytes);
+        }
+        Handover leaving;
+        if (DecodeHandover(d, n, leaving)) {
+            CHECK(EncodeHandover(leaving) == bytes);
+        }
+        Rejoin back;
+        if (DecodeRejoin(d, n, back)) {
+            CHECK(back.id != kHostId && back.id < kMaxPlayers && back.token != 0 && EncodeRejoin(back) == bytes);
         }
         std::vector<Ballot> v;
         if (DecodeVotes(d, n, v)) {
@@ -1458,18 +2242,27 @@ void TestDecoderSweep() {
         LotteryResult l;
         if (DecodeLottery(d, n, l)) {
             accepted++;
-            CHECK(l.track < kStockTracks && (l.ballots.empty() ? l.winner == kNoWinner : l.winner < l.ballots.size()));
+            CHECK((l.track < kStockTracks || l.track == kTrackCustom) &&
+                  (l.ballots.empty() ? l.winner == kNoWinner : l.winner < l.ballots.size()));
+            CHECK(l.track != kTrackCustom || (!l.ballots.empty() && l.ballots[l.winner].custom == l.custom));
             CHECK(EncodeLottery(l) == bytes);
         }
         Picked p;
         if (DecodePicked(d, n, p)) {
             accepted++;
-            CHECK(p.track < kStockTracks && EncodePicked(p) == bytes);
+            CHECK((p.track < kStockTracks || (p.track == kTrackCustom && !p.drawn && p.by != kSystemId)) &&
+                  EncodePicked(p) == bytes);
         }
         LockRequest k;
         if (DecodeLock(d, n, k)) {
             accepted++;
             CHECK(k.machine < kRosterMachines && k.skin < kMachineSkins && k.engine <= kEngineMax);
+            CHECK(EncodeLock(k) == bytes);
+        }
+        TrackChoice named;
+        if (DecodeVote(d, n, named)) {
+            CHECK(named.track == kTrackCustom ? TrackTitleOk(named.custom.title) : TrackInPool(named.track, kPoolAll));
+            CHECK(EncodeVote(named) == bytes);
         }
         EmoteLine e;
         if (DecodeEmoteLine(d, n, e)) {
@@ -1499,6 +2292,7 @@ void TestDecoderSweep() {
             accepted++;
             CHECK(!field.humans.empty() && field.humans.size() <= kMaxRacers &&
                   field.humans.size() + field.cpus <= kGridSlots && RulesOk(field.rules));
+            CHECK(field.track.track < kStockTracks || field.track.track == kTrackCustom);
             CHECK(EncodeGrid(field) == bytes);
         }
         StartSignal go;
@@ -1646,13 +2440,14 @@ void TestEmoteRateLimit() {
 void TestRejects() {
     std::printf("rejects and seats\n");
     Lan lan;
+    // Another build on the same protocol joins (decision 25), and leaves again.
     LobbyClient& old = lan.AddClient("Old", Seat::Race, "1.0.9/zzz");
     lan.Settle();
-    CHECK(old.GetState() == LobbyClient::State::Closed);
-    CHECK(old.CloseText() == RejectReasonText(RejectReason::Build));
-    CHECK(lan.host->Roster().size() == 1);
+    CHECK(old.GetState() == LobbyClient::State::Joined);
+    CHECK(lan.host->Roster().size() == 2);
+    old.Leave(lan.now);
     lan.Tick(40);
-    CHECK(lan.host->PeerCount() == 0);
+    CHECK(lan.host->Roster().size() == 1 && lan.host->PeerCount() == 0);
 
     // Eight race seats by default, the host's among them.
     for (int i = 0; i < 7; i++) {
@@ -1786,20 +2581,32 @@ void TestNoHost() {
     CHECK(!client.Emote(0, now));
 }
 
+// A hello as a client's channel builds it: magic, type 0, nonce, version and cookie, little-endian.
+std::vector<uint8_t> HelloPacket(uint32_t nonce, uint64_t cookie, uint16_t version = kProtocolVersion) {
+    std::vector<uint8_t> b = { 'G', 'D', 0 };
+    for (int i = 0; i < 4; i++) {
+        b.push_back(static_cast<uint8_t>(nonce >> (8 * i)));
+    }
+    b.push_back(static_cast<uint8_t>(version));
+    b.push_back(static_cast<uint8_t>(version >> 8));
+    for (int i = 0; i < 8; i++) {
+        b.push_back(static_cast<uint8_t>(cookie >> (8 * i)));
+    }
+    return b;
+}
+
 void TestHostIgnoresStrangers() {
     std::printf("host ignores strangers\n");
     Lan lan;
     const uint8_t junk[] = { 1, 2, 3, 4, 5 };
     lan.host->Receive(Addr(Ip(10, 1, 1, 1), 1), junk, sizeof(junk), lan.now);
     CHECK(lan.host->PeerCount() == 0 && lan.host->Refused() == 1);
-    // A flood of hellos from many addresses holds at most kPendingPeerCap channels, and they expire.
-    const uint8_t hello[] = { 'G', 'D', 0, 0x10, 0, 0, 0, static_cast<uint8_t>(kProtocolVersion), 0 };
+    // A flood of hellos with no cookie, as from spoofed addresses, takes no slot at all (decision 34).
+    const std::vector<uint8_t> hello = HelloPacket(0x10, 0);
     for (int i = 0; i < 40; i++) {
-        lan.host->Receive(Addr(Ip(10, 2, 0, i), 9999), hello, sizeof(hello), lan.now);
+        lan.host->Receive(Addr(Ip(10, 2, 0, i), 9999), hello.data(), hello.size(), lan.now);
     }
-    CHECK(lan.host->PeerCount() == kPendingPeerCap);
-    lan.Tick(400);
-    CHECK(lan.host->PeerCount() == 0);
+    CHECK(lan.host->PeerCount() == 0 && lan.host->Challenged() == 40);
     CHECK(lan.host->Roster().size() == 1);
     // A probe gets one room reply back.
     size_t before = lan.net.Sent();
@@ -1813,6 +2620,330 @@ void TestHostIgnoresStrangers() {
     const uint32_t refused = lan.host->Refused();
     lan.host->Receive(Addr(Ip(10, 3, 0, 1), 7), oldProbe.data(), oldProbe.size(), lan.now);
     CHECK(lan.net.Sent() == before && lan.host->Refused() == refused + 1);
+}
+
+// The stateless gate (decision 34): a hello opens a pending slot only when it echoes the cookie this host gave its
+// address, and no reply to a stranger is larger than what the stranger sent.
+void TestHelloGate() {
+    std::printf("hello gate\n");
+    Lan lan;
+    // The longest datagram the host sent to a 10.x address that had not echoed a cookie, and how many it sent. An
+    // address that echoed one has proved it hears the host, so its link may get more than it sent (the Nonce).
+    size_t largest = 0;
+    size_t strangers = 0;
+    std::set<uint32_t> proved;
+    lan.net.SetFilter([&](const NetAddress& from, const NetAddress& to, size_t len) {
+        if (from == lan.hostAddr && (to.Ipv4() >> 24) == 10 && proved.count(to.Ipv4()) == 0) {
+            largest = std::max(largest, len);
+            strangers++;
+        }
+        return false;
+    });
+    // Addresses that can hear the host keep the last datagram it sent them.
+    std::map<uint32_t, std::vector<uint8_t>> heard;
+    for (int i = 0; i < 40; i++) {
+        const NetAddress addr = Addr(Ip(10, 9, 0, i), 7000);
+        lan.net.Add(addr, [&heard, addr](const NetAddress&, const uint8_t* d, size_t n) {
+            heard[addr.Ipv4()].assign(d, d + n);
+        });
+    }
+    auto cookieFrom = [](const std::vector<uint8_t>& challenge) {
+        CHECK(challenge.size() == kHelloBytes && challenge[2] == 5);
+        uint64_t cookie = 0;
+        for (size_t b = 0; b < 8 && 9 + b < challenge.size(); b++) {
+            cookie |= static_cast<uint64_t>(challenge[9 + b]) << (8 * b);
+        }
+        return cookie;
+    };
+    const NetAddress a = Addr(Ip(10, 9, 0, 0), 7000);
+    const NetAddress b = Addr(Ip(10, 9, 0, 1), 7000);
+    const std::vector<uint8_t> first = HelloPacket(0x55, 0);
+    lan.host->Receive(a, first.data(), first.size(), lan.now);
+    lan.net.Step();
+    CHECK(lan.host->PeerCount() == 0 && lan.host->Challenged() == 1);
+    CHECK(heard.count(a.Ipv4()) == 1);
+    const uint64_t cookie = cookieFrom(heard[a.Ipv4()]);
+
+    // The cookie is bound to the address and the nonce: another address, another nonce or a guess gets a new
+    // challenge, never a slot.
+    const std::vector<uint8_t> stolen = HelloPacket(0x55, cookie);
+    lan.host->Receive(b, stolen.data(), stolen.size(), lan.now);
+    const std::vector<uint8_t> otherNonce = HelloPacket(0x56, cookie);
+    lan.host->Receive(a, otherNonce.data(), otherNonce.size(), lan.now);
+    const std::vector<uint8_t> guess = HelloPacket(0x55, cookie ^ 1);
+    lan.host->Receive(a, guess.data(), guess.size(), lan.now);
+    CHECK(lan.host->PeerCount() == 0 && lan.host->Challenged() == 4);
+
+    // A channel packet that is not a hello, and a hello of the wrong length, get nothing back.
+    const size_t before = lan.net.Sent();
+    const uint32_t refused = lan.host->Refused();
+    std::vector<uint8_t> data = HelloPacket(0x55, cookie);
+    data[2] = 3;
+    lan.host->Receive(a, data.data(), data.size(), lan.now);
+    std::vector<uint8_t> shortHello = HelloPacket(0x55, cookie);
+    shortHello.resize(9);
+    lan.host->Receive(a, shortHello.data(), shortHello.size(), lan.now);
+    CHECK(lan.net.Sent() == before && lan.host->Refused() == refused + 2 && lan.host->PeerCount() == 0);
+
+    // The real cookie, from the address it was given to, takes a slot. It is still good one bucket later.
+    lan.now += kCookieBucketMs;
+    const std::vector<uint8_t> echo = HelloPacket(0x55, cookie);
+    proved.insert(a.Ipv4());
+    lan.host->Receive(a, echo.data(), echo.size(), lan.now);
+    CHECK(lan.host->PeerCount() == 1);
+    lan.Tick(static_cast<int>(kPendingPeerMs / 16) + 2);
+    CHECK(lan.host->PeerCount() == 0);
+
+    // Two buckets later it is stale.
+    lan.now += 2 * kCookieBucketMs;
+    lan.host->Receive(a, echo.data(), echo.size(), lan.now);
+    CHECK(lan.host->PeerCount() == 0);
+
+    // Forty addresses that each echo a real cookie still hold at most kPendingPeerCap slots, and those expire.
+    heard.clear();
+    for (int i = 0; i < 40; i++) {
+        const std::vector<uint8_t> h = HelloPacket(0x100u + static_cast<uint32_t>(i), 0);
+        lan.host->Receive(Addr(Ip(10, 9, 0, i), 7000), h.data(), h.size(), lan.now);
+    }
+    lan.net.Step();
+    CHECK(heard.size() == 40);
+    for (int i = 0; i < 40; i++) {
+        const NetAddress addr = Addr(Ip(10, 9, 0, i), 7000);
+        const std::vector<uint8_t> h = HelloPacket(0x100u + static_cast<uint32_t>(i), cookieFrom(heard[addr.Ipv4()]));
+        proved.insert(addr.Ipv4());
+        lan.host->Receive(addr, h.data(), h.size(), lan.now);
+    }
+    CHECK(lan.host->PeerCount() == kPendingPeerCap);
+    lan.Tick(static_cast<int>(kPendingPeerMs / 16) + 2);
+    CHECK(lan.host->PeerCount() == 0 && lan.host->Roster().size() == 1);
+
+    // One machine sending from ten ports holds at most kPendingPerSourceCap of those slots; another address still
+    // gets one.
+    heard.clear();
+    std::map<uint16_t, std::vector<uint8_t>> heardPort;
+    for (uint16_t port = 8000; port < 8010; port++) {
+        const NetAddress addr = Addr(Ip(10, 9, 1, 1), port);
+        lan.net.Add(addr, [&heardPort, port](const NetAddress&, const uint8_t* d, size_t n) {
+            heardPort[port].assign(d, d + n);
+        });
+        const std::vector<uint8_t> h = HelloPacket(0x200u + port, 0);
+        lan.host->Receive(addr, h.data(), h.size(), lan.now);
+    }
+    lan.net.Step();
+    CHECK(heardPort.size() == 10);
+    proved.insert(Ip(10, 9, 1, 1));
+    for (uint16_t port = 8000; port < 8010; port++) {
+        const std::vector<uint8_t> h = HelloPacket(0x200u + port, cookieFrom(heardPort[port]));
+        lan.host->Receive(Addr(Ip(10, 9, 1, 1), port), h.data(), h.size(), lan.now);
+    }
+    CHECK(lan.host->PeerCount() == kPendingPerSourceCap);
+    {
+        const NetAddress other = Addr(Ip(10, 9, 0, 3), 7000);
+        const std::vector<uint8_t> h = HelloPacket(0x300, 0);
+        lan.host->Receive(other, h.data(), h.size(), lan.now);
+        lan.net.Step();
+        const std::vector<uint8_t> e = HelloPacket(0x300, cookieFrom(heard[other.Ipv4()]));
+        lan.host->Receive(other, e.data(), e.size(), lan.now);
+        CHECK(lan.host->PeerCount() == kPendingPerSourceCap + 1);
+    }
+    lan.Tick(static_cast<int>(kPendingPeerMs / 16) + 2);
+    CHECK(lan.host->PeerCount() == 0);
+
+    // A hello on another protocol version gets a refusal, no larger than the hello, and no slot.
+    const std::vector<uint8_t> old = HelloPacket(0x77, 0, 4);
+    lan.host->Receive(a, old.data(), old.size(), lan.now);
+    lan.net.Step();
+    CHECK(heard[a.Ipv4()].size() == 10 && heard[a.Ipv4()][2] == 2 && lan.host->PeerCount() == 0);
+
+    // Nothing the host sent to a stranger was larger than a hello.
+    CHECK(strangers > 0 && largest == kHelloBytes);
+
+    // A real client gets through the challenge with one extra round trip.
+    LobbyClient& ana = lan.AddClient("Ana");
+    lan.Settle();
+    CHECK(ana.GetState() == LobbyClient::State::Joined);
+}
+
+// A probe is as long as the longest room reply, so a forged probe cannot make a host send more than it got.
+void TestProbeNotAmplified() {
+    std::printf("probe not amplified\n");
+    RoomInfo room;
+    room.port = 24302;
+    room.racers = 1;
+    room.racerCap = kDefaultRacers;
+    room.build = std::string(kBuildMax, 'b');
+    room.hostName = std::string(kNameMax, 'n');
+    const std::vector<uint8_t> probe = EncodeProbe(3);
+    CHECK(probe.size() == kProbeBytes && EncodeRoom(3, room).size() == kProbeBytes);
+    uint32_t nonce = 0;
+    CHECK(DecodeProbe(probe.data(), probe.size(), nonce) && nonce == 3);
+    // The version 4 probe had no padding; padding that is not zero is refused too.
+    std::vector<uint8_t> bare(probe.begin(), probe.begin() + 11);
+    CHECK(!DecodeProbe(bare.data(), bare.size(), nonce));
+    std::vector<uint8_t> dirty = probe;
+    dirty.back() = 1;
+    CHECK(!DecodeProbe(dirty.data(), dirty.size(), nonce));
+    Lan lan;
+    const size_t before = lan.net.Sent();
+    lan.host->Receive(Addr(Ip(10, 3, 0, 1), 7), bare.data(), bare.size(), lan.now);
+    CHECK(lan.net.Sent() == before);
+
+    // A LAN room answers any probe. A directory room answers this network only: a scanner on a public address
+    // learns nothing.
+    const NetAddress local = Addr(Ip(192, 168, 1, 99), 7);
+    const NetAddress scanner = Addr(Ip(203, 0, 113, 9), 7);
+    lan.net.Add(local, [](const NetAddress&, const uint8_t*, size_t) {});
+    lan.net.Add(scanner, [](const NetAddress&, const uint8_t*, size_t) {});
+    size_t sent = lan.net.Sent();
+    lan.host->Receive(scanner, probe.data(), probe.size(), lan.now);
+    CHECK(lan.net.Sent() == sent + 1);
+    Lan open("Host", 79, {}, TrackStore(), RoomType::Open);
+    open.net.Add(local, [](const NetAddress&, const uint8_t*, size_t) {});
+    open.net.Add(scanner, [](const NetAddress&, const uint8_t*, size_t) {});
+    sent = open.net.Sent();
+    open.host->Receive(scanner, probe.data(), probe.size(), open.now);
+    CHECK(open.net.Sent() == sent);
+    open.host->Receive(local, probe.data(), probe.size(), open.now);
+    CHECK(open.net.Sent() == sent + 1);
+}
+
+// L2 (decision 46): the host's upload totals add up its links' counters and keep those of a dropped link.
+// O6.1, O6.4 and O5.10 on the wire (protocol 7): the room type, the lottery commitment and its reveal, and the
+// takeover secret beside the token table.
+void TestRoomTypeWire() {
+    std::printf("codec: room type, lottery commitment, takeover secret (protocol 7)\n");
+    for (uint8_t t = 0; t < kRoomTypeCount; t++) {
+        CHECK(RoomTypeName(static_cast<RoomType>(t))[0] != '\0');
+    }
+    RoomState open;
+    open.type = RoomType::Open;
+    open.commitment[0] = 0xC0;
+    open.commitment[31] = 0x01;
+    std::vector<uint8_t> v = EncodeRoomState(open);
+    RoomState out;
+    CHECK(v.size() == EncodeRoomState(RoomState()).size());
+    CHECK(DecodeRoomState(v.data(), v.size(), out) && out == open && out.type == RoomType::Open);
+    // Only an Open room commits.
+    for (RoomType type : { RoomType::Lan, RoomType::Code, RoomType::Friends }) {
+        RoomState other = open;
+        other.type = type;
+        v = EncodeRoomState(other);
+        CHECK(!DecodeRoomState(v.data(), v.size(), out));
+        other.commitment = Bytes32{};
+        v = EncodeRoomState(other);
+        CHECK(DecodeRoomState(v.data(), v.size(), out) && out == other);
+    }
+    // The type byte sits right before the commitment and the code, and only known types decode.
+    v = EncodeRoomState(RoomState());
+    CHECK(v[v.size() - 37] == 0);
+    for (uint8_t bad : { kRoomTypeCount, uint8_t{ 0x80 }, uint8_t{ 0xFF } }) {
+        v[v.size() - 37] = bad;
+        CHECK(!DecodeRoomState(v.data(), v.size(), out));
+    }
+    v[v.size() - 37] = static_cast<uint8_t>(RoomType::Friends);
+    CHECK(DecodeRoomState(v.data(), v.size(), out) && out.type == RoomType::Friends);
+
+    // The room code: the last 4 bytes. None in any room; a code value only in a directory room.
+    CHECK(RoomState().code == kNoRoomCode);
+    v = EncodeRoomState(RoomState());
+    CHECK(v[v.size() - 1] == 0xFF && v[v.size() - 4] == 0xFF);
+    for (RoomType type : { RoomType::Code, RoomType::Open, RoomType::Friends }) {
+        for (uint32_t code : { 0u, 12345u, kRoomCodeValues - 1 }) {
+            RoomState listed;
+            listed.type = type;
+            listed.code = code;
+            v = EncodeRoomState(listed);
+            CHECK(DecodeRoomState(v.data(), v.size(), out) && out == listed && out.code == code);
+        }
+        RoomState tooBig;
+        tooBig.type = type;
+        tooBig.code = kRoomCodeValues;
+        v = EncodeRoomState(tooBig);
+        CHECK(!DecodeRoomState(v.data(), v.size(), out));
+    }
+    RoomState lanCode;
+    lanCode.code = 7;
+    v = EncodeRoomState(lanCode);
+    CHECK(!DecodeRoomState(v.data(), v.size(), out));
+
+    // The lottery reveal: 32 bytes at the end, any value.
+    LotteryResult drawn;
+    drawn.track = 3;
+    const size_t bare = EncodeLottery(drawn).size();
+    drawn.salt[5] = 0x77;
+    v = EncodeLottery(drawn);
+    LotteryResult drawnOut;
+    CHECK(v.size() == bare && DecodeLottery(v.data(), v.size(), drawnOut) && drawnOut == drawn &&
+          drawnOut.salt[5] == 0x77);
+    v.pop_back();
+    CHECK(!DecodeLottery(v.data(), v.size(), drawnOut));
+
+    // The takeover secret rides after the token table; a short one does not decode.
+    Bytes32 secret{};
+    secret[0] = 0xAB;
+    secret[31] = 0xCD;
+    const std::vector<HandoverTokenEntry> tokens = { { 1, 5 }, { 3, 6 } };
+    v = EncodeHandoverTokens(tokens, secret);
+    std::vector<HandoverTokenEntry> tokensOut;
+    Bytes32 secretOut{};
+    CHECK(v.size() == 1 + 2 * 9 + 32 + 2 && DecodeHandoverTokens(v.data(), v.size(), tokensOut, secretOut) &&
+          tokensOut == tokens && secretOut == secret);
+    v.pop_back();
+    Bytes32 untouched{};
+    untouched[1] = 9;
+    CHECK(!DecodeHandoverTokens(v.data(), v.size(), tokensOut, untouched) && untouched[1] == 9 && untouched[0] == 0);
+}
+
+// O5.10: the host's takeover secret reaches the successor alone, and again when it changes.
+void TestTakeoverSecret() {
+    std::printf("the takeover secret goes to the successor only (O5.10)\n");
+    Lan lan;
+    lan.AddClient("Ana");
+    lan.AddClient("Bo");
+    lan.Settle();
+    CHECK(lan.host->Room(lan.now).successor == 1 && IsZero32(lan.clients[0]->TakeoverSecret()));
+    Bytes32 secret{};
+    secret[0] = 0x5A;
+    secret[31] = 0xA5;
+    lan.host->SetTakeoverSecret(secret);
+    lan.Tick(20);
+    CHECK(lan.clients[0]->TakeoverSecret() == secret && IsZero32(lan.clients[1]->TakeoverSecret()));
+    secret[1] = 0x11;
+    lan.host->SetTakeoverSecret(secret);
+    lan.Tick(20);
+    CHECK(lan.clients[0]->TakeoverSecret() == secret && IsZero32(lan.clients[1]->TakeoverSecret()));
+    CHECK(!lan.host->TakeSecretExposed()); // a new secret for the same successor exposes nothing
+
+    // The successor who holds the secret is kicked: it still knows the secret, so the host is told to replace
+    // it, once. The new successor gets the table at once, and the new secret when the listing hands it over.
+    lan.host->Kick(lan.clients[0]->LocalId(), lan.now);
+    lan.Tick(20);
+    CHECK(lan.host->Room(lan.now).successor == lan.clients[1]->LocalId());
+    CHECK(lan.host->TakeSecretExposed());
+    CHECK(!lan.host->TakeSecretExposed());
+    secret[2] = 0x22;
+    lan.host->SetTakeoverSecret(secret);
+    lan.Tick(20);
+    CHECK(lan.clients[1]->TakeoverSecret() == secret);
+    CHECK(!lan.host->TakeSecretExposed());
+}
+
+void TestUploadTotals() {
+    std::printf("upload totals (L2)\n");
+    Lan lan;
+    CHECK(lan.host->Upload().bytes == 0 && lan.host->Upload().links == 0);
+    LobbyClient& ana = lan.AddClient("Ana");
+    LobbyClient& bo = lan.AddClient("Bo");
+    lan.Settle();
+    CHECK(ana.GetState() == LobbyClient::State::Joined && bo.GetState() == LobbyClient::State::Joined);
+    const LobbyHost::UploadTotals two = lan.host->Upload();
+    CHECK(two.links == 2 && two.bytes > 0 && two.datagrams > 0);
+    // Every datagram carries at least the IPv4 header estimate.
+    CHECK(two.bytes >= two.datagrams * kUdpIpv4HeaderBytes);
+    ana.Leave(lan.now);
+    lan.Tick(40);
+    const LobbyHost::UploadTotals one = lan.host->Upload();
+    CHECK(one.links == 1 && one.bytes > two.bytes && one.datagrams > two.datagrams);
 }
 
 void TestOldVersionRefused() {
@@ -1860,7 +2991,8 @@ void TestHostChecksEveryMessage() {
     const Message* welcome = raw.Last(kMsgWelcome);
     CHECK(welcome != nullptr && DecodeWelcome(welcome->payload.data(), welcome->payload.size(), id) && id == 1);
     CHECK(raw.Count(kMsgRoster) >= 1 && raw.Count(kMsgRoom) >= 1);
-    CHECK(!raw.got.empty() && raw.got.front().type == kMsgWelcome); // the id comes before the roster
+    // The Nonce comes first, at the link; then the id, before the roster.
+    CHECK(raw.got.size() >= 2 && raw.got[0].type == kMsgNonce && raw.got[1].type == kMsgWelcome);
     CHECK(lan.host->Roster().size() == 2);
 
     uint32_t refused = lan.host->Refused();
@@ -2761,6 +3893,700 @@ void TestRacePoses() {
     CHECK(!ownSeen);
 }
 
+// A saved course with forks past 64 points, several chunks long, as in gdx_net_track_flow_tests.cpp.
+uint32_t Binding(const gdx::snapshot::Generation& g) {
+    return gdx_course_registry_crc32(reinterpret_cast<const unsigned char*>(g.courseId.data()), g.courseId.size());
+}
+
+bool BuildTrack(int count, std::vector<uint8_t>& bytes, track::TrackId& id) {
+    using gdx::snapshot::Metadata;
+    gdx::snapshot::Generation g;
+    g.disk = 0x1020304050607080ULL;
+    g.directory = 3;
+    g.courseId = "ROOM TEST.CRSD";
+    g.pointCount = uint8_t(count);
+    g.base.assign(gdx::snapshot::BaseBytes, 0);
+    g.base[1] = uint8_t(std::min(count, 64));
+    g.base[4] = 1;
+    for (size_t i = 16; i < gdx::snapshot::CourseBytes; i++) {
+        g.base[i] = uint8_t(i * 7);
+    }
+    gdx::snapshot::Bytes buffer(65536);
+    auto store = [&](Metadata section, int n) {
+        if (n > 0) {
+            g.metadata[size_t(section)].assign(buffer.begin(), buffer.begin() + n);
+        }
+    };
+    store(Metadata::Title, gdx_course_title_encode("Room test", Binding(g), buffer.data(), buffer.size()));
+    GdxCourseSettings settings{};
+    settings.ringCount = g.pointCount;
+    settings.magnetRange = 200;
+    store(Metadata::Settings, gdx_settings_encode(&settings, Binding(g), buffer.data(), buffer.size()));
+    GdxBranchSet forks{};
+    forks.ringCount = g.pointCount;
+    forks.extendedCount = count - 64;
+    forks.baseCrc = gdx_course_registry_crc32(g.base.data(), gdx::snapshot::CourseBytes);
+    std::memcpy(&forks.courseChecksum, g.base.data() + 4, 4);
+    for (int i = 0; i < forks.extendedCount; ++i) {
+        auto& p = forks.extended[i];
+        p.pos[0] = float(i * 10);
+        p.pos[1] = 250.0f;
+        p.pos[2] = float(i * 17);
+        p.radiusLeft = 100;
+        p.radiusRight = 200;
+        p.pit = p.dash = p.dirt = p.ice = p.jump = p.landmine = p.gate = p.building = p.sign = -1;
+    }
+    store(Metadata::Forks, gdx_branch_encode(&forks, Binding(g), buffer.data(), buffer.size()));
+    gdx::snapshot::Bytes content;
+    if (!gdx::snapshot::content(g, content)) {
+        return false;
+    }
+    bytes.assign(content.begin(), content.end());
+    id = track::Identify(bytes.data(), bytes.size());
+    return true;
+}
+
+// One copy's disk: its own tracks and its cache in one map.
+struct Disk {
+    std::map<track::TrackId, std::vector<uint8_t>> tracks;
+
+    TrackStore Store() {
+        TrackStore s;
+        s.load = [this](const track::TrackId& id, std::vector<uint8_t>& bytes) {
+            auto it = tracks.find(id);
+            if (it == tracks.end()) {
+                return false;
+            }
+            bytes = it->second;
+            return true;
+        };
+        s.store = [this](const track::TrackId& id, const std::vector<uint8_t>& bytes) { tracks[id] = bytes; };
+        return s;
+    }
+};
+
+// Host, Ana and Bo, driven to the phase, with Ana the successor. Results comes after a race run to its cap,
+// Ana first, the host second and Bo last.
+void DriveTo(Lan& lan, Phase phase) {
+    LobbyClient& ana = *lan.clients[0];
+    LobbyClient& bo = *lan.clients[1];
+    if (phase == Phase::Lobby) {
+        return;
+    }
+    CHECK(lan.host->Start(lan.now));
+    lan.Tick(10);
+    CHECK(lan.AllIn(Phase::Machine));
+    ana.Lock(LockOf(7, 1, 50));
+    lan.Tick(10);
+    if (phase == Phase::Machine) {
+        return;
+    }
+    bo.Lock(LockOf(9, 0, 50));
+    lan.Tick(10);
+    CHECK(lan.host->Lock(LockOf(2, 3, 50), lan.now));
+    lan.Tick(10);
+    CHECK(lan.AllIn(Phase::GridSync));
+    lan.LoadAll();
+    lan.Tick(10);
+    CHECK(lan.AllIn(Phase::Countdown));
+    if (phase == Phase::Countdown) {
+        return;
+    }
+    for (int i = 0; i < 1000 && lan.HostPhase() != Phase::Racing; i++) {
+        lan.Tick();
+    }
+    lan.Tick(10);
+    CHECK(lan.AllIn(Phase::Racing));
+    if (phase == Phase::Racing) {
+        return;
+    }
+    lan.CapRace({ 1, 0, 2 });
+    lan.Tick(60);
+    CHECK(lan.AllIn(Phase::Results));
+}
+
+const PlayerInfo* NamedIn(const std::vector<PlayerInfo>& roster, const std::string& name) {
+    for (const PlayerInfo& p : roster) {
+        if (p.name == name) {
+            return &p;
+        }
+    }
+    return nullptr;
+}
+
+// The host is lost in each phase of a race with Ana and Bo (D28.4). Ana hosts from her mirror; Bo comes back
+// under his id. Lobby: the room stays in the lobby. Machine: the track is chosen again under the same race
+// index. Countdown and Racing: that race scores nothing and the next is chosen under a new index. Results:
+// the page runs out on Ana's clock, then last place picks.
+void TestHostLostIn(Phase phase) {
+    std::printf("the host is lost in %s (D28.4)\n", PhaseName(phase));
+    Lan lan;
+    lan.AddClient("Ana");
+    lan.AddClient("Bo");
+    lan.Settle();
+    CHECK(lan.clients[0]->LocalId() == 1 && lan.clients[1]->LocalId() == 2);
+    DriveTo(lan, phase);
+    const RoomState was = lan.host->Room(lan.now);
+    CHECK(was.phase == phase && was.successor == 1);
+    const uint16_t boPoints = NamedIn(lan.host->Roster(), "Bo") != nullptr ? NamedIn(lan.host->Roster(), "Bo")->points : 0;
+    const uint16_t anaPoints =
+        NamedIn(lan.host->Roster(), "Ana") != nullptr ? NamedIn(lan.host->Roster(), "Ana")->points : 0;
+
+    lan.DropHost();
+    // Both find out after kLinkTimeoutMs of silence; Bo reaches Ana within a few frames.
+    lan.TickFollow(static_cast<int>(kLinkTimeoutMs / 16) + 60);
+    CHECK(lan.next != nullptr && lan.nextAt == 0);
+    if (lan.next == nullptr) {
+        return;
+    }
+    LobbyHost& next = *lan.next;
+    LobbyClient& bo = *lan.clients[1];
+    const uint32_t t = lan.now;
+    CHECK(lan.clients[0]->NextHost().kind == HandoverPlan::Kind::Promote);
+    CHECK(next.PromotedFrom() == 1 && next.RejoinCount() == 1 && !next.Closed());
+    CHECK(bo.GetState() == LobbyClient::State::Joined && bo.LocalId() == 2 && bo.Host() == lan.clientAddrs[0]);
+    CHECK(next.Roster().size() == 2 && next.Roster()[0].name == "Ana" && next.Roster()[0].host &&
+          next.Roster()[1].id == 2 && next.Roster()[1].name == "Bo");
+    CHECK(SameRoster(bo.Roster(), next.Roster()));
+    const RoomState s = next.Room(t);
+    CHECK(s.roomId == 77 && s.successor == 2 && s.successorPort == lan.clientAddrs[1].port);
+    // Bo holds a token from the new host, and as successor the table, which is empty: nobody else is left.
+    CHECK(bo.HandoverTokenOwn() != 0 && bo.HandoverTokenOwn() == next.TokenOf(2) && bo.HandoverTable().empty());
+    switch (phase) {
+    case Phase::Lobby:
+        CHECK(lan.NextIn(Phase::Lobby) && s.raceIndex == 0);
+        break;
+    case Phase::Machine:
+        CHECK(lan.NextIn(Phase::Machine) && s.raceIndex == 0 && !next.Roster()[0].locked);
+        break;
+    case Phase::Countdown:
+    case Phase::Racing:
+        CHECK(lan.NextIn(Phase::Machine) && s.raceIndex == was.raceIndex + 1);
+        CHECK(next.Roster()[0].points == 0 && next.Roster()[1].points == 0 && next.Results().entries.empty());
+        break;
+    case Phase::Results: {
+        CHECK(lan.NextIn(Phase::Results) && s.raceIndex == was.raceIndex);
+        CHECK(next.Roster()[0].points == anaPoints && anaPoints == 100 && next.Roster()[1].points == boPoints);
+        RaceResults table;
+        CHECK(bo.Results(table) && table.final && table.entries.size() == 2 && table.entries[0].id == kHostId);
+        for (int i = 0; i < 1000 && next.Room(lan.now).phase == Phase::Results; i++) {
+            lan.TickFollow(1);
+        }
+        lan.TickFollow(5); // Bo hears of it a frame later
+        CHECK(lan.NextIn(Phase::Pick) && next.Room(lan.now).picker == 2 &&
+              next.Room(lan.now).raceIndex == was.raceIndex + 1);
+        break;
+    }
+    default:
+        CHECK(false);
+        break;
+    }
+    // The window runs out with everyone back: nobody loses a seat, and the room goes on.
+    lan.TickFollow(static_cast<int>(kSuccessorWaitMs / 16));
+    CHECK(!next.Closed() && next.Roster().size() == 2 && bo.GetState() == LobbyClient::State::Joined);
+    CHECK(next.Refused() == 0 && bo.Refused() == 0);
+}
+
+// The host crashes after Ana finished (D28.6, decision 17): every copy held a table that gave her the win, but
+// it was not the final one. The race scores nothing, and the next is chosen under a new index.
+void TestHostLostAfterAFinish() {
+    std::printf("the host is lost after a racer finished (D28.6)\n");
+    Lan lan;
+    LobbyClient& ana = lan.AddClient("Ana");
+    lan.AddClient("Bo");
+    lan.Settle();
+    DriveTo(lan, Phase::Racing);
+    const uint16_t race = lan.host->Room(lan.now).raceIndex;
+    lan.Tick(1250); // twenty seconds of racing
+    StatePose last = PoseOf(1, 200);
+    last.lap = 3;
+    ana.SendPoses(0, { last });
+    lan.Tick(4);
+    const RoomState s = lan.host->Room(lan.now);
+    FinishReport report;
+    report.raceIndex = race;
+    report.kind = ResultKind::Finished;
+    report.timeMs = s.phaseTotalMs - s.phaseLeftMs;
+    ana.Finish(report);
+    lan.Tick(6);
+    RaceResults held;
+    CHECK(ana.Results(held) && !held.final && held.raceIndex == race && !held.entries.empty() &&
+          held.entries[0].id == 1 && held.entries[0].points == PlacePoints(1));
+    CHECK(NamedIn(lan.host->Roster(), "Ana")->points == 0);
+
+    lan.DropHost();
+    lan.TickFollow(static_cast<int>(kLinkTimeoutMs / 16) + 60);
+    CHECK(lan.next != nullptr && lan.nextAt == 0);
+    if (lan.next == nullptr) {
+        return;
+    }
+    LobbyHost& next = *lan.next;
+    LobbyClient& bo = *lan.clients[1];
+    CHECK(lan.NextIn(Phase::Machine) && next.Room(lan.now).raceIndex == race + 1);
+    CHECK(next.Roster().size() == 2 && next.Roster()[0].points == 0 && next.Roster()[1].points == 0);
+    CHECK(next.Results().entries.empty() && !bo.Results(held));
+    lan.TickFollow(static_cast<int>(kSuccessorWaitMs / 16));
+    CHECK(!next.Closed() && next.Roster().size() == 2 && next.Refused() == 0 && bo.Refused() == 0);
+}
+
+// A watcher who is gone too, a stranger with a made-up token, and a member who cannot reach the successor.
+void TestRejoinRefusals() {
+    std::printf("rejoin refusals and the end of the window (D28.4)\n");
+    Lan lan;
+    lan.AddClient("Ana");
+    lan.AddClient("Bo");
+    lan.AddClient("Wim", Seat::Watch);
+    lan.Settle();
+    CHECK(lan.clients[2]->LocalId() == 3 && lan.clients[2]->HandoverTokenOwn() != 0);
+    const uint64_t boToken = lan.clients[1]->HandoverTokenOwn();
+    // Wim's link goes with the host: he plans his way back but nothing he sends arrives.
+    lan.net.Cut(lan.clientAddrs[2]);
+    lan.DropHost();
+    lan.TickFollow(static_cast<int>(kLinkTimeoutMs / 16) + 60);
+    CHECK(lan.next != nullptr);
+    if (lan.next == nullptr) {
+        return;
+    }
+    LobbyHost& next = *lan.next;
+    CHECK(next.RejoinCount() == 1 && next.Roster().size() == 3 && NamedIn(next.Roster(), "Wim") != nullptr);
+    CHECK(lan.clients[2]->GetState() == LobbyClient::State::Connecting);
+
+    // A copy that names Bo's seat with the wrong token, and one that names Bo's seat with the right token
+    // while Bo is already back: both are refused, and Bo keeps his seat.
+    const auto stranger = [&](uint8_t id, uint64_t token, int index) {
+        const NetAddress addr = Addr(Ip(192, 168, 1, 90 + index), static_cast<uint16_t>(51000 + index));
+        auto c = std::make_unique<LobbyClient>(kBuild, Profile("Eve", 0x0000FF, 3), Seat::Race, lan.clientAddrs[0],
+                                               0x3000u + static_cast<uint32_t>(index), lan.net.SenderFor(addr));
+        LobbyClient* raw = c.get();
+        lan.net.Add(addr, [raw, &lan](const NetAddress& from, const uint8_t* d, size_t n) {
+            raw->Receive(from, d, n, lan.now);
+        });
+        HandoverPlan plan;
+        plan.kind = HandoverPlan::Kind::Rejoin;
+        plan.address = lan.clientAddrs[0];
+        plan.id = id;
+        plan.token = token;
+        plan.sinceMs = lan.now;
+        CHECK(c->SetRejoin(plan));
+        c->Start(lan.now);
+        for (int i = 0; i < 60; i++) {
+            lan.Tick();
+            raw->Update(lan.now);
+        }
+        CHECK(raw->GetState() == LobbyClient::State::Closed &&
+              raw->CloseText() == RejectReasonText(RejectReason::Rejoin));
+        lan.net.Cut(addr);
+        return c;
+    };
+    auto eve = stranger(2, boToken + 1, 0);
+    auto eve2 = stranger(2, boToken, 1);
+    auto eve3 = stranger(3, 0x1234, 2);
+    CHECK(next.RejoinCount() == 1 && next.Roster().size() == 3);
+    CHECK(lan.clients[1]->GetState() == LobbyClient::State::Joined && lan.clients[1]->LocalId() == 2);
+    // A plan that is not a rejoin is refused.
+    HandoverPlan none;
+    CHECK(!eve->SetRejoin(none));
+
+    // The window ends: Wim's seat is freed and the room goes on with Ana and Bo. Wim gave up first.
+    lan.TickFollow(static_cast<int>(kSuccessorWaitMs / 16));
+    CHECK(!next.Closed() && next.Roster().size() == 2 && NamedIn(next.Roster(), "Wim") == nullptr);
+    CHECK(SameRoster(lan.clients[1]->Roster(), next.Roster()));
+    CHECK(lan.clients[2]->GetState() == LobbyClient::State::Closed &&
+          lan.clients[2]->CloseText() == "The host left, and the next host did not answer. The room is closed.");
+    CHECK(next.RejoinTokenOf(3) == 0 && next.RejoinTokenOf(2) == 0);
+}
+
+// Four racers and a vote: the vote starts over on Ana's host under the same race index, with no ballots.
+void TestHostLostInVote() {
+    std::printf("the host is lost during a vote (D28.4)\n");
+    Lan lan;
+    lan.AddClient("Ana");
+    lan.AddClient("Bo");
+    lan.AddClient("Cy");
+    lan.AddClient("Dee");
+    lan.Settle();
+    CHECK(lan.host->Start(lan.now));
+    lan.Tick(10);
+    CHECK(lan.AllIn(Phase::Voting));
+    lan.clients[1]->Vote(3);
+    CHECK(lan.host->Vote(5, lan.now));
+    lan.Tick(10);
+    CHECK(lan.host->Votes().size() == 2 && lan.clients[2]->Votes().size() == 2);
+    lan.DropHost();
+    lan.TickFollow(static_cast<int>(kLinkTimeoutMs / 16) + 60);
+    CHECK(lan.next != nullptr && lan.nextAt == 0);
+    if (lan.next == nullptr) {
+        return;
+    }
+    LobbyHost& next = *lan.next;
+    CHECK(next.RejoinCount() == 3 && next.Roster().size() == 4 && lan.NextIn(Phase::Voting));
+    const RoomState s = next.Room(lan.now);
+    CHECK(s.raceIndex == 0 && s.phaseTotalMs == kVoteMs && next.Votes().empty());
+    for (size_t i = 1; i < 4; i++) {
+        CHECK(lan.clients[i]->GetState() == LobbyClient::State::Joined && lan.clients[i]->Votes().empty());
+        CHECK(static_cast<size_t>(lan.clients[i]->LocalId()) == i + 1);
+    }
+    // The vote works as before: all four ballots close it.
+    CHECK(next.Vote(3, lan.now));
+    for (size_t i = 1; i < 4; i++) {
+        lan.clients[i]->Vote(3);
+    }
+    lan.TickFollow(10);
+    CHECK(lan.NextIn(Phase::Lottery) && next.Lottery().track == 3);
+}
+
+// A custom track on its way to Dee when the host is lost: that race is skipped, and the stream with it.
+void TestHostLostInAssets() {
+    std::printf("the host is lost while a custom track is on its way (D28.4)\n");
+    std::vector<uint8_t> bytes;
+    track::TrackId id{};
+    CHECK(BuildTrack(90, bytes, id));
+    Disk hostDisk;
+    Disk anaDisk;
+    Disk boDisk;
+    Disk cyDisk;
+    Disk deeDisk;
+    hostDisk.tracks[id] = bytes;
+    anaDisk.tracks[id] = bytes;
+    boDisk.tracks[id] = bytes;
+    cyDisk.tracks[id] = bytes;
+    Lan lan("Host", 77, HackIdentity(), hostDisk.Store());
+    lan.AddClient("Ana", Seat::Race, kBuild, 0x00FF00, anaDisk.Store());
+    lan.AddClient("Bo", Seat::Race, kBuild, 0x00FF00, boDisk.Store());
+    lan.AddClient("Cy", Seat::Race, kBuild, 0x00FF00, cyDisk.Store());
+    lan.AddClient("Dee", Seat::Race, kBuild, 0x00FF00, deeDisk.Store());
+    lan.Settle();
+    CHECK(lan.host->SetCustomTracks(true, lan.now));
+    CHECK(lan.host->Start(lan.now));
+    lan.Tick(10);
+    CHECK(lan.AllIn(Phase::Voting));
+    TrackChoice custom;
+    custom.track = kTrackCustom;
+    std::copy(id.begin(), id.end(), custom.custom.id.begin());
+    custom.custom.title = "Room test";
+    // Every ballot names the track, so the lottery draws it whoever wins. Dee does not vote.
+    CHECK(lan.host->Vote(custom, lan.now));
+    for (size_t i = 0; i < 3; i++) {
+        lan.clients[i]->Vote(custom);
+    }
+    for (int i = 0; i < 2500 && lan.HostPhase() == Phase::Voting; i++) {
+        lan.Tick();
+    }
+    CHECK(lan.HostPhase() == Phase::Lottery && lan.host->Lottery().track == kTrackCustom);
+    // From here Dee gets the first two chunks and then nothing large: her download stops part of the way.
+    const NetAddress dee = lan.clientAddrs[3];
+    int large = 0;
+    lan.net.SetFilter([&](const NetAddress& from, const NetAddress& to, size_t len) {
+        // Only a datagram with a whole chunk in it: the room messages coalesce to over 600 bytes since protocol 7.
+        return from == lan.hostAddr && to == dee && len > transfer::kChunkData && ++large > 2;
+    });
+    CHECK(lan.host->SkipLottery(lan.now));
+    lan.Tick(10);
+    CHECK(lan.host->Lock(LockOf(2, 3, 50), lan.now));
+    for (size_t i = 0; i < 4; i++) {
+        lan.clients[i]->Lock(LockOf(7, 0, 50));
+    }
+    lan.Tick(30);
+    CHECK(lan.HostPhase() == Phase::Assets && !lan.host->HoldsTrack(4) && lan.host->HoldsTrack(1));
+    const TrackProgress part = lan.clients[3]->Track();
+    CHECK(part.active && !part.held && part.chunks == 2 && part.of > 2);
+
+    lan.DropHost();
+    lan.net.SetFilter(nullptr);
+    lan.TickFollow(static_cast<int>(kLinkTimeoutMs / 16) + 60);
+    CHECK(lan.next != nullptr && lan.nextAt == 0);
+    if (lan.next == nullptr) {
+        return;
+    }
+    LobbyHost& next = *lan.next;
+    const RoomState s = next.Room(lan.now);
+    CHECK(next.RejoinCount() == 3 && next.Roster().size() == 4);
+    CHECK(lan.NextIn(Phase::Voting) && s.raceIndex == 1 && s.customTracks && s.track == kTrackNone);
+    CHECK(!lan.clients[3]->Track().active && !lan.clients[3]->Track().held);
+    CHECK(deeDisk.tracks.empty() && next.Track().active == false);
+}
+
+// Ana loses her own link while the host lives (decision 22). She promotes all the same; Bo and Cy still hear
+// the host and stay. Nobody comes back to Ana, so her room closes at the end of the window, and the host's
+// room goes on with Bo as the successor.
+void TestSuccessorAlone() {
+    std::printf("a successor that lost only its own link closes (D28.4)\n");
+    Lan lan;
+    lan.AddClient("Ana");
+    lan.AddClient("Bo");
+    lan.AddClient("Cy");
+    lan.Settle();
+    const NetAddress ana = lan.clientAddrs[0];
+    CHECK(lan.host->Room(lan.now).successor == 1 && !lan.clients[0]->HandoverTable().empty());
+    lan.net.SetFilter([&](const NetAddress& from, const NetAddress& to, size_t) {
+        return (from == ana && to == lan.hostAddr) || (from == lan.hostAddr && to == ana);
+    });
+    lan.TickFollow(static_cast<int>(kLinkTimeoutMs / 16) + 60);
+    CHECK(lan.next != nullptr && lan.nextAt == 0);
+    if (lan.next == nullptr) {
+        return;
+    }
+    LobbyHost& next = *lan.next;
+    CHECK(lan.host->Roster().size() == 3 && NamedIn(lan.host->Roster(), "Ana") == nullptr);
+    CHECK(lan.host->Room(lan.now).successor == 2);
+    CHECK(lan.clients[1]->GetState() == LobbyClient::State::Joined && lan.clients[1]->Host() == lan.hostAddr);
+    CHECK(lan.clients[1]->HandoverTable().size() == 1 && lan.clients[1]->HandoverTable()[0].id == 3);
+    CHECK(!next.Closed() && next.RejoinCount() == 0);
+    lan.TickFollow(static_cast<int>(kSuccessorWaitMs / 16) + 10);
+    CHECK(next.Closed() && next.CloseText() == "Lost the connection to the room." && next.RejoinCount() == 0);
+    CHECK(lan.clients[1]->GetState() == LobbyClient::State::Joined && lan.clients[2]->GetState() == LobbyClient::State::Joined);
+    CHECK(lan.host->Roster().size() == 3 && lan.AllIn(Phase::Lobby));
+}
+
+// Decision 60: in a directory room, a member goes back only to a successor address it may send to.
+void TestHandoverDialable() {
+    std::printf("a directory room's member refuses a successor it should not send to (decision 60)\n");
+    // Pass 0: an Open room, the successor on loopback, refused. Pass 1: the same with a local test directory.
+    // Pass 2: a LAN room, never checked.
+    for (int pass = 0; pass < 3; pass++) {
+        Lan lan("Host", 82, {}, TrackStore(), pass == 2 ? RoomType::Lan : RoomType::Open);
+        lan.clientAt = Addr(Ip(127, 0, 0, 1), 50000);
+        lan.AddClient("Ana");
+        lan.AddClient("Bo");
+        if (pass == 1) {
+            lan.clients[1]->AllowLoopback(true);
+        }
+        lan.Settle();
+        CHECK(lan.host->Room(lan.now).successor == 1 &&
+              lan.clients[1]->GetState() == LobbyClient::State::Joined);
+        lan.DropHost();
+        lan.Tick(static_cast<int>(kLinkTimeoutMs / 16) + 30);
+        CHECK(lan.clients[0]->GetState() == LobbyClient::State::Closed &&
+              lan.clients[0]->NextHost().kind == HandoverPlan::Kind::Promote);
+        const HandoverPlan plan = lan.clients[1]->NextHost();
+        CHECK(lan.clients[1]->GetState() == LobbyClient::State::Closed);
+        if (pass == 0) {
+            CHECK(plan.kind == HandoverPlan::Kind::None);
+            CHECK(lan.clients[1]->CloseText().find("does not send to") != std::string::npos);
+        } else {
+            CHECK(plan.kind == HandoverPlan::Kind::Rejoin && plan.address == lan.clientAddrs[0]);
+        }
+    }
+}
+
+// A member with no token, and a successor with nobody to host, have nothing to go back to.
+void TestNothingToFollow() {
+    std::printf("no plan without a token or anyone to host (D28.4)\n");
+    Lan lan;
+    lan.AddClient("Ana");
+    lan.Settle();
+    CHECK(lan.clients[0]->HandoverTable().empty());
+    lan.DropHost();
+    lan.TickFollow(static_cast<int>(kLinkTimeoutMs / 16) + 60);
+    CHECK(lan.clients[0]->GetState() == LobbyClient::State::Closed &&
+          lan.clients[0]->NextHost().kind == HandoverPlan::Kind::None &&
+          lan.clients[0]->CloseText() == "Lost the connection to the host.");
+    CHECK(lan.next == nullptr);
+}
+
+// Ticks until the old host has handed the room over and gone, following every plan as it comes. Returns the
+// frames it took; texts collects what each client said when it closed, before it was replaced.
+int TickUntilHandedOver(Lan& lan, std::vector<std::string>& texts, int limit) {
+    texts.assign(lan.clients.size(), std::string());
+    for (int frame = 1; frame <= limit; frame++) {
+        lan.Tick();
+        for (size_t i = 0; i < lan.clients.size(); i++) {
+            const bool fresh = lan.followed.size() <= i || !lan.followed[i];
+            if (fresh && lan.clients[i]->GetState() == LobbyClient::State::Closed) {
+                texts[i] = lan.clients[i]->CloseText();
+            }
+        }
+        lan.FollowPlans();
+        if (lan.host->Closed()) {
+            return frame;
+        }
+    }
+    return limit + 1;
+}
+
+// The host leaves mid-race (D28.5, decision 17): its machine is out and its CPUs with it, but the race runs
+// to its results under the old host, and only then does the room go to Ana, at once and not after the silence.
+void TestHostLeavesMidRace() {
+    std::printf("the host leaves mid-race and the room goes on (D28.5)\n");
+    Lan lan;
+    lan.AddClient("Ana");
+    lan.AddClient("Bo");
+    lan.Settle();
+    DriveTo(lan, Phase::Racing);
+    const uint16_t race = lan.host->Room(lan.now).raceIndex;
+    FinishReport out;
+    out.raceIndex = race;
+    out.kind = ResultKind::Retired;
+    CHECK(lan.host->Finish(out, lan.now));
+    CHECK(lan.host->HostLeftRace(lan.now));
+    lan.host->Leave(lan.now);
+    CHECK(lan.host->Leaving() && !lan.host->Closed() && lan.host->Successor() == 1);
+
+    // Ten seconds on, the race still runs under the old host and nobody was told to move.
+    lan.Tick(625);
+    CHECK(lan.AllIn(Phase::Racing) && !lan.host->Closed());
+    CHECK(lan.clients[0]->GetState() == LobbyClient::State::Joined &&
+          lan.clients[1]->GetState() == LobbyClient::State::Joined);
+    CHECK(lan.clients[0]->NextHost().kind == HandoverPlan::Kind::None);
+
+    // The race ends; the results go out, and with them the Handover.
+    lan.CapRace({ 1, 2 });
+    CHECK(lan.host->Results().final && lan.host->Results().entries.size() == 3);
+    std::vector<std::string> texts;
+    const int frames = TickUntilHandedOver(lan, texts, static_cast<int>(kHandoverLingerMs / 16) + 30);
+    CHECK(lan.host->Closed() && lan.host->CloseText() == "You left the room. Ana hosts it now.");
+    CHECK(texts[1] == "The host left the room.");
+    CHECK(frames * 16 < static_cast<int>(kLinkTimeoutMs)); // the message, not the silence
+    CHECK(lan.next != nullptr && lan.nextAt == 0);
+    if (lan.next == nullptr) {
+        return;
+    }
+    lan.TickFollow(30);
+    LobbyHost& next = *lan.next;
+    LobbyClient& bo = *lan.clients[1];
+    CHECK(next.RejoinCount() == 1 && bo.GetState() == LobbyClient::State::Joined && bo.LocalId() == 2);
+    CHECK(next.Roster().size() == 2 && NamedIn(next.Roster(), "Host") == nullptr);
+    // The race scored: Ana and Bo keep the points it gave them. The old host's row left the table with it.
+    const PlayerInfo* ana = NamedIn(next.Roster(), "Ana");
+    const PlayerInfo* bob = NamedIn(next.Roster(), "Bo");
+    CHECK(ana != nullptr && bob != nullptr && ana->points == PlacePoints(1) && bob->points == PlacePoints(2));
+    RaceResults table;
+    CHECK(bo.Results(table) && table.final && table.raceIndex == race && table.entries.size() == 2);
+    CHECK(lan.NextIn(Phase::Results) && next.Room(lan.now).raceIndex == race);
+    for (int i = 0; i < 1000 && next.Room(lan.now).phase == Phase::Results; i++) {
+        lan.TickFollow(1);
+    }
+    lan.TickFollow(5);
+    CHECK(lan.NextIn(Phase::Pick) && next.Room(lan.now).raceIndex == race + 1);
+    lan.TickFollow(static_cast<int>(kSuccessorWaitMs / 16));
+    CHECK(!next.Closed() && next.Roster().size() == 2 && next.Refused() == 0 && bo.Refused() == 0);
+}
+
+// Between races the room goes over at once. With nobody to host it, Leave is a close.
+void TestHostLeavesBetweenRaces() {
+    std::printf("the host leaves between races (D28.5)\n");
+    {
+        Lan lan;
+        lan.AddClient("Ana");
+        lan.AddClient("Bo");
+        lan.AddClient("Cy", Seat::Watch);
+        lan.Settle();
+        lan.host->Leave(lan.now);
+        lan.host->Leave(lan.now); // the second call changes nothing
+        CHECK(lan.host->Leaving() && !lan.host->Closed());
+        std::vector<std::string> texts;
+        const int frames = TickUntilHandedOver(lan, texts, static_cast<int>(kHandoverLingerMs / 16) + 30);
+        CHECK(lan.host->Closed() && frames * 16 <= static_cast<int>(kHandoverLingerMs) + 32);
+        CHECK(texts[0] == "The host left the room." && texts[1] == texts[0] && texts[2] == texts[0]);
+        lan.TickFollow(30);
+        CHECK(lan.next != nullptr && lan.nextAt == 0);
+        if (lan.next != nullptr) {
+            CHECK(lan.next->RejoinCount() == 2 && lan.next->Roster().size() == 3);
+            CHECK(lan.clients[1]->LocalId() == 2 && lan.clients[2]->LocalId() == 3);
+            CHECK(lan.NextIn(Phase::Lobby) && lan.next->Room(lan.now).successor == 2);
+        }
+        // The old host answers nobody now, not even a search.
+        const size_t before = lan.host->PeerCount();
+        lan.host->Update(lan.now);
+        CHECK(before == 0 && lan.host->PeerCount() == 0);
+    }
+    {
+        // Ana alone is the successor with nobody to host: she is told, and the room ends with the host gone.
+        Lan lan;
+        lan.AddClient("Ana");
+        lan.Settle();
+        lan.host->Leave(lan.now);
+        std::vector<std::string> texts;
+        TickUntilHandedOver(lan, texts, static_cast<int>(kHandoverLingerMs / 16) + 30);
+        CHECK(lan.host->Closed() && texts[0] == "The host left the room." && lan.next == nullptr);
+        CHECK(lan.clients[0]->NextHost().kind == HandoverPlan::Kind::None);
+    }
+    {
+        Lan lan;
+        lan.Settle();
+        lan.host->Leave(lan.now);
+        CHECK(lan.host->Closed() && lan.host->CloseText() == "You closed the room. Nobody was left to host it.");
+    }
+}
+
+void TestHandoverTokens() {
+    std::printf("handover tokens and a promoted host (D28.3)\n");
+    Lan lan;
+    uint64_t next = 0x1000;
+    lan.host->SetTokenSource([&next]() { return ++next; });
+    LobbyClient& ana = lan.AddClient("Ana");
+    LobbyClient& bo = lan.AddClient("Bo");
+    LobbyClient& wim = lan.AddClient("Wim", Seat::Watch);
+    lan.Settle();
+    const uint8_t anaId = ana.LocalId();
+    const uint8_t boId = bo.LocalId();
+    const uint8_t wimId = wim.LocalId();
+
+    // Each member holds a token of its own, the one the host keeps for that id.
+    CHECK(ana.HandoverTokenOwn() != 0 && ana.HandoverTokenOwn() == lan.host->TokenOf(anaId));
+    CHECK(bo.HandoverTokenOwn() != 0 && bo.HandoverTokenOwn() == lan.host->TokenOf(boId));
+    CHECK(wim.HandoverTokenOwn() != 0 && wim.HandoverTokenOwn() == lan.host->TokenOf(wimId));
+    CHECK(ana.HandoverTokenOwn() != bo.HandoverTokenOwn() && bo.HandoverTokenOwn() != wim.HandoverTokenOwn());
+    CHECK(lan.host->TokenOf(kHostId) == 0);
+    // The first racer to join is next, and only it holds the table, which leaves out its own token.
+    CHECK(lan.host->Room(lan.now).successor == anaId && bo.Room(lan.now).successor == anaId);
+    CHECK(bo.HandoverTable().empty() && wim.HandoverTable().empty());
+    const std::vector<HandoverTokenEntry>& table = ana.HandoverTable();
+    CHECK(table.size() == 2);
+    CHECK(table.size() == 2 && table[0].id == boId && table[0].token == bo.HandoverTokenOwn() &&
+          table[1].id == wimId && table[1].token == wim.HandoverTokenOwn());
+
+    // A member leaves: every token is reissued, and the table follows.
+    const uint64_t anaOld = ana.HandoverTokenOwn();
+    const uint64_t boOld = bo.HandoverTokenOwn();
+    wim.Leave(lan.now);
+    lan.Tick(20);
+    CHECK(lan.host->TokenOf(wimId) == 0);
+    CHECK(ana.HandoverTokenOwn() != anaOld && ana.HandoverTokenOwn() == lan.host->TokenOf(anaId));
+    CHECK(bo.HandoverTokenOwn() != boOld && bo.HandoverTokenOwn() == lan.host->TokenOf(boId));
+    CHECK(ana.HandoverTable().size() == 1);
+    CHECK(ana.HandoverTable().size() == 1 && ana.HandoverTable()[0].id == boId &&
+          ana.HandoverTable()[0].token == bo.HandoverTokenOwn());
+
+    // Ana's mirror becomes a host of its own: Ana is player 0, Bo keeps his seat and id and has to come
+    // back with his token, and the room keeps its id.
+    std::optional<RoomMachine> machine = RoomMachine::Promote(ana.Mirror(lan.now), anaId, lan.now);
+    CHECK(machine.has_value());
+    if (!machine.has_value()) {
+        return;
+    }
+    const NetAddress newAddr = Addr(Ip(192, 168, 1, 40), 50040);
+    LobbyHost promoted(kBuild, Profile("Ana", 0x00FF00, 3), newAddr.port, std::move(*machine), ana.HandoverTable(),
+                       anaId, lan.net.SenderFor(newAddr));
+    lan.net.Add(newAddr,
+                [&](const NetAddress& from, const uint8_t* d, size_t n) { promoted.Receive(from, d, n, lan.now); });
+    CHECK(promoted.PromotedFrom() == anaId);
+    CHECK(promoted.RejoinTokenOf(boId) == bo.HandoverTokenOwn());
+    CHECK(promoted.RejoinTokenOf(kHostId) == 0 && promoted.RejoinTokenOf(anaId) == 0 &&
+          promoted.RejoinTokenOf(wimId) == 0);
+    CHECK(promoted.Roster().size() == 2 && promoted.Roster()[0].id == kHostId &&
+          promoted.Roster()[0].name == "Ana" && promoted.Roster()[1].id == boId);
+    CHECK(promoted.Room(lan.now).roomId == 77 && promoted.Room(lan.now).phase == Phase::Lobby);
+
+    // It takes a new member like any host. Bo holds his seat without a link, so the newcomer is next.
+    const NetAddress cyAddr = Addr(Ip(192, 168, 1, 41), 50041);
+    LobbyClient cy(kBuild, Profile("Cy", 0x0000FF, 3), Seat::Race, newAddr, 0x2000, lan.net.SenderFor(cyAddr));
+    lan.net.Add(cyAddr, [&](const NetAddress& from, const uint8_t* d, size_t n) { cy.Receive(from, d, n, lan.now); });
+    cy.Start(lan.now);
+    for (int i = 0; i < 90; i++) {
+        lan.now += 16;
+        lan.net.Step();
+        promoted.Update(lan.now);
+        cy.Update(lan.now);
+    }
+    CHECK(cy.GetState() == LobbyClient::State::Joined);
+    CHECK(cy.Roster().size() == 3 && cy.Room(lan.now).roomId == 77);
+    CHECK(cy.LocalId() != boId && cy.LocalId() != kHostId);
+    CHECK(cy.HandoverTokenOwn() != 0 && cy.HandoverTokenOwn() == promoted.TokenOf(cy.LocalId()));
+    CHECK(cy.Room(lan.now).successor == cy.LocalId());
+    CHECK(promoted.TokenOf(boId) == 0 && promoted.RejoinTokenOf(boId) == bo.HandoverTokenOwn());
+}
+
 void TestBrowser() {
     std::printf("browser\n");
     Lan lan("LanHost");
@@ -2807,31 +4633,526 @@ void TestBrowser() {
 
 } // namespace
 
+// ---- O7.3: friend keys and the join proof ----
+
+using Seed = std::array<unsigned char, gdx::net::friends::kSeedBytes>;
+
+Seed SeedOf(unsigned char b) {
+    Seed seed;
+    seed.fill(b);
+    return seed;
+}
+
+Bytes32 FriendKeyOf(const Seed& seed) {
+    gdx::net::friends::Key key{};
+    gdx::net::friends::DeriveFriendKey(seed.data(), key);
+    Bytes32 out{};
+    std::memcpy(out.data(), key.data(), out.size());
+    return out;
+}
+
+enum class Tamper { None, Proof, Room, Host };
+
+// What the game's signer does with a profile seed, or one of the ways a proof goes wrong.
+JoinSigner SignerOf(const Seed& seed, Tamper tamper = Tamper::None) {
+    return [seed, tamper](const JoinNonce& nonce, Bytes32& key, std::array<uint8_t, 64>& proof) {
+        gdx::net::friends::Key host{};
+        gdx::net::friends::Nonce bytes{};
+        gdx::net::friends::Signature signature{};
+        std::memcpy(host.data(), nonce.hostKey.data(), host.size());
+        std::memcpy(bytes.data(), nonce.nonce.data(), bytes.size());
+        if (tamper == Tamper::Host) {
+            host[0] ^= 1;
+        }
+        const uint32_t room = tamper == Tamper::Room ? nonce.roomId + 1 : nonce.roomId;
+        gdx::net::friends::JoinProofSign(seed.data(), room, host, bytes, signature);
+        if (tamper == Tamper::Proof) {
+            signature[10] ^= 0x40;
+        }
+        key = FriendKeyOf(seed);
+        std::memcpy(proof.data(), signature.data(), proof.size());
+        return true;
+    };
+}
+
+void SignNext(Lan& lan, const Seed& seed, Tamper tamper = Tamper::None) {
+    lan.clientSigner = SignerOf(seed, tamper);
+    lan.clientKey = FriendKeyOf(seed);
+}
+
+bool ClosedWith(const LobbyClient& c, RejectReason reason) {
+    return c.GetState() == LobbyClient::State::Closed && c.CloseText() == RejectReasonText(reason);
+}
+
+void TestKeyCodecs() {
+    std::printf("nonce and keys codecs (O7.3)\n");
+    JoinNonce nonce;
+    nonce.roomId = 0xA1B2C3D4u;
+    nonce.hostKey = FriendKeyOf(SeedOf(1));
+    nonce.nonce.fill(0x5A);
+    std::vector<uint8_t> bytes = EncodeNonce(nonce);
+    JoinNonce back;
+    CHECK(bytes.size() == 68 && DecodeNonce(bytes.data(), bytes.size(), back) && back == nonce);
+    bytes.push_back(0);
+    CHECK(!DecodeNonce(bytes.data(), bytes.size(), back));
+    bytes.resize(67);
+    CHECK(!DecodeNonce(bytes.data(), bytes.size(), back));
+
+    const std::vector<MemberKey> keys = { { 0, FriendKeyOf(SeedOf(1)) }, { 3, FriendKeyOf(SeedOf(2)) } };
+    std::vector<MemberKey> got;
+    bytes = EncodeKeys(keys);
+    CHECK(bytes.size() == 1 + 2 * 33 && DecodeKeys(bytes.data(), bytes.size(), got) && got == keys);
+    CHECK(DecodeKeys(EncodeKeys({}).data(), 1, got) && got.empty());
+    // Ids out of order, twice, past the last seat, and an all-zero key are refused.
+    const std::vector<std::vector<MemberKey>> bad = {
+        { keys[1], keys[0] },
+        { keys[0], { 0, keys[1].key } },
+        { { static_cast<uint8_t>(kMaxPlayers), keys[0].key } },
+        { { 2, Bytes32{} } },
+    };
+    for (const std::vector<MemberKey>& list : bad) {
+        got = keys;
+        bytes = EncodeKeys(list);
+        CHECK(!DecodeKeys(bytes.data(), bytes.size(), got) && got == keys);
+    }
+    bytes = EncodeKeys(keys);
+    bytes.push_back(0);
+    CHECK(!DecodeKeys(bytes.data(), bytes.size(), got));
+
+    // A Join round trips its key and proof; a proof with no key is refused.
+    JoinRequest join;
+    join.build = kBuild;
+    join.name = "Ana";
+    join.colour = 0x112233;
+    join.machine = 4;
+    join.key = FriendKeyOf(SeedOf(2));
+    join.proof.fill(0x33);
+    bytes = EncodeJoin(join);
+    JoinRequest read;
+    CHECK(DecodeJoin(bytes.data(), bytes.size(), read) && read.key == join.key && read.proof == join.proof);
+    join.key = Bytes32{};
+    bytes = EncodeJoin(join);
+    CHECK(!DecodeJoin(bytes.data(), bytes.size(), read));
+    join.proof.fill(0);
+    bytes = EncodeJoin(join);
+    CHECK(DecodeJoin(bytes.data(), bytes.size(), read) && IsZero32(read.key));
+}
+
+// A LAN room lets in a key with a good proof and a copy with none; every member learns the keys; the host bans a
+// key and that key stays out.
+void TestKeysInARoom() {
+    std::printf("keys in a room and ban by key (O7.3)\n");
+    const Seed hostSeed = SeedOf(1);
+    const Seed anaSeed = SeedOf(2);
+    Lan lan;
+    lan.host->SetIdentity(FriendKeyOf(hostSeed));
+    SignNext(lan, anaSeed);
+    LobbyClient& ana = lan.AddClient("Ana");
+    LobbyClient& bo = lan.AddClient("Bo");
+    lan.Settle();
+    CHECK(ana.GetState() == LobbyClient::State::Joined && bo.GetState() == LobbyClient::State::Joined);
+    const std::vector<MemberKey> keys = lan.host->Keys();
+    CHECK(keys.size() == 2 && keys[0].id == kHostId && keys[0].key == FriendKeyOf(hostSeed));
+    CHECK(keys.size() == 2 && keys[1].id == ana.LocalId() && keys[1].key == FriendKeyOf(anaSeed));
+    CHECK(ana.Keys() == keys && bo.Keys() == keys);
+
+    CHECK(lan.host->Ban(ana.LocalId(), lan.now));
+    lan.Settle();
+    CHECK(ClosedWith(ana, RejectReason::Banned));
+    CHECK(lan.host->Banned().size() == 1 && lan.host->Banned()[0] == FriendKeyOf(anaSeed));
+    CHECK(bo.Keys().size() == 1 && bo.Keys()[0].id == kHostId); // a member who goes takes its key along
+
+    // The key is refused when it comes back, under any name.
+    SignNext(lan, anaSeed);
+    LobbyClient& again = lan.AddClient("Anna");
+    lan.Settle();
+    CHECK(ClosedWith(again, RejectReason::Banned));
+    CHECK(lan.host->Roster().size() == 2);
+
+    // A player with no key is removed, and nothing is added to the list. Nobody else can be banned.
+    CHECK(lan.host->Ban(bo.LocalId(), lan.now));
+    lan.Settle();
+    CHECK(ClosedWith(bo, RejectReason::Banned) && lan.host->Banned().size() == 1);
+    // Its address is refused instead, from any port; so is Ana's, even with no key. Another address still joins.
+    lan.clientAt = Addr(Ip(192, 168, 1, 21), 50999);
+    LobbyClient& boAgain = lan.AddClient("Bo");
+    lan.clientAt = Addr(Ip(192, 168, 1, 20), 50998);
+    LobbyClient& anaKeyless = lan.AddClient("Ana");
+    LobbyClient& cy = lan.AddClient("Cy");
+    lan.Settle();
+    CHECK(ClosedWith(boAgain, RejectReason::Banned) && ClosedWith(anaKeyless, RejectReason::Banned));
+    CHECK(cy.GetState() == LobbyClient::State::Joined);
+    CHECK(!lan.host->Ban(kHostId, lan.now) && !lan.host->Ban(9, lan.now) && !lan.host->Ban(200, lan.now));
+}
+
+// A Friends room admits the keys on its host's list, and only with a proof made for this room, this host and this
+// link's nonce.
+void TestFriendsRoom() {
+    std::printf("a room for friends (O7.3)\n");
+    const Seed hostSeed = SeedOf(1);
+    const Seed anaSeed = SeedOf(2);
+    const Seed boSeed = SeedOf(3);
+    Lan lan("Host", 78, {}, TrackStore(), RoomType::Friends);
+    lan.host->SetIdentity(FriendKeyOf(hostSeed));
+    lan.host->SetFriends({ FriendKeyOf(anaSeed) });
+    SignNext(lan, anaSeed);
+    LobbyClient& ana = lan.AddClient("Ana");
+    SignNext(lan, boSeed);
+    LobbyClient& bo = lan.AddClient("Bo");
+    LobbyClient& none = lan.AddClient("Cy");
+    SignNext(lan, anaSeed, Tamper::Proof);
+    LobbyClient& forged = lan.AddClient("Dee");
+    SignNext(lan, anaSeed, Tamper::Room);
+    LobbyClient& elsewhere = lan.AddClient("Eve");
+    SignNext(lan, anaSeed, Tamper::Host);
+    LobbyClient& otherHost = lan.AddClient("Fay");
+    lan.Settle();
+    CHECK(ana.GetState() == LobbyClient::State::Joined);
+    CHECK(ClosedWith(bo, RejectReason::NotFriend));        // a key the host never added
+    CHECK(ClosedWith(none, RejectReason::NotFriend));      // no key at all
+    CHECK(ClosedWith(forged, RejectReason::BadProof));     // a listed key, and a signature that does not check
+    CHECK(ClosedWith(elsewhere, RejectReason::BadProof));  // a proof made for another room
+    CHECK(ClosedWith(otherHost, RejectReason::BadProof));  // a proof made for another host
+    CHECK(lan.host->Roster().size() == 2);
+
+    // A proof that was good on one link does not open another: each link signs its own nonce.
+    RawPeer first(lan, 230, kProtocolVersion);
+    RawPeer second(lan, 231, kProtocolVersion);
+    for (int i = 0; i < 20; i++) {
+        lan.Tick();
+        first.Turn();
+        second.Turn();
+    }
+    const Message* seen = first.Last(kMsgNonce);
+    JoinNonce nonce;
+    CHECK(seen != nullptr && DecodeNonce(seen->payload.data(), seen->payload.size(), nonce));
+    CHECK(nonce.roomId == 78 && nonce.hostKey == FriendKeyOf(hostSeed));
+    CHECK(nonce.nonce == lan.host->NonceFor(first.addr) && nonce.nonce != lan.host->NonceFor(second.addr));
+    JoinRequest join;
+    join.build = kBuild;
+    join.name = "Gil";
+    join.colour = 0x445566;
+    join.machine = 2;
+    CHECK(SignerOf(anaSeed)(nonce, join.key, join.proof));
+    second.Send(kMsgJoin, EncodeJoin(join));
+    first.Send(kMsgJoin, EncodeJoin(join));
+    for (int i = 0; i < 20; i++) {
+        lan.Tick();
+        first.Turn();
+        second.Turn();
+    }
+    RejectReason why = RejectReason::Full;
+    const Message* refusal = second.Last(kMsgReject);
+    CHECK(refusal != nullptr && DecodeReject(refusal->payload.data(), refusal->payload.size(), why) &&
+          why == RejectReason::BadProof);
+    CHECK(first.Last(kMsgWelcome) != nullptr && first.Last(kMsgReject) == nullptr);
+    CHECK(lan.host->Roster().size() == 3);
+}
+
+// A client that knows which host it wants refuses a Nonce from any other, before it sends a byte of its profile.
+void TestExpectedHostKey() {
+    std::printf("the host key a client expects (O7.3)\n");
+    Lan lan;
+    lan.host->SetIdentity(FriendKeyOf(SeedOf(1)));
+    lan.clientExpect = FriendKeyOf(SeedOf(9));
+    LobbyClient& wrong = lan.AddClient("Ana");
+    lan.clientExpect = FriendKeyOf(SeedOf(1));
+    LobbyClient& right = lan.AddClient("Bo");
+    lan.Settle();
+    CHECK(wrong.GetState() == LobbyClient::State::Closed &&
+          wrong.CloseText() == "The room at that address is not the room you asked for.");
+    CHECK(right.GetState() == LobbyClient::State::Joined && lan.host->Roster().size() == 2);
+}
+
+// The keys outlive the host: the successor learns them from its mirror and sends them again.
+void TestKeysAfterHandover() {
+    std::printf("keys after the host is lost (O7.3)\n");
+    const Seed anaSeed = SeedOf(2);
+    const Seed boSeed = SeedOf(3);
+    Lan lan;
+    lan.host->SetIdentity(FriendKeyOf(SeedOf(1)));
+    SignNext(lan, anaSeed);
+    lan.AddClient("Ana");
+    SignNext(lan, boSeed);
+    lan.AddClient("Bo");
+    lan.Settle();
+    CHECK(lan.clients[1]->Keys().size() == 3);
+    lan.DropHost();
+    lan.TickFollow(static_cast<int>(kLinkTimeoutMs / 16) + 60);
+    CHECK(lan.next != nullptr && lan.nextAt == 0);
+    if (lan.next == nullptr) {
+        return;
+    }
+    // Ana hosts as player 0; Bo kept id 2.
+    const std::vector<MemberKey> keys = lan.next->Keys();
+    CHECK(keys.size() == 2 && keys[0].id == kHostId && keys[0].key == FriendKeyOf(anaSeed));
+    CHECK(keys.size() == 2 && keys[1].id == 2 && keys[1].key == FriendKeyOf(boSeed));
+    CHECK(lan.clients[1]->GetState() == LobbyClient::State::Joined && lan.clients[1]->Keys() == keys);
+}
+
+// Protocol 9 (decisions 50 to 52): the reachable flag in Join, Reach, and the bans in the handover table.
+void TestReachAndBanCodecs() {
+    std::printf("reach and ban codecs (protocol 9)\n");
+    JoinRequest join;
+    join.build = kBuild;
+    join.name = "Ana";
+    join.colour = 0x112233;
+    join.machine = 4;
+    std::vector<uint8_t> bytes = EncodeJoin(join);
+    JoinRequest read;
+    read.reachable = true;
+    CHECK(DecodeJoin(bytes.data(), bytes.size(), read) && !read.reachable && bytes.back() == 0);
+    join.reachable = true;
+    bytes = EncodeJoin(join);
+    CHECK(DecodeJoin(bytes.data(), bytes.size(), read) && read.reachable && bytes.back() == 1);
+    bytes.back() = 2;
+    CHECK(!DecodeJoin(bytes.data(), bytes.size(), read));
+    bytes.pop_back(); // a protocol 8 Join, with no flag
+    CHECK(!DecodeJoin(bytes.data(), bytes.size(), read));
+
+    bool reach = false;
+    bytes = EncodeReach(true);
+    CHECK(bytes.size() == 1 && DecodeReach(bytes.data(), bytes.size(), reach) && reach);
+    bytes = EncodeReach(false);
+    CHECK(DecodeReach(bytes.data(), bytes.size(), reach) && !reach);
+    const uint8_t two = 2;
+    reach = true;
+    CHECK(!DecodeReach(&two, 1, reach) && reach);
+    CHECK(!DecodeReach(nullptr, 0, reach));
+    bytes = { 1, 0 };
+    CHECK(!DecodeReach(bytes.data(), bytes.size(), reach));
+
+    // The bans ride after the takeover secret.
+    BanList bans;
+    bans.keys = { FriendKeyOf(SeedOf(4)), FriendKeyOf(SeedOf(5)) };
+    bans.prefixes = { MappedV4(Ip(192, 168, 1, 30)), IpBytes{ 0x20, 0x01, 0x0d, 0xb8, 0, 1, 0, 2 } };
+    const std::vector<HandoverTokenEntry> tokens = { { 1, 11 }, { 2, 22 } };
+    Bytes32 secret{};
+    secret.fill(0x77);
+    bytes = EncodeHandoverTokens(tokens, secret, bans);
+    std::vector<HandoverTokenEntry> tokensOut;
+    Bytes32 secretOut{};
+    BanList bansOut;
+    CHECK(bytes.size() == 1 + 2 * 9 + 32 + 1 + 2 * 32 + 1 + 2 * 16);
+    CHECK(DecodeHandoverTokens(bytes.data(), bytes.size(), tokensOut, secretOut, bansOut) && tokensOut == tokens &&
+          secretOut == secret && bansOut == bans);
+    CheckEdges(bytes, [](const uint8_t* d, size_t n) {
+        std::vector<HandoverTokenEntry> o;
+        Bytes32 s{};
+        BanList b;
+        return DecodeHandoverTokens(d, n, o, s, b);
+    });
+    // Each refusal leaves every output alone.
+    const auto refuses = [&](const BanList& list) {
+        const std::vector<uint8_t> e = EncodeHandoverTokens(tokens, secret, list);
+        std::vector<HandoverTokenEntry> o = { { 3, 3 } };
+        Bytes32 s{};
+        BanList b = bans;
+        return !DecodeHandoverTokens(e.data(), e.size(), o, s, b) && o.size() == 1 && IsZero32(s) && b == bans;
+    };
+    BanList bad;
+    bad.keys = { Bytes32{} };
+    CHECK(refuses(bad)); // an all-zero key
+    bad = BanList();
+    bad.prefixes = { MappedV4(Ip(127, 0, 0, 1)) };
+    CHECK(refuses(bad)); // IPv4 loopback
+    bad.prefixes = { IpBytes{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 } };
+    CHECK(refuses(bad)); // IPv6 loopback
+    bad.prefixes = { IpBytes{ 0x20, 0x01, 0x0d, 0xb8, 0, 1, 0, 2, 0, 0, 0, 0, 0, 0, 0, 9 } };
+    CHECK(refuses(bad)); // an IPv6 address with its host part
+    {
+        // The encoder keeps the newest kBanMax of each; a count past it is refused.
+        BanList many;
+        for (size_t i = 0; i < kBanMax + 3; i++) {
+            Bytes32 key{};
+            key[0] = static_cast<uint8_t>(i + 1);
+            many.keys.push_back(key);
+            many.prefixes.push_back(MappedV4(Ip(10, 0, 0, static_cast<int>(i + 1))));
+        }
+        bytes = EncodeHandoverTokens({}, Bytes32{}, many);
+        CHECK(DecodeHandoverTokens(bytes.data(), bytes.size(), tokensOut, secretOut, bansOut) &&
+              bansOut.keys.size() == kBanMax && bansOut.prefixes.size() == kBanMax &&
+              bansOut.keys.front()[0] == 4 && bansOut.keys.back()[0] == kBanMax + 3 &&
+              bansOut.prefixes.front() == MappedV4(Ip(10, 0, 0, 4)));
+        const size_t keyCountAt = 1 + 32;
+        bytes[keyCountAt] = static_cast<uint8_t>(kBanMax + 1);
+        CHECK(!DecodeHandoverTokens(bytes.data(), bytes.size(), tokensOut, secretOut, bansOut));
+    }
+    // The two shorter forms still read a table that carries bans.
+    bytes = EncodeHandoverTokens(tokens, secret, bans);
+    CHECK(DecodeHandoverTokens(bytes.data(), bytes.size(), tokensOut, secretOut) && tokensOut == tokens);
+    CHECK(DecodeHandoverTokens(bytes.data(), bytes.size(), tokensOut) && tokensOut == tokens);
+}
+
+// Decision 51: in a directory room a reachable member is elected before an earlier one that is not; in a LAN room
+// join order alone decides. Reach moves it later, and a member that comes back to a promoted host says it again.
+void TestReachableSuccessor() {
+    std::printf("a reachable member takes over a directory room (decision 51)\n");
+    for (RoomType type : { RoomType::Open, RoomType::Lan }) {
+        Lan lan("Host", 83, {}, TrackStore(), type);
+        LobbyClient& ana = lan.AddClient("Ana");
+        lan.clientReach = true;
+        LobbyClient& bo = lan.AddClient("Bo");
+        lan.Settle();
+        CHECK(ana.GetState() == LobbyClient::State::Joined && bo.GetState() == LobbyClient::State::Joined);
+        const uint8_t expected = type == RoomType::Lan ? ana.LocalId() : bo.LocalId();
+        CHECK(lan.host->Room(lan.now).successor == expected);
+        CHECK(ana.Room(lan.now).successor == expected);
+        if (type != RoomType::Open) {
+            continue;
+        }
+        // Reach after the join: Bo loses its mapping, then Ana gains one.
+        bo.SetReachable(false);
+        lan.Settle();
+        CHECK(lan.host->Room(lan.now).successor == ana.LocalId());
+        bo.SetReachable(true);
+        lan.Settle();
+        CHECK(lan.host->Room(lan.now).successor == bo.LocalId());
+        ana.SetReachable(true);
+        lan.Settle();
+        CHECK(lan.host->Room(lan.now).successor == ana.LocalId());
+        CHECK(lan.host->Refused() == 0);
+    }
+
+    // Bo, reachable, takes over; Ana (not reachable) and Cy (reachable) come back. Bo's room then elects Cy, who
+    // joined after Ana, because Cy said again that it is reachable.
+    Lan lan("Host", 84, {}, TrackStore(), RoomType::Open);
+    lan.AddClient("Ana");
+    lan.clientReach = true;
+    lan.AddClient("Bo");
+    lan.clientReach = true;
+    lan.AddClient("Cy");
+    lan.Settle();
+    CHECK(lan.host->Room(lan.now).successor == lan.clients[1]->LocalId());
+    lan.DropHost();
+    lan.TickFollow(static_cast<int>(kLinkTimeoutMs / 16) + 120);
+    CHECK(lan.next != nullptr && lan.nextAt == 1);
+    if (lan.next == nullptr) {
+        return;
+    }
+    CHECK(lan.clients[0]->GetState() == LobbyClient::State::Joined &&
+          lan.clients[2]->GetState() == LobbyClient::State::Joined);
+    CHECK(lan.next->Room(lan.now).successor == lan.clients[2]->LocalId());
+}
+
+// Decision 52: a ban made before the host is lost still keeps the player out under the successor, by key and by
+// address, and the bans the successor holds are capped.
+void TestBansAfterHandover() {
+    std::printf("bans go with the handover (decision 52)\n");
+    const Seed cySeed = SeedOf(6);
+    Lan lan;
+    lan.host->SetIdentity(FriendKeyOf(SeedOf(1)));
+    SignNext(lan, SeedOf(2));
+    lan.AddClient("Ana");
+    SignNext(lan, SeedOf(3));
+    lan.AddClient("Bo");
+    SignNext(lan, cySeed);
+    LobbyClient& cy = lan.AddClient("Cy");
+    lan.Settle();
+    const IpBytes cyIp = lan.clientAddrs[2].ip;
+    CHECK(lan.clients[0]->Bans().keys.empty()); // the table went out before any ban
+    CHECK(lan.host->Ban(cy.LocalId(), lan.now));
+    lan.Settle();
+    CHECK(ClosedWith(cy, RejectReason::Banned));
+    // The ban reached the successor in a new table.
+    const BanList held = lan.clients[0]->Bans();
+    CHECK(held == lan.host->Bans() && held.keys.size() == 1 && held.keys[0] == FriendKeyOf(cySeed));
+    CHECK(held.prefixes.size() == 1 && held.prefixes[0] == cyIp);
+
+    lan.DropHost();
+    lan.TickFollow(static_cast<int>(kLinkTimeoutMs / 16) + 120);
+    CHECK(lan.next != nullptr && lan.nextAt == 0);
+    if (lan.next == nullptr) {
+        return;
+    }
+    CHECK(lan.next->Bans() == held);
+    CHECK(lan.clients[1]->GetState() == LobbyClient::State::Joined);
+    // Cy tries the new host: with its key from another address, then with no key from its old address.
+    lan.hostAddr = lan.clientAddrs[0];
+    SignNext(lan, cySeed);
+    LobbyClient& keyed = lan.AddClient("Cy");
+    NetAddress cyAgain = lan.clientAddrs[2];
+    cyAgain.port = 51000;
+    lan.clientAt = cyAgain;
+    LobbyClient& bare = lan.AddClient("Cyrus");
+    lan.Settle();
+    CHECK(ClosedWith(keyed, RejectReason::Banned));
+    CHECK(ClosedWith(bare, RejectReason::Banned));
+    // Someone new still gets in.
+    LobbyClient& dee = lan.AddClient("Dee");
+    lan.Settle();
+    CHECK(dee.GetState() == LobbyClient::State::Joined);
+
+    // SetBans keeps the newest kBanMax of each.
+    BanList many;
+    for (size_t i = 0; i < kBanMax + 5; i++) {
+        Bytes32 key{};
+        key[0] = static_cast<uint8_t>(i + 1);
+        many.keys.push_back(key);
+        many.prefixes.push_back(MappedV4(Ip(10, 0, 1, static_cast<int>(i + 1))));
+    }
+    lan.next->SetBans(many);
+    CHECK(lan.next->Banned().size() == kBanMax && lan.next->Banned().front()[0] == 6);
+    CHECK(lan.next->Bans().prefixes.size() == kBanMax && lan.next->Bans().prefixes.back() == many.prefixes.back());
+}
+
 int main() {
     TestJoinCodec();
     TestRosterCodec();
     TestRoomCodec();
+    TestHandoverCodec();
     TestResultsCodec();
     TestRaceCodec();
     TestStateCodec();
     TestClockSync();
     TestDiscoveryCodec();
     TestSanitizeAndFilter();
+    TestCustomTrackWire();
+    TestMachineRecordBounds();
     TestDecoderSweep();
+    TestHackIdentity();
     TestJoinReadyEmotes();
     TestEmoteRateLimit();
     TestRejects();
     TestLeaveVanishAndClose();
     TestNoHost();
     TestHostIgnoresStrangers();
+    TestHelloGate();
+    TestProbeNotAmplified();
+    TestUploadTotals();
+    TestRoomTypeWire();
+    TestTakeoverSecret();
     TestOldVersionRefused();
     TestHostChecksEveryMessage();
+    TestKeyCodecs();
+    TestKeysInARoom();
+    TestFriendsRoom();
+    TestExpectedHostKey();
+    TestKeysAfterHandover();
+    TestReachAndBanCodecs();
+    TestReachableSuccessor();
+    TestBansAfterHandover();
     TestVoteFlow();
     TestPickFlow();
     TestWatcherRacesNext();
     TestRaceStart();
     TestRaceResults();
     TestRacePoses();
+    TestHandoverTokens();
+    TestHostLostIn(Phase::Lobby);
+    TestHostLostIn(Phase::Machine);
+    TestHostLostIn(Phase::Countdown);
+    TestHostLostIn(Phase::Racing);
+    TestHostLostIn(Phase::Results);
+    TestHostLostAfterAFinish();
+    TestHostLostInVote();
+    TestHostLostInAssets();
+    TestRejoinRefusals();
+    TestSuccessorAlone();
+    TestHandoverDialable();
+    TestNothingToFollow();
+    TestHostLeavesMidRace();
+    TestHostLeavesBetweenRaces();
     TestBrowser();
     std::printf("%d checks, %d failed\n", gChecks, gFails);
     return gFails == 0 ? 0 : 1;

@@ -200,6 +200,7 @@ typedef struct GdxNetRules {
     int lavaNoKill;
     float magnetRange;
     float magnetStrength;
+    int boostFrames; // 0 is the stock boost length
 } GdxNetRules;
 
 // NULL gives the player their own values back.
@@ -209,6 +210,23 @@ int gdx_net_race_rule_ignore_track_settings(int own);
 int gdx_net_race_rule_lava_no_kill(int own);
 float gdx_net_race_rule_magnet_range(float own);
 float gdx_net_race_rule_magnet_strength(float own);
+int gdx_net_race_rule_boost_frames(int own);
+
+// The Create Machine records of an online race, by character (G-NET O4.5, decision 10). A record is the 32
+// bytes of the game's CustomMachine. A character races a record only when every human on it brought the same
+// record; every other character, the CPUs' included, races its stock machine on every copy. Kept apart from
+// the rules: gdx_net_race_reset does not clear it, because the game rebuilds its machines from it once the
+// field is known and again once the race is over. Game thread only.
+#define GDX_NET_MACHINE_RECORD_BYTES 32
+// hasRecord and records may be NULL: then no human brought a record. records holds humans rows of
+// GDX_NET_MACHINE_RECORD_BYTES.
+void gdx_net_race_set_machines(const unsigned char* machine, const unsigned char* hasRecord,
+                               const unsigned char* records, int humans);
+void gdx_net_race_clear_machines(void);
+// 1 while a table is set: the game builds every machine from it and from the stock machines alone.
+int gdx_net_race_machines_set(void);
+// 1 and the record in out when character races one, else 0.
+int gdx_net_race_machine_record(int character, unsigned char* out);
 
 // SHA-256 over the bytes fed since the last begin: the course digest of the ready message.
 void gdx_net_race_digest_begin(void);

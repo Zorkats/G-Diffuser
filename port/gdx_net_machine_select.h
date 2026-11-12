@@ -30,8 +30,12 @@ typedef struct GdxNetLockInRoom {
     unsigned leftMs;    /* time left on the room's timer */
     int lockedCount;    /* racers who have locked in */
     int racers;         /* racers on the grid */
-    int track;          /* the stock course of this race */
+    int track;          /* the stock course of this race, or GDX_NET_LOCK_IN_TRACK_CUSTOM */
+    char title[21];     /* when track is GDX_NET_LOCK_IN_TRACK_CUSTOM: the track's title, else empty */
 } GdxNetLockInRoom;
+
+#define GDX_NET_LOCK_IN_TRACK_CUSTOM 0xFD /* net::lobby::kTrackCustom: a racer's own track */
+#define GDX_NET_LOCK_IN_COURSE_CUSTOM 24  /* COURSE_EDIT_1: the course slot a room's custom track races in */
 
 /* The room and the menu, as this module sees them (gdx_lan_lobby.cpp, gdx_menu.cpp). */
 void gdx_lan_lock_in_room(GdxNetLockInRoom* out);
@@ -48,7 +52,11 @@ int gdx_net_race_arm(unsigned raceIndex);
  * course gdx_net_machine_select_track(). Calling it also records that the screen is not up, which is true
  * whenever the main menu runs. */
 int gdx_net_machine_select_poll_open(void);
+/* The course the race runs on: the stock course, or GDX_NET_LOCK_IN_COURSE_CUSTOM for a custom track. */
 int gdx_net_machine_select_track(void);
+/* The name the race shows for its track: NULL for a stock track, which keeps its own name. For a custom
+ * track its title as the title font draws it. Valid until the next call. */
+const char* gdx_net_machine_select_track_title(void);
 
 /* 1 while machine select or machine settings is the room's lock-in screen and not the stock one. */
 int gdx_net_machine_select_active(void);

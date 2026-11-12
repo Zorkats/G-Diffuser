@@ -28,9 +28,15 @@ constexpr uint8_t kTypeAccept = 1;
 constexpr uint8_t kTypeRefuse = 2;
 constexpr uint8_t kTypeData = 3;
 constexpr uint8_t kTypeDisconnect = 4;
+constexpr uint8_t kTypeChallenge = 5; // server to client: echo this cookie in your next hello (decision 34)
 
 // Magic (2), type (1) and nonce (4) start every packet.
 constexpr size_t kBaseBytes = 7;
+// A hello body is the version (2) and the cookie (8). A challenge body is the same, and a refuse body is the
+// reason (1) and the version (2), so neither reply is larger than the hello that caused it (decision 34).
+constexpr size_t kHelloBodyBytes = 10;
+static_assert(kBaseBytes + kHelloBodyBytes == kHelloBytes, "the hello size in the header must match");
+static_assert(kBaseBytes + 3 <= kHelloBytes, "a refuse must not be larger than a hello");
 // The data header adds seq (2), ack (2) and ackBits (4).
 constexpr size_t kDataHeaderBytes = kBaseBytes + 8;
 // Per-message overhead: type (1), channel (1), length (2), and id (2) for reliable messages.
@@ -90,6 +96,12 @@ public:
                (static_cast<uint32_t>(data_[pos_ - 2]) << 16) | (static_cast<uint32_t>(data_[pos_ - 1]) << 24);
     }
 
+    uint64_t U64() {
+        const uint64_t low = U32();
+        const uint64_t high = U32();
+        return low | (high << 32);
+    }
+
     // Returns a pointer to the next count bytes, or nullptr when fewer remain.
     const uint8_t* Bytes(size_t count) {
         if (!Take(count)) {
@@ -128,6 +140,11 @@ void Put32(std::vector<uint8_t>& out, uint32_t value) {
     Put16(out, value >> 16);
 }
 
+void Put64(std::vector<uint8_t>& out, uint64_t value) {
+    Put32(out, static_cast<uint32_t>(value & 0xFFFFFFFFu));
+    Put32(out, static_cast<uint32_t>(value >> 32));
+}
+
 // Unsigned subtraction stays correct across the 49-day uint32 wrap, as long as times are passed in order.
 uint32_t Elapsed(uint32_t nowMs, uint32_t thenMs) {
     return nowMs - thenMs;
@@ -137,6 +154,25 @@ std::vector<uint8_t> VersionBody(uint16_t version) {
     std::vector<uint8_t> body;
     Put16(body, version);
     return body;
+}
+
+// The body of a hello or a challenge.
+std::vector<uint8_t> CookieBody(uint16_t version, uint64_t cookie) {
+    std::vector<uint8_t> body;
+    Put16(body, version);
+    Put64(body, cookie);
+    return body;
+}
+
+std::vector<uint8_t> ControlPacket(uint8_t type, uint32_t nonce, const std::vector<uint8_t>& body) {
+    std::vector<uint8_t> bytes;
+    bytes.reserve(kBaseBytes + body.size());
+    Put8(bytes, kMagic0);
+    Put8(bytes, kMagic1);
+    Put8(bytes, type);
+    Put32(bytes, nonce);
+    bytes.insert(bytes.end(), body.begin(), body.end());
+    return bytes;
 }
 
 std::vector<uint8_t> ReasonBody(CloseReason why) {
@@ -162,6 +198,25 @@ bool ReasonFromCode(uint8_t code, CloseReason& out) {
 }
 
 } // namespace
+
+bool ParseHello(const uint8_t* data, size_t len, uint32_t& nonce, uint16_t& version, uint64_t& cookie) {
+    if (data == nullptr || len != kHelloBytes || data[0] != kMagic0 || data[1] != kMagic1 || data[2] != kTypeHello) {
+        return false;
+    }
+    Reader r(data + 3, len - 3);
+    nonce = r.U32();
+    version = r.U16();
+    cookie = r.U64();
+    return r.Ok() && r.Left() == 0;
+}
+
+std::vector<uint8_t> EncodeChallenge(uint32_t nonce, uint16_t version, uint64_t cookie) {
+    return ControlPacket(kTypeChallenge, nonce, CookieBody(version, cookie));
+}
+
+std::vector<uint8_t> EncodeVersionRefuse(uint32_t nonce, uint16_t version) {
+    return ControlPacket(kTypeRefuse, nonce, RefuseBody(CloseReason::VersionMismatch, version));
+}
 
 const char* CloseReasonName(CloseReason reason) {
     switch (reason) {
@@ -207,6 +262,7 @@ bool Channel::Connect(uint32_t nowMs) {
         return false;
     }
     nonce_ = config_.connectionNonce;
+    cookie_ = 0;
     ResetConnection();
     state_ = LinkState::Connecting;
     reason_ = CloseReason::None;
@@ -223,6 +279,8 @@ void Channel::Disconnect(uint32_t nowMs) {
 
 void Channel::Receive(const uint8_t* data, size_t len, uint32_t nowMs) {
     stats_.packetsIn++;
+    stats_.datagramsReceived++;
+    stats_.bytesReceived += static_cast<uint64_t>(len) + headerBytes_;
     if (data == nullptr || len < kBaseBytes || len > kMaxDatagramBytes) {
         stats_.malformed++;
         return;
@@ -251,6 +309,9 @@ void Channel::Receive(const uint8_t* data, size_t len, uint32_t nowMs) {
         break;
     case kTypeDisconnect:
         OnDisconnect(nonce, body, bodyLen, nowMs);
+        break;
+    case kTypeChallenge:
+        OnChallenge(nonce, body, bodyLen, nowMs);
         break;
     default:
         stats_.malformed++;
@@ -343,6 +404,7 @@ bool Channel::PopMessage(Message& out) {
 void Channel::OnHello(uint32_t nonce, const uint8_t* body, size_t len, uint32_t nowMs) {
     Reader r(body, len);
     const uint16_t version = r.U16();
+    r.U64(); // the cookie: the owner checked it before it built this channel (decision 34)
     if (!r.Ok() || r.Left() != 0) {
         stats_.malformed++;
         return;
@@ -374,6 +436,32 @@ void Channel::OnHello(uint32_t nonce, const uint8_t* body, size_t len, uint32_t 
     reason_ = CloseReason::None;
     lastRecvMs_ = nowMs;
     SendControl(kTypeAccept, nonce, VersionBody(config_.version), nowMs);
+}
+
+void Channel::OnChallenge(uint32_t nonce, const uint8_t* body, size_t len, uint32_t nowMs) {
+    Reader r(body, len);
+    const uint16_t version = r.U16();
+    const uint64_t cookie = r.U64();
+    if (!r.Ok() || r.Left() != 0) {
+        stats_.malformed++;
+        return;
+    }
+    if (config_.role != Role::Client || state_ != LinkState::Connecting) {
+        stats_.ignored++;
+        return;
+    }
+    if (nonce != nonce_) {
+        stats_.wrongNonce++;
+        return;
+    }
+    if (version != config_.version) {
+        // A server on another version refuses; it never asks for a cookie first.
+        stats_.malformed++;
+        return;
+    }
+    // Answer at once: the cookie proves this address can receive, and the server keeps nothing until it returns.
+    cookie_ = cookie;
+    SendHello(nowMs);
 }
 
 void Channel::OnAccept(uint32_t nonce, const uint8_t* body, size_t len, uint32_t nowMs) {
@@ -588,24 +676,29 @@ void Channel::Close(CloseReason reason, bool notifyPeer, uint32_t nowMs) {
 }
 
 void Channel::SendHello(uint32_t nowMs) {
-    SendControl(kTypeHello, nonce_, VersionBody(config_.version), nowMs);
+    SendControl(kTypeHello, nonce_, CookieBody(config_.version, cookie_), nowMs);
     lastHelloMs_ = nowMs;
 }
 
 void Channel::SendControl(uint8_t type, uint32_t nonce, const std::vector<uint8_t>& body, uint32_t nowMs) {
-    std::vector<uint8_t> bytes;
-    bytes.reserve(kBaseBytes + body.size());
-    Put8(bytes, kMagic0);
-    Put8(bytes, kMagic1);
-    Put8(bytes, type);
-    Put32(bytes, nonce);
-    bytes.insert(bytes.end(), body.begin(), body.end());
-    Emit(bytes, nowMs);
+    const std::vector<uint8_t> bytes = ControlPacket(type, nonce, body);
+    // A control packet carries no messages, so all of it is framing.
+    Emit(bytes, SentSplit{}, nowMs);
 }
 
-void Channel::Emit(const std::vector<uint8_t>& bytes, uint32_t nowMs) {
+void Channel::Emit(const std::vector<uint8_t>& bytes, const SentSplit& split, uint32_t nowMs) {
     stats_.packetsOut++;
+    stats_.datagramsSent++;
     lastSendMs_ = nowMs;
+    // Every datagram leaves through here, so the counters see all of them. The message bytes in the split are
+    // part of the datagram, so what remains is framing: the header estimate, the packet header and the ack.
+    const uint64_t wire = static_cast<uint64_t>(bytes.size()) + headerBytes_;
+    const uint64_t messages = static_cast<uint64_t>(split.reliable) + split.unreliable + split.retransmit;
+    stats_.bytesSent += wire;
+    stats_.bytesSentReliable += split.reliable;
+    stats_.bytesSentUnreliable += split.unreliable;
+    stats_.bytesSentRetransmit += split.retransmit;
+    stats_.bytesSentAckKeepalive += wire - messages;
     if (send_) {
         send_(bytes.data(), bytes.size());
     }
@@ -643,11 +736,12 @@ void Channel::Ship(Outgoing& out, uint32_t nowMs) {
             inFlight_.pop_front();
         }
     }
-    Emit(out.bytes, nowMs);
+    Emit(out.bytes, out.split, nowMs);
     // Every outgoing packet carries the current ack state, so it settles any ack that was owed.
     ackPending_ = false;
     out.bytes.clear();
     out.msgs = 0;
+    out.split = SentSplit{};
 }
 
 void Channel::FlushOutbound(uint32_t nowMs) {
@@ -660,8 +754,12 @@ void Channel::FlushOutbound(uint32_t nowMs) {
             continue;
         }
         Place(out, kReliableOverhead + p.msg.payload.size(), nowMs);
+        const size_t wire = kReliableOverhead + p.msg.payload.size();
         if (p.sent) {
             stats_.resends++;
+            out.split.retransmit += wire;
+        } else {
+            out.split.reliable += wire;
         }
         p.sent = true;
         p.sentMs = nowMs;
@@ -671,6 +769,7 @@ void Channel::FlushOutbound(uint32_t nowMs) {
     while (!unreliableOut_.empty()) {
         const Message& msg = unreliableOut_.front();
         Place(out, kUnreliableOverhead + msg.payload.size(), nowMs);
+        out.split.unreliable += kUnreliableOverhead + msg.payload.size();
         AppendMessage(out, false, 0, msg);
         unreliableOut_.pop_front();
     }
