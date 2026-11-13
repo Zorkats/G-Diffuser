@@ -136,8 +136,11 @@ Options live in the enhancement menu, which opens with **F1**. Editing tools are
 - **Input:** keyboard and SDL controller support (including DualSense) with rumble, plus a
   draggable on-screen **N64 input viewer** overlay.
 - **Players 2 to 4:** assign controllers to ports, or let them assign themselves as they connect.
-- **Controller profiles:** keep separate setups and switch between them.
-- **Input actions:** remap what each button does separately in races, in Course Edit and in menus.
+- **Action bindings:** in **Settings > Controls**, bind actions directly to keyboard keys,
+  gamepad buttons, or axes, separately for each player and for Race, Menu, and Course Edit.
+  Add multiple bindings per action, click a binding to change or remove it, or reset to your
+  previously saved controls. Existing controller mappings remain in use until an action is edited.
+  N64 input translation is handled in the background.
 - **Steering curve:** set how stick travel maps to steering for each controller port. 1.00 is
   stock, higher is gentler near center, lower is sharper, and full lock doesn't change.
 - **Mouse steering:** steer races with the mouse, with adjustable sensitivity.
@@ -251,6 +254,12 @@ without them.
 Open or close the enhancement menu with **F1**, **Escape**, or **Gamepad Back**. Toggle
 fullscreen with **F11**. Menu navigation from a controller is opt-in via the menu's
 controller-navigation toggle.
+
+Use **Settings > Controls** to choose a player and bind actions in the **Race**, **Menu**, or
+**Course Edit** tab. Open **Steering / movement** for shared analog bindings, sensitivity, and
+deadzones, or **Devices and feedback** for device assignment and rumble. During binding capture,
+release held gamepad controls, then press the desired key/button or move an axis; **Escape** cancels.
+Bindings save automatically. The settings window's own navigation is separate from game actions.
 
 ## Platforms
 

@@ -58,9 +58,9 @@
 #include "gdx_palette.h" // F2 palette editor: override table + persistence (extern "C" API)
 #include "gdx_machine_stats.h" // F2b machine stat editor: body/boost/grip/weight overrides
 #include "gdx_custom_grid.h" // F3 custom grid: roster string CVar parse/format (extern "C" API)
-#include "gdx_input_actions.h" // 3A action layer: per-context N64 button tables (extern "C" API)
+
 #include "gdx_single_race.h" // Single Race options: lap limit and settings migration
-#include "gdx_input_profiles.h" // 4A controller profiles: Race-table presets over the 3A layer (extern "C" API)
+
 #include "gdx_steering_curve.h" // Per-port steering exponent (extern "C" API)
 #include "gdx_xcup_random.h" // X Cup random course toggle CVar
 #include "gdx_achievements.h" // F10 playtime tracker + local achievements
@@ -477,219 +477,6 @@ void DrawCustomGrid() {
     }
 }
 
-// 3A action layer (port/gdx_input_actions.c). Row order and column order both match GdxInputOutput:
-// column i is the N64 bit of row i, which is also that row's identity input.
-struct InputActionText {
-    const char* label;
-    const char* tip;
-};
-
-struct InputActionColumn {
-    const char* header;
-    const char* name;
-};
-
-constexpr const char* kActionPlainTip = "The N64 button as read from the controller. This context gives it no action name.";
-constexpr const char* kActionUnusedDpadTip = "No race code reads the D-pad, so this row does nothing in races.";
-
-// Race labels verified against the decomp: Accelerate racer.c:4326, Boost racer.c:3811, drift and
-// side attack racer.c:3696 and 3965-3990 (Z and R each start a side attack, Z with R is a spin),
-// Air brake racer.c:3771, Rear view camera.c:3223, Camera camera.c:3211, Lap counter toggle
-// minimap.c:229 (2 or more players), Gap to leader toggle menus.c:5807 (see hud.c:2298), Pause
-// menus.c:6226.
-const InputActionText kRaceActions[GDX_INPUT_OUT_COUNT] = {
-    { "Accelerate (A)", "Throttle. Hold to accelerate." },
-    { "Boost (B)", "Press to boost when the machine has energy and no boost is running." },
-    { "Drift left / side attack (Z)", "Hold to drift. Press for a side attack. Hold R and press Z for a spin attack." },
-    { "Pause (Start)", "Pauses the race and opens the pause menu." },
-    { "D-pad up (unused in races)", kActionUnusedDpadTip },
-    { "D-pad down (unused in races)", kActionUnusedDpadTip },
-    { "D-pad left (unused in races)", kActionUnusedDpadTip },
-    { "D-pad right (unused in races)", kActionUnusedDpadTip },
-    { "Gap to leader toggle (L)", "Toggles the gap-to-leader time display." },
-    { "Drift right / side attack (R)", "Hold to drift. Press for a side attack. Hold Z and press R for a spin attack." },
-    { "Rear view (C-Up)", "Hold to look back." },
-    { "Air brake (C-Down)", "Hold to brake." },
-    { "Lap counter toggle (C-Left)", "Toggles the minimap lap counter. Used in races with 2 or more players." },
-    { "Camera (C-Right)", "Press to cycle the race camera." },
-};
-
-const InputActionText kCourseEditActions[GDX_INPUT_OUT_COUNT] = {
-    { "Accept (A)", "Confirms the highlighted choice in the editor." },
-    { "Back (B)", "Cancels the current editor step or goes back." },
-    { "Z", kActionPlainTip },
-    { "Start", kActionPlainTip },
-    { "D-pad up", kActionPlainTip },
-    { "D-pad down", kActionPlainTip },
-    { "D-pad left", kActionPlainTip },
-    { "D-pad right", kActionPlainTip },
-    { "L", kActionPlainTip },
-    { "R", kActionPlainTip },
-    { "C-Up", kActionPlainTip },
-    { "C-Down", kActionPlainTip },
-    { "C-Left", kActionPlainTip },
-    { "C-Right", kActionPlainTip },
-};
-
-const InputActionText kMenuActions[GDX_INPUT_OUT_COUNT] = {
-    { "Accept (A)", "Confirms the highlighted choice in menus." },
-    { "Back (B)", "Goes back to the previous menu." },
-    { "Z", kActionPlainTip },
-    { "Start", kActionPlainTip },
-    { "D-pad up", kActionPlainTip },
-    { "D-pad down", kActionPlainTip },
-    { "D-pad left", kActionPlainTip },
-    { "D-pad right", kActionPlainTip },
-    { "L", kActionPlainTip },
-    { "R", kActionPlainTip },
-    { "C-Up", kActionPlainTip },
-    { "C-Down", kActionPlainTip },
-    { "C-Left", kActionPlainTip },
-    { "C-Right", kActionPlainTip },
-};
-
-// Input columns in gdx_input_actions_input_bit order: the 14 N64 buttons, then gamepad X and Y.
-const InputActionColumn kActionInputColumns[GDX_INPUT_IN_COUNT] = {
-    { "A", "A button" },         { "B", "B button" },           { "Z", "Z button" },
-    { "Start", "Start button" }, { "Up", "D-pad up" },          { "Down", "D-pad down" },
-    { "Left", "D-pad left" },    { "Right", "D-pad right" },    { "L", "L button" },
-    { "R", "R button" },         { "C-Up", "C-Up button" },     { "C-Down", "C-Down button" },
-    { "C-Left", "C-Left button" }, { "C-Right", "C-Right button" }, { "X", "gamepad X button" },
-    { "Y", "gamepad Y button" },
-};
-
-// One table per context: a row per action, a checkbox per input N64 button. A checked box means
-// that input triggers the action in this context. Every click writes one CVar and saves the config.
-void DrawInputActionTable(int context, const char* title, const char* scope, const InputActionText* rows) {
-    ImGui::PushID(context);
-    ImGui::TextUnformatted(title);
-    ImGui::SameLine();
-    ImGui::TextDisabled("%s", scope);
-    ImGui::SameLine();
-    if (ImGui::Button("Reset to N64 default")) {
-        gdx_input_actions_reset_context(context);
-        CVarSave();
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Every %s action goes back to its own N64 button.", title);
-    }
-
-    const ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollX;
-    if (ImGui::BeginTable("##InputActions", 1 + GDX_INPUT_IN_COUNT, flags)) {
-        ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed, 260.0f);
-        for (int col = 0; col < GDX_INPUT_IN_COUNT; col++) {
-            ImGui::TableSetupColumn(kActionInputColumns[col].header, ImGuiTableColumnFlags_WidthFixed, 56.0f);
-        }
-        ImGui::TableNextRow(ImGuiTableRowFlags_Headers);
-        for (int col = 0; col <= GDX_INPUT_IN_COUNT; col++) {
-            ImGui::TableSetColumnIndex(col);
-            ImGui::TableHeader(ImGui::TableGetColumnName(col));
-            if (col > 0 && ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Input: %s", kActionInputColumns[col - 1].name);
-            }
-        }
-
-        for (int out = 0; out < GDX_INPUT_OUT_COUNT; out++) {
-            unsigned short mask = gdx_input_actions_get_mask(context, out);
-
-            ImGui::TableNextRow();
-            ImGui::TableSetColumnIndex(0);
-            ImGui::TextUnformatted(rows[out].label);
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("%s", rows[out].tip);
-            }
-            if (mask == 0) {
-                ImGui::SameLine();
-                ImGui::TextDisabled("(no input)");
-            }
-
-            for (int in = 0; in < GDX_INPUT_IN_COUNT; in++) {
-                unsigned short bit = gdx_input_actions_input_bit(in);
-                bool on = (mask & bit) != 0;
-
-                ImGui::TableSetColumnIndex(in + 1);
-                ImGui::PushID(out * GDX_INPUT_IN_COUNT + in);
-                if (ImGui::Checkbox("##trigger", &on)) {
-                    mask = (unsigned short) (on ? (mask | bit) : (mask & ~bit));
-                    gdx_input_actions_set_mask(context, out, mask);
-                    CVarSave();
-                }
-                if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip(on ? "%s: the %s triggers %s. Uncheck to remove it."
-                                         : "%s: check to let the %s trigger %s.",
-                                      title, kActionInputColumns[in].name, rows[out].label);
-                }
-                ImGui::PopID();
-            }
-        }
-        ImGui::EndTable();
-    }
-    ImGui::PopID();
-}
-
-// Profile combo (4A, gdx_input_profiles.c). Each entry is a Race-table preset assuming the default
-// controller mapping. "Custom" shows while the Race table matches no preset. Picking an entry writes
-// its masks and saves the config. The tooltip gives the preset's limitations.
-void DrawInputProfileCombo() {
-    const int match = gdx_input_profiles_match();
-    const char* preview = match >= 0 ? gdx_input_profiles_name(match) : "Custom";
-
-    ImGui::SetNextItemWidth(260.0f);
-    if (ImGui::BeginCombo("Profile##InputProfile", preview)) {
-        for (int i = 0; i < gdx_input_profiles_count(); i++) {
-            ImGui::PushID(i);
-            const bool selected = (i == match);
-            if (ImGui::Selectable(gdx_input_profiles_name(i), selected)) {
-                gdx_input_profiles_apply(i);
-                CVarSave();
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("%s\n\nLimitations: %s", gdx_input_profiles_description(i),
-                                  gdx_input_profiles_limitations(i));
-            }
-            if (selected) {
-                ImGui::SetItemDefaultFocus();
-            }
-            ImGui::PopID();
-        }
-        if (match < 0) {
-            ImGui::Selectable("Custom", true, ImGuiSelectableFlags_Disabled);
-        }
-        ImGui::EndCombo();
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Presets for the Race table. Menu and Course Edit are not changed.");
-    }
-}
-
-// Settings > Controls > Actions. The shell is data; this block is the whole page. The two-layer line
-// at the top is the page's explanation and is kept verbatim.
-void DrawInputActionsPage() {
-    ImGui::TextWrapped("Input Editor maps your controller to N64 buttons. This page decides what each N64 "
-                       "button does in races, Course Edit and menus.");
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Layer 1 is the Input Editor (controller to N64 button).\n"
-                          "Layer 2 is this page (N64 button to action).\n"
-                          "Rows are actions. Checked columns are the N64 buttons that trigger them.\n"
-                          "The X and Y columns are your gamepad's X and Y. The N64 has no such buttons,\n"
-                          "so they do nothing until a box in their column is checked.");
-    }
-    ImGui::Spacing();
-    DrawInputProfileCombo();
-    ImGui::Spacing();
-
-    DrawInputActionTable(GDX_INPUT_CONTEXT_RACE, "Race", "(on track, not paused)", kRaceActions);
-    ImGui::Spacing();
-    DrawInputActionTable(GDX_INPUT_CONTEXT_COURSE_EDIT, "Course Edit", "(the editor, not a test drive)",
-                         kCourseEditActions);
-    ImGui::Spacing();
-    DrawInputActionTable(GDX_INPUT_CONTEXT_MENU, "Menu", "(everything else, including the pause menu)",
-                         kMenuActions);
-}
-
-// F10: read-only view over the achievement table (port/gdx_achievements.cpp). The tracker ticks
-// from main.cpp whether or not this page is open; the gate checkbox on the same page owns
-// evaluation. Locked entries stay visible so the page doubles as a checklist.
 void DrawAchievements() {
     const uint64_t total = GdxAchievements_GetTotalPlaytimeSeconds();
     const uint64_t session = GdxAchievements_GetSessionPlaytimeSeconds();
@@ -1290,10 +1077,8 @@ void GdxMenu::RegisterMenu() {
                     "customize save");
     AddSidebarEntry("Settings", "Audio", 2, "audio lle hle filter low pass volume reverb latency buffer");
     AddSidebarEntry("Settings", "Controls", 1,
-                    "controls controller configuration keyboard gamepad mouse bindings remap");
-    AddSidebarEntry("Settings", "Actions", 1,
-                    "actions action layer race course edit menu drift boost accelerate pause camera rear view "
-                    "air brake remap button context");
+                    "controls controller keyboard gamepad mouse bindings remap actions race course edit menu "
+                    "drift boost accelerate pause camera rear view air brake player context");
     AddSidebarEntry("Settings", "Input Viewer", 2, "input viewer overlay analog stick buttons speedrun");
 
     AddSidebarEntry("Enhancements", "Visuals", 2,
@@ -1819,8 +1604,8 @@ void GdxMenu::RegisterMenu() {
     AddWidget("Settings", "Controls", SECTION_COLUMN_1,
               WidgetInfo{ .name = "Input Editor", .type = GdxUI::WIDGET_CUSTOM }
                   .CustomFunction([this](WidgetInfo&) {
-                      DrawToolWindowPage("Input Editor", "Configure controllers, keyboard, mouse, deadzones, "
-                                                         "sensitivity, and per-port mappings.");
+                      DrawToolWindowPage("Input Editor", "Bind game actions directly to your keyboard or gamepad, "
+                                                         "with separate bindings for each player and context.");
                   })
                   .SearchTerms("controller keyboard mouse deadzone sensitivity mapping bindings remap port"));
 
@@ -1832,10 +1617,10 @@ void GdxMenu::RegisterMenu() {
                           .cVar = "gEnhancements.Input.AutoAssignGamepadPorts",
                           .type = GdxUI::WIDGET_CVAR_CHECKBOX }
                   .Options(UIWidgets::CheckboxOptions().DefaultValue(true).Tooltip(
-                      "With two or more controllers connected, each gamepad gets its own N64 port "
+                      "With two or more controllers connected, each gamepad gets its own player slot "
                       "instead of all sharing port 1. Seats are remembered per controller across "
                       "restarts and replugs.\nOn = default. Turn off to manage ports manually in "
-                      "the Input Editor."))
+                      "Devices and feedback in the Input Editor."))
                   .SearchTerms("multiplayer two controllers player 2 assign port seating hotplug"));
 
     AddWidget("Settings", "Controls", SECTION_COLUMN_2,
@@ -1861,13 +1646,6 @@ void GdxMenu::RegisterMenu() {
                       .SearchTerms("steering curve linearity sensitivity response exponent analog stick"));
     }
 
-    // 3A action layer: which N64 buttons trigger each action in races, Course Edit and menus.
-    // The Input Editor (above) runs first and maps controllers to N64 buttons; these tables run after it.
-    AddWidget("Settings", "Actions", SECTION_COLUMN_1,
-              WidgetInfo{ .name = "Input actions", .type = GdxUI::WIDGET_CUSTOM }
-                  .CustomFunction([](WidgetInfo&) { DrawInputActionsPage(); })
-                  .SearchTerms("actions race course edit menu drift boost accelerate pause camera rear view "
-                               "air brake remap button context"));
 
     // ═════════════════════════════════════════════════════════════════════════════════════════
     // SETTINGS -> Input Viewer (2 columns)

@@ -379,7 +379,9 @@ gdx_add_main_target(G-Diffuser
     gdx_det_probe.c            # GDX_DET_LOG writer; gdx_det_layout.c calls it
     gdx_input_actions.c        # 3A action layer: per-context N64 button tables, called from
                                # gdx_controller_poll before the dev overrides and mouse merges
-    gdx_input_profiles.c       # 4A controller profiles: presets that write the 3A Race table
+    gdx_input_profiles.c       # Legacy controller profile compatibility
+    gdx_physical_input.cpp     # Per-player/context physical action bindings
+    gdx_input_editor.cpp       # Unified action-first input editor
     gdx_steering_curve.c       # Per-port steering exponent, called from racer.c
     gdx_xcup_random.c          # X Cup random courses, called from course.c, cpu.c and background.c
     n64_gfx_bridge.cpp
@@ -2317,7 +2319,9 @@ if(GDX_BUILD_JP AND NOT ANDROID)
         gdx_input_script.c
         gdx_det_probe.c        # GDX_DET_LOG writer; gdx_det_layout.c calls it
         gdx_input_actions.c    # 3A action layer; input_bridge.c calls it, so this target links it too
-        gdx_input_profiles.c   # 4A controller profiles; the Actions page in gdx_menu_registry.cpp calls it
+        gdx_input_profiles.c   # Legacy controller profile compatibility
+        gdx_physical_input.cpp
+        gdx_input_editor.cpp
         gdx_steering_curve.c   # racer.c calls it, and the Controls page in gdx_menu_registry.cpp
         gdx_xcup_random.c      # course.c, cpu.c and background.c call it, and the Gameplay page
         gdx_course_strings.c   # decomp game.c calls gdx_course_strings_apply() under PORT, so this

@@ -1,15 +1,15 @@
 // G-Diffuser: input action layer (3A). Per-context N64 button remapping for the PORT.
 //
-// Two layers decide what a press does. The Input Editor (LUS ControlDeck) maps each physical
-// control to one N64 bit. This layer then decides what each N64 bit does in three contexts:
+// Compatibility path: the LUS ControlDeck maps each physical control to one N64 bit.
+// This layer resolves existing saved mappings in three contexts:
 //   RACE         on-track racing, not paused (and a Course Edit test drive)
 //   COURSE_EDIT  the editor itself, not a test drive
 //   MENU         everything else, including the pause menu
 //
 // Each context has a table. For every OUTPUT N64 bit, the table holds a mask of the INPUT N64
 // bits that trigger it. An output is set when any of its input bits is held. The default table
-// is identity (each output is fed only by its own bit), so nothing changes until a table is edited
-// on the F1 Controls > Actions page.
+// is identity (each output is fed only by its own bit). Settings > Controls now edits direct
+// physical action bindings (gdx_physical_input.h); unedited actions inherit these saved tables.
 //
 // Dev overrides (gdx-autoinput.txt, GDX_INPUT_SCRIPT) and the Course Edit mouse buttons run after
 // this layer, so they stay raw N64 bits and are never remapped.
