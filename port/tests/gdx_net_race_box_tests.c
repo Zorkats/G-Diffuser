@@ -211,14 +211,15 @@ static void test_it_opens_like_the_stock_box(void) {
 
     racing(21, 0);
     CHECK(gdx_net_race_box_opening() == 0);
-    /* The stock Retry box grows over 60 frames, and so does this one. */
-    CHECK(GDX_NET_RACE_BOX_OPEN_FRAMES == 60);
+    /* The stock pause box's scissor falls by 8 a frame, and so does this one's: the box, 64 pixels tall
+       with its scissor margin, is shut on the frame it opens and shows on the next. */
+    CHECK(GDX_NET_RACE_BOX_OPEN_FRAMES == 4 && GDX_NET_RACE_BOX_OPEN_STEP == 8);
     CHECK(start() == GDX_NET_RACE_BOX_OPENED);
-    CHECK(gdx_net_race_box_opening() == GDX_NET_RACE_BOX_OPEN_FRAMES);
-    /* The timer falls by one a frame, and no press counts while it is above 0. */
+    CHECK(gdx_net_race_box_opening() == GDX_NET_RACE_BOX_OPEN_FRAMES * GDX_NET_RACE_BOX_OPEN_STEP);
+    /* The timer falls by one step a frame, and no press counts while it is above 0. */
     for (i = 1; i <= GDX_NET_RACE_BOX_OPEN_FRAMES; i++) {
         CHECK(choose() == GDX_NET_RACE_BOX_NOTHING);
-        CHECK(gdx_net_race_box_opening() == GDX_NET_RACE_BOX_OPEN_FRAMES - i);
+        CHECK(gdx_net_race_box_opening() == (GDX_NET_RACE_BOX_OPEN_FRAMES - i) * GDX_NET_RACE_BOX_OPEN_STEP);
     }
     /* Fully open: it is drawn whole, and the next press counts. */
     CHECK(gdx_net_race_box_opening() == 0);
@@ -229,13 +230,13 @@ static void test_it_opens_like_the_stock_box(void) {
     /* Closed in the middle of opening (the race ended), it opens from the start the next time. */
     racing(21, 0);
     CHECK(start() == GDX_NET_RACE_BOX_OPENED);
-    CHECK(idle_frames(20) == 0);
-    CHECK(gdx_net_race_box_opening() == GDX_NET_RACE_BOX_OPEN_FRAMES - 20);
+    CHECK(idle_frames(2) == 0);
+    CHECK(gdx_net_race_box_opening() == (GDX_NET_RACE_BOX_OPEN_FRAMES - 2) * GDX_NET_RACE_BOX_OPEN_STEP);
     gdx_net_race_box_reset();
     CHECK(gdx_net_race_box_opening() == 0);
     racing(21, 0);
     CHECK(start() == GDX_NET_RACE_BOX_OPENED);
-    CHECK(gdx_net_race_box_opening() == GDX_NET_RACE_BOX_OPEN_FRAMES);
+    CHECK(gdx_net_race_box_opening() == GDX_NET_RACE_BOX_OPEN_FRAMES * GDX_NET_RACE_BOX_OPEN_STEP);
 }
 
 static void test_continue_and_b_close_it(void) {
@@ -380,8 +381,8 @@ static void test_a_stick_already_leaning_does_not_move_at_once(void) {
     for (i = 0; i < GDX_NET_RACE_BOX_OPEN_FRAMES; i++) {
         CHECK(stick(-80) == GDX_NET_RACE_BOX_NOTHING);
     }
-    /* 31 frames of hold before the box and 60 while it opened count as a push already made, not as a
-       hold: the first frame that takes a press is the third of the hold, and the repeat comes at 60. */
+    /* 31 frames of hold before the box and the frames while it opened count as a push already made, not
+       as a hold: the first frame that takes a press is the third of the hold, and the repeat comes at 60. */
     CHECK(stick(-80) == GDX_NET_RACE_BOX_NOTHING);
     CHECK(gdx_net_race_box_cursor() == 0);
     CHECK(hold_stick(-80, GDX_NET_RACE_BOX_REPEAT_AFTER - 4) == 0);

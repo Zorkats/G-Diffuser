@@ -4,7 +4,7 @@
 // current time in milliseconds and appends the messages to send to `out`; the caller (LobbyHost) moves them
 // over the channel. That keeps every state, seat rule and timeout testable on a fake clock.
 //
-// The states, in order: LOBBY, then VOTING and LOTTERY with four or more racers or PICK with fewer, then
+// The states, in order: LOBBY, then VOTING and LOTTERY, or PICK when the host chose last place picks, then
 // MACHINE (the lock-in screen), ASSETS when a racer still lacks a custom track, GRID_SYNC, COUNTDOWN, RACING
 // and RESULTS, and back to the next vote or pick. Every wait has a timeout, and a player who misses one
 // watches the race instead of stalling it.
@@ -73,8 +73,6 @@ constexpr uint32_t kAfterWinnerMs = 60000;
 constexpr uint32_t kFinishAheadMs = 1000;
 constexpr uint32_t kFinishBehindMs = 1000;
 
-// Under this many racers nobody votes: last place picks (D13).
-constexpr size_t kVoteMinRacers = 4;
 // Preset messages one player may send per window.
 constexpr size_t kEmoteBurst = 5;
 constexpr uint32_t kEmoteWindowMs = 5000;
@@ -142,7 +140,7 @@ uint32_t RoomHash(uint32_t roomId, uint16_t raceIndex, const std::vector<Ballot>
 // The pool's track that hash selects, never `avoid` while the pool holds another one. 0 for an empty pool.
 uint8_t DrawTrack(uint32_t hash, uint32_t pool, uint8_t avoid);
 
-// The track the host draws when nobody chooses: a series' first race under four racers, a pick that timed
+// The track the host draws when nobody chooses: a series' first race when last place picks, a pick that timed
 // out, a Random pick. Never the track just raced while the pool holds another one.
 uint8_t DrawnTrack(uint32_t roomId, uint16_t raceIndex, uint32_t pool, uint8_t lastTrack);
 
@@ -238,10 +236,13 @@ public:
     bool SkipLottery(uint32_t nowMs, std::vector<Outgoing>& out);
     // From the results back to the lobby.
     bool EndSeries(uint32_t nowMs, std::vector<Outgoing>& out);
-    // kDefaultRacers to kMaxRacers, and never below the racers already seated.
+    // kMinRacers to kMaxRacers, and never below the racers already seated.
     bool SetRacerCap(uint8_t cap, uint32_t nowMs, std::vector<Outgoing>& out);
     // The host's switch for custom tracks (D8). Ballots and picks already made stay as they are.
     bool SetCustomTracks(bool on, uint32_t nowMs, std::vector<Outgoing>& out);
+    // The host's course choice (decision 75): false, the racers vote; true, last place picks (D13). It applies
+    // from the next track choice; one already open runs as it began.
+    bool SetLastPlacePicks(bool on, uint32_t nowMs, std::vector<Outgoing>& out);
     // The rules of the next race. Refused once a grid has been sent, and for values outside their limits.
     // They travel in the next `room`, which Update sends.
     bool SetRules(const RaceRules& rules);
@@ -415,6 +416,7 @@ private:
     uint32_t phaseMs_ = 0; // 0: the phase has no timer
     uint8_t racerCap_ = static_cast<uint8_t>(kDefaultRacers);
     bool customTracks_ = false;
+    bool lastPlacePicks_ = false;
     uint16_t raceIndex_ = 0;    // every race of this room, so two series never draw alike
     uint32_t seriesRaces_ = 0;  // races finished in this series
     uint32_t nextSerial_ = 0;

@@ -1187,16 +1187,30 @@ void TestRoomCodec() {
     CHECK(stateOut.cpusOut);
     // The CPU machines are in the race or out of it: that byte is 0 or 1 and nothing else. After it come
     // the custom-track switch (1), the CPU flags (1), AI aggression (2), the rules (14) and the successor
-    // with its address (19), the room type (1), the lottery commitment (32) and the room code (4).
+    // with its address (19), the room type (1), the lottery commitment (32), the room code (4) and the
+    // course choice (1).
     {
         RoomState plain = state;
         plain.cpusOut = false;
         CHECK(!(plain == state));
         std::vector<uint8_t> bytes = EncodeRoomState(plain);
-        const size_t at = bytes.size() - 75;
+        const size_t at = bytes.size() - 76;
         CHECK(bytes.size() == stateBytes.size() && bytes[at] == 0 && stateBytes[at] == 1);
         CHECK(DecodeRoomState(bytes.data(), bytes.size(), stateOut) && stateOut == plain && !stateOut.cpusOut);
         bytes[at] = 2;
+        RoomState kept;
+        kept.roomId = 99;
+        CHECK(!DecodeRoomState(bytes.data(), bytes.size(), kept) && kept.roomId == 99);
+    }
+    // The course choice (protocol 11) is the last byte: 0 the room votes, 1 last place picks, nothing else.
+    {
+        RoomState picks = state;
+        picks.lastPlacePicks = true;
+        CHECK(!(picks == state));
+        std::vector<uint8_t> bytes = EncodeRoomState(picks);
+        CHECK(bytes.size() == stateBytes.size() && bytes.back() == 1 && stateBytes.back() == 0);
+        CHECK(DecodeRoomState(bytes.data(), bytes.size(), stateOut) && stateOut == picks && stateOut.lastPlacePicks);
+        bytes.back() = 2;
         RoomState kept;
         kept.roomId = 99;
         CHECK(!DecodeRoomState(bytes.data(), bytes.size(), kept) && kept.roomId == 99);
@@ -1220,8 +1234,16 @@ void TestRoomCodec() {
     badState.phaseLeftMs = 60001;
     CHECK(refusesState(badState));
     badState = state;
-    badState.racerCap = 7;
+    badState.racerCap = 0;
     CHECK(refusesState(badState));
+    {
+        RoomState solo = state; // a room of one race seat is a room (decision 76)
+        solo.racerCap = 1;
+        solo.racers = 1;
+        solo.locked = 1;
+        const std::vector<uint8_t> soloBytes = EncodeRoomState(solo);
+        CHECK(DecodeRoomState(soloBytes.data(), soloBytes.size(), stateOut) && stateOut == solo);
+    }
     badState = state;
     badState.racerCap = 13;
     CHECK(refusesState(badState));
@@ -1289,7 +1311,7 @@ void TestRoomCodec() {
               plain.rules == RaceRules());
         // The CPU flags byte takes two bits and nothing else.
         std::vector<uint8_t> flagged = fullBytes;
-        const size_t cpuFlagsAt = fullBytes.size() - 73;
+        const size_t cpuFlagsAt = fullBytes.size() - 74;
         CHECK(flagged[cpuFlagsAt] == 2);
         for (uint8_t bad : { uint8_t{ 4 }, uint8_t{ 0x80 }, uint8_t{ 0xFF } }) {
             flagged[cpuFlagsAt] = bad;
@@ -1545,7 +1567,7 @@ void TestDiscoveryCodec() {
     bad.port = 0;
     CHECK(refuses(bad));
     bad = room;
-    bad.racerCap = 7;
+    bad.racerCap = 0;
     CHECK(refuses(bad));
     bad = room;
     bad.racerCap = 13;
@@ -1718,7 +1740,7 @@ void TestMachineRecordBounds() {
 
 void TestCustomTrackWire() {
     std::printf("codec: custom tracks, machine records, hack identity, boost length\n");
-    CHECK(kLobbyVersion == kProtocolVersion && kProtocolVersion == 10); // O5.1, O5.3, O6.1, O7.3, R4 and direct links bumped it
+    CHECK(kLobbyVersion == kProtocolVersion && kProtocolVersion == 11); // O5.1, O5.3, O6.1, O7.3, R4, direct links and the course choice bumped it
     CHECK(static_cast<uint8_t>(Phase::Assets) == 9 && kPhaseCount == 10);
     CHECK(std::string(PhaseName(Phase::Assets)) == "Getting the track");
     CHECK(static_cast<uint8_t>(RejectReason::Hack) == 7 && RejectReasonText(RejectReason::Hack)[0] != '\0');
@@ -1845,8 +1867,8 @@ void TestCustomTrackWire() {
     RoomState roomOut;
     CHECK(DecodeRoomState(v.data(), v.size(), roomOut) && roomOut == room && roomOut.customTracks);
     // The switch is the byte before the version 4 tail: CPU flags, aggression, rules, successor (36 bytes),
-    // then the version 7 room type, commitment and code (37 bytes).
-    const size_t switchAt = v.size() - 74;
+    // then the version 7 room type, commitment and code (37 bytes) and the version 11 course choice (1 byte).
+    const size_t switchAt = v.size() - 75;
     CHECK(v[switchAt] == 1);
     CheckEdges(v, [](const uint8_t* d, size_t n) {
         RoomState o;
@@ -2858,20 +2880,22 @@ void TestRoomTypeWire() {
         v = EncodeRoomState(other);
         CHECK(DecodeRoomState(v.data(), v.size(), out) && out == other);
     }
-    // The type byte sits right before the commitment and the code, and only known types decode.
+    // The type byte sits right before the commitment, the code and the course choice, and only known types
+    // decode.
     v = EncodeRoomState(RoomState());
-    CHECK(v[v.size() - 37] == 0);
+    CHECK(v[v.size() - 38] == 0);
     for (uint8_t bad : { kRoomTypeCount, uint8_t{ 0x80 }, uint8_t{ 0xFF } }) {
-        v[v.size() - 37] = bad;
+        v[v.size() - 38] = bad;
         CHECK(!DecodeRoomState(v.data(), v.size(), out));
     }
-    v[v.size() - 37] = static_cast<uint8_t>(RoomType::Friends);
+    v[v.size() - 38] = static_cast<uint8_t>(RoomType::Friends);
     CHECK(DecodeRoomState(v.data(), v.size(), out) && out.type == RoomType::Friends);
 
-    // The room code: the last 4 bytes. None in any room; a code value only in a directory room.
+    // The room code: the 4 bytes before the course choice. None in any room; a code value only in a directory
+    // room.
     CHECK(RoomState().code == kNoRoomCode);
     v = EncodeRoomState(RoomState());
-    CHECK(v[v.size() - 1] == 0xFF && v[v.size() - 4] == 0xFF);
+    CHECK(v[v.size() - 2] == 0xFF && v[v.size() - 5] == 0xFF);
     for (RoomType type : { RoomType::Code, RoomType::Open, RoomType::Friends }) {
         for (uint32_t code : { 0u, 12345u, kRoomCodeValues - 1 }) {
             RoomState listed;
@@ -3223,7 +3247,13 @@ void TestPickFlow() {
     lan.Tick(10);
     CHECK(lan.AllIn(Phase::Lobby));
 
-    // Every racer ready: the series starts. Three racers and nobody has finished last yet, so the room draws.
+    // The host chooses LAST PLACE PICKS (decision 75), and every copy hears it.
+    CHECK(!ana.Room(lan.now).lastPlacePicks);
+    CHECK(lan.host->SetLastPlacePicks(true, lan.now));
+    lan.Tick(10);
+    CHECK(ana.Room(lan.now).lastPlacePicks && bo.Room(lan.now).lastPlacePicks);
+
+    // Every racer ready: the series starts. Nobody has finished last yet, so the room draws.
     CHECK(lan.host->SetReady(true, lan.now));
     CHECK(lan.HostPhase() == Phase::Machine);
     lan.Tick(10);
@@ -3311,7 +3341,9 @@ void TestWatcherRacesNext() {
     wim.RaceNext(true);
     lan.Tick(10);
 
-    // The lock-in screen opens: he takes a race seat and is on the grid.
+    // The lock-in screen opens: he takes a race seat and is on the grid. On LAST PLACE PICKS the first race
+    // is drawn, so it opens at once.
+    CHECK(lan.host->SetLastPlacePicks(true, lan.now));
     CHECK(lan.host->Start(lan.now));
     lan.Tick(10);
     CHECK(lan.AllIn(Phase::Machine));
@@ -3359,6 +3391,7 @@ void TestRaceStart() {
     RaceRules bad = rules;
     bad.laps = 0;
     CHECK(!lan.host->SetRules(bad) && lan.host->SetRules(rules));
+    CHECK(lan.host->SetLastPlacePicks(true, lan.now)); // the first race is drawn: no vote to wait out
     CHECK(lan.host->Start(lan.now));
     lan.Tick(10);
     CHECK(lan.AllIn(Phase::Machine));
@@ -3426,6 +3459,7 @@ void TestRaceStart() {
     Lan none;
     LobbyClient& cy = none.AddClient("Cy");
     none.Settle();
+    CHECK(none.host->SetLastPlacePicks(true, none.now));
     CHECK(none.host->Start(none.now));
     cy.Lock(LockOf(1, 0, 50));
     none.Tick(10);
@@ -3443,6 +3477,7 @@ void TestRaceStart() {
     Lan shut;
     LobbyClient& di = shut.AddClient("Di");
     shut.Settle();
+    CHECK(shut.host->SetLastPlacePicks(true, shut.now));
     CHECK(shut.host->Start(shut.now));
     di.Lock(LockOf(1, 0, 50));
     shut.Tick(10);
@@ -3467,6 +3502,7 @@ void TestRaceResults() {
     RaceResults table;
     CHECK(!ana.Results(table) && !wim.Results(table) && lan.host->Results().entries.empty());
 
+    CHECK(lan.host->SetLastPlacePicks(true, lan.now)); // the first race is drawn: no vote to wait out
     CHECK(lan.host->Start(lan.now));
     lan.Tick(10);
     ana.Lock(LockOf(7, 1, 50));
@@ -3712,6 +3748,7 @@ void TestRacePoses() {
     run(4);
     CHECK(lan.host->Refused() == refused && quiet() && StatesOf(raw).empty());
 
+    CHECK(lan.host->SetLastPlacePicks(true, lan.now)); // the first race is drawn: no vote to wait out
     CHECK(lan.host->Start(lan.now));
     run(10);
     CHECK(lan.HostPhase() == Phase::Machine);
@@ -3998,14 +4035,15 @@ struct Disk {
     }
 };
 
-// Host, Ana and Bo, driven to the phase, with Ana the successor. Results comes after a race run to its cap,
-// Ana first, the host second and Bo last.
+// Host, Ana and Bo on LAST PLACE PICKS, driven to the phase, with Ana the successor. Results comes after a
+// race run to its cap, Ana first, the host second and Bo last.
 void DriveTo(Lan& lan, Phase phase) {
     LobbyClient& ana = *lan.clients[0];
     LobbyClient& bo = *lan.clients[1];
     if (phase == Phase::Lobby) {
         return;
     }
+    CHECK(lan.host->SetLastPlacePicks(true, lan.now)); // the first race is drawn: no vote to wait out
     CHECK(lan.host->Start(lan.now));
     lan.Tick(10);
     CHECK(lan.AllIn(Phase::Machine));
@@ -5006,10 +5044,10 @@ void TestBrowser() {
               found.room.watchers == 1 && found.room.phase == Phase::Lobby && found.room.build == kBuild);
         CHECK(found.room.RaceSeatFree() && found.room.WatchSeatFree());
     }
-    // The list follows the room: the next probe's answer says a race is being set up.
+    // The list follows the room: the next probe's answer says the track vote is open.
     CHECK(lan.host->Start(lan.now));
     lan.Tick(100);
-    CHECK(browser.Rooms().size() == 1 && browser.Rooms()[0].room.phase == Phase::Machine);
+    CHECK(browser.Rooms().size() == 1 && browser.Rooms()[0].room.phase == Phase::Voting);
     // A reply for another browser's probe, and noise, are not rooms.
     RoomInfo other;
     other.port = 1;
@@ -5386,7 +5424,7 @@ void TestReachAndBanCodecs() {
 // Protocol 10 (decisions 62, 63, 67, 68, 73): Peers, host to one member, and Paths, member to host.
 void TestPeersAndPathsCodecs() {
     std::printf("peers and paths codecs (protocol 10)\n");
-    CHECK(kLobbyVersion == 10);
+    CHECK(kLobbyVersion >= 10); // protocol 10 brought them
     CHECK(kPeersPerMessage >= 1 && 1 + kPeersPerMessage * kPeerEntryMaxBytes <= gdx::net::kMaxMessagePayload);
 
     const auto endpoint = [](int a, int b, int c, int d, uint16_t port) {
@@ -5656,6 +5694,7 @@ void TestBansAfterHandover() {
 }
 
 int main() {
+    std::setvbuf(stdout, nullptr, _IONBF, 0); // a crash keeps the lines before it
     TestJoinCodec();
     TestRosterCodec();
     TestRoomCodec();

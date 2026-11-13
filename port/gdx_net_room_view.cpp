@@ -56,7 +56,7 @@ static_assert(static_cast<int>(ResultKind::Unfinished) == GDX_NET_ROOM_RESULT_UN
 static_assert(static_cast<int>(ResultKind::Retired) == GDX_NET_ROOM_RESULT_RETIRED, "result");
 static_assert(kMaxPlayers == GDX_NET_ROOM_PLAYERS, "players");
 static_assert(kMaxRacers == GDX_NET_ROOM_RACERS && kMaxRacers == GDX_NET_ROOM_SEATS_MAX, "racers");
-static_assert(kDefaultRacers == GDX_NET_ROOM_SEATS_MIN, "racers");
+static_assert(kMinRacers == GDX_NET_ROOM_SEATS_MIN, "racers");
 static_assert(kMaxWatchers == GDX_NET_ROOM_WATCH_SEATS, "watchers");
 static_assert(kNameMax + 1 == GDX_NET_ROOM_NAME_BYTES, "name");
 static_assert(kDefaultPort == GDX_NET_ROOM_DEFAULT_PORT, "port");
@@ -175,6 +175,7 @@ void Fill(const View& view, GdxNetRoomView& out) {
     out.raceIndex = view.room.raceIndex;
     out.racerCap = view.room.racerCap;
     out.customTracks = view.room.customTracks ? 1 : 0;
+    out.lastPlacePicks = view.room.lastPlacePicks ? 1 : 0;
     out.cpuFill = view.room.cpuFill ? 1 : 0;
     out.successor = view.room.successor < kMaxPlayers ? view.room.successor : GDX_NET_ROOM_NOBODY;
     out.pool = view.room.pool;
@@ -481,6 +482,10 @@ extern "C" void gdx_lan_room_racer_cap(int cap) {
 
 extern "C" void gdx_lan_room_custom_tracks(int on) {
     gdx::lan::SetCustomTracks(on != 0);
+}
+
+extern "C" void gdx_lan_room_last_place_picks(int on) {
+    gdx::lan::SetLastPlacePicks(on != 0);
 }
 
 extern "C" void gdx_lan_room_cpu_fill(int on) {

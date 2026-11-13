@@ -120,6 +120,7 @@ struct Command {
         EndSeries,
         RacerCap,
         CustomTracks,
+        LastPlacePicks,
         Kick,
         Ban,
         GridReady,
@@ -132,7 +133,7 @@ struct Command {
         CpuFill,
         CpuTuning
     } type = Type::Ready;
-    bool flag = false; // Ready, RaceNext, CustomTracks, CpuFill, CpuTuning (track hazards)
+    bool flag = false; // Ready, RaceNext, CustomTracks, LastPlacePicks, CpuFill, CpuTuning (track hazards)
     uint16_t aggression = kAiAggressionDefault; // CpuTuning
     uint8_t value = 0; // a track, a preset message, a racer cap or a player id
     LockRequest lock;
@@ -477,6 +478,9 @@ void RunHostCommand(LobbyHost& host, const Command& cmd, uint32_t now) {
         break;
     case Command::Type::CustomTracks:
         host.SetCustomTracks(cmd.flag, now);
+        break;
+    case Command::Type::LastPlacePicks:
+        host.SetLastPlacePicks(cmd.flag, now);
         break;
     case Command::Type::CpuFill: {
         CpuOptions cpu = host.Cpu();
@@ -1488,6 +1492,10 @@ void SetRacerCap(uint8_t cap) {
 
 void SetCustomTracks(bool on) {
     PushType(Command::Type::CustomTracks, 0, on);
+}
+
+void SetLastPlacePicks(bool on) {
+    PushType(Command::Type::LastPlacePicks, 0, on);
 }
 
 void SetCpuFill(bool on) {

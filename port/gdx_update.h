@@ -38,6 +38,10 @@ void gdx_update_start_download(void);
 void gdx_update_apply_and_restart(void);
 void gdx_update_cleanup_on_boot(void);
 
+/* 1 in a build of the nightly channel. G-NET stays closed there until a stable release carries it (decision 77):
+   the main menu greys its card and the LAN lobby page says why. */
+int gdx_build_is_nightly(void);
+
 /* HTML page for this channel, not the API URL. */
 const char* gdx_update_release_page_url(void);
 

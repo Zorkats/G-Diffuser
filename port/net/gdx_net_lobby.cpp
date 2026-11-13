@@ -663,6 +663,7 @@ std::vector<uint8_t> EncodeRoomState(const RoomState& room) {
     w.U8(static_cast<uint8_t>(room.type));
     w.B32(room.commitment);
     w.U32(room.code);
+    w.U8(room.lastPlacePicks ? 1 : 0);
     return w.Take();
 }
 
@@ -1076,9 +1077,10 @@ bool DecodeRoomState(const uint8_t* data, size_t len, RoomState& out) {
     const uint8_t type = r.U8();
     room.commitment = r.B32();
     room.code = r.U32();
+    const uint8_t lastPlacePicks = r.U8();
     const auto trackOrNone = [](uint8_t t) { return t < kStockTracks || t == kTrackNone || t == kTrackCustom; };
     if (!r.Done() || phase >= kPhaseCount || room.phaseLeftMs > room.phaseTotalMs ||
-        room.racerCap < kDefaultRacers || room.racerCap > kMaxRacers || !PoolOk(room.pool) ||
+        room.racerCap < kMinRacers || room.racerCap > kMaxRacers || !PoolOk(room.pool) || lastPlacePicks > 1 ||
         !trackOrNone(room.track) || !trackOrNone(room.lastTrack) ||
         (room.picker >= kMaxPlayers && room.picker != kSystemId) || room.racers > kMaxRacers ||
         room.locked > room.racers || cpusOut > 1 || customTracks > 1 || (cpuFlags & ~kCpuFlagsAll) != 0 ||
@@ -1093,6 +1095,7 @@ bool DecodeRoomState(const uint8_t* data, size_t len, RoomState& out) {
     room.type = static_cast<RoomType>(type);
     room.cpusOut = cpusOut == 1;
     room.customTracks = customTracks == 1;
+    room.lastPlacePicks = lastPlacePicks == 1;
     room.cpuFill = (cpuFlags & kCpuFill) != 0;
     room.cpuTrackHazards = (cpuFlags & kCpuTrackHazards) != 0;
     out = room;
@@ -1844,7 +1847,7 @@ bool DecodeRoom(const uint8_t* data, size_t len, uint32_t& nonce, RoomInfo& out)
     }
     // The host always holds a race seat, so a room has at least one racer.
     if (kind != kKindRoom || version != kLobbyVersion || room.port == 0 || phase >= kPhaseCount ||
-        room.racerCap < kDefaultRacers || room.racerCap > kMaxRacers || room.racers == 0 ||
+        room.racerCap < kMinRacers || room.racerCap > kMaxRacers || room.racers == 0 ||
         room.racers > room.racerCap || room.watchers > kMaxWatchers || !BuildOk(room.build) ||
         !NameOk(room.hostName)) {
         return false;

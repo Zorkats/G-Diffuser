@@ -1298,6 +1298,10 @@ void ensure_thread(Worker& w) {
 
 }  // namespace
 
+extern "C" int gdx_build_is_nightly(void) {
+    return channel_is("nightly") ? 1 : 0;
+}
+
 extern "C" int gdx_update_nightly_offer(const char* remoteDate, const char* remoteHash, const char* localDate,
                                         const char* localHash) {
     if (!eight_digits(remoteDate) || !eight_digits(localDate) || remoteHash == nullptr || localHash == nullptr) {

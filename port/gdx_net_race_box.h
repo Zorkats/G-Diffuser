@@ -35,10 +35,13 @@ extern "C" {
 /* The most rows the box has. */
 #define GDX_NET_RACE_BOX_ROWS 3
 
-/* Frames the box takes to open. It grows from its centre as the stock Retry box does, over the same 60
- * frames (sGeneralRaceMenuScissorBoxTimer in menus.c), and takes no press until it is fully open: the press
- * that opened it is not also an answer. */
-#define GDX_NET_RACE_BOX_OPEN_FRAMES 60
+/* Frames the box takes to open, and the pixels its scissor gains on each side per frame. It grows from its
+ * centre at the speed of the stock pause box, whose scissor timer falls by 8 a frame
+ * (sPauseMenuScissorBoxTimer in Menus_DrawGeneralPause), so it shows on the second frame. The stock Retry
+ * box grows by 1 a frame over 60, which left this smaller box blank for half a second. It takes no press
+ * until it is fully open: the press that opened it is not also an answer. */
+#define GDX_NET_RACE_BOX_OPEN_FRAMES 4
+#define GDX_NET_RACE_BOX_OPEN_STEP 8
 
 /* Frames after the copy's own machine is out before the box comes up by itself. The stock Retry box
  * waits as long (sPlayerRetireTimer in menus.c). */
@@ -67,8 +70,9 @@ int gdx_net_race_box_frame(int start, int accept, int back, int up, int down, in
 /* The rows to draw: 0 while the box is closed, else 3. */
 int gdx_net_race_box_rows(void);
 
-/* Frames until the box is fully open: GDX_NET_RACE_BOX_OPEN_FRAMES on the frame it opened, down to 0, and 0
- * while it is closed. The drawing shrinks the stock scissor by this many pixels on each side. */
+/* Pixels the drawing shrinks the scissor by on each side: GDX_NET_RACE_BOX_OPEN_FRAMES times
+ * GDX_NET_RACE_BOX_OPEN_STEP on the frame it opened, down by GDX_NET_RACE_BOX_OPEN_STEP a frame to 0, and 0
+ * while it is closed. */
 int gdx_net_race_box_opening(void);
 
 /* The row the cursor is on, 0 at the top. */

@@ -84,6 +84,7 @@ enum {
     ROW_RACE_NEXT,
     ROW_START,
     ROW_SEATS,
+    ROW_COURSE,
     ROW_CUSTOM,
     ROW_CPU_FILL,
     ROW_LEAVE,
@@ -390,6 +391,7 @@ static void build_rows(void) {
                     case GDX_NET_ROOM_PHASE_LOBBY:
                         add_row(ROW_START, 1);
                         add_row(ROW_SEATS, 1);
+                        add_row(ROW_COURSE, 1);
                         add_row(ROW_CUSTOM, 1);
                         add_row(ROW_CPU_FILL, 1);
                         break;
@@ -1186,6 +1188,9 @@ static int confirm(void) {
         case ROW_SEATS:
             sSound = GDX_NET_ROOM_SOUND_NONE; /* left and right change it */
             break;
+        case ROW_COURSE:
+            gdx_lan_room_last_place_picks(!sView.lastPlacePicks);
+            break;
         case ROW_CUSTOM:
             gdx_lan_room_custom_tracks(!sView.customTracks);
             break;
@@ -1371,8 +1376,17 @@ int gdx_net_room_screen_update(unsigned input) {
     if ((input & (GDX_NET_ROOM_IN_LEFT | GDX_NET_ROOM_IN_RIGHT)) && sCursorId == ROW_SEATS) {
         const int cap = sView.racerCap + ((input & GDX_NET_ROOM_IN_RIGHT) ? 1 : -1);
 
-        if (cap >= GDX_NET_ROOM_SEATS_MIN && cap <= GDX_NET_ROOM_SEATS_MAX) {
+        /* Never fewer seats than the racers already in them: the room would refuse it. */
+        if (cap >= GDX_NET_ROOM_SEATS_MIN && cap <= GDX_NET_ROOM_SEATS_MAX && cap >= count_racers()) {
             gdx_lan_room_racer_cap(cap);
+            sSound = GDX_NET_ROOM_SOUND_MOVE;
+        }
+    }
+    if ((input & (GDX_NET_ROOM_IN_LEFT | GDX_NET_ROOM_IN_RIGHT)) && sCursorId == ROW_COURSE) {
+        const int last = (input & GDX_NET_ROOM_IN_RIGHT) ? 1 : 0;
+
+        if (last != sView.lastPlacePicks) {
+            gdx_lan_room_last_place_picks(last);
             sSound = GDX_NET_ROOM_SOUND_MOVE;
         }
     }
@@ -1563,6 +1577,8 @@ static const char* row_label(int id) {
                                                                                        : "VOTE FOR A TRACK";
         case ROW_SEATS:
             return "RACE SEATS";
+        case ROW_COURSE:
+            return "COURSE CHOICE";
         case ROW_CUSTOM:
             return "CUSTOM TRACKS";
         case ROW_CPU_FILL:
@@ -1860,10 +1876,10 @@ static void format_address(unsigned ip, unsigned port, char* out, int size) {
  * lines at most, from y 58. */
 static const char kNotice[] =
     "A ROOM GETS YOUR PROFILE NAME AND COLOUR AND MACHINE AND FRIEND CODE AND YOUR MESSAGES. ITS HOST CAN BAN "
-    "YOUR FRIEND CODE. THE HOST SEES YOUR IP ADDRESS. IF YOU ARE NEXT TO HOST THE WHOLE ROOM GETS IT. PLAYERS "
-    "ON YOUR NETWORK CAN SEE IT TOO. A ROOM BY CODE OR AN OPEN ROOM OR A ROOM FOR FRIENDS IS LISTED IN THE "
-    "ROOM DIRECTORY WITH THE ADDRESS AND FRIEND CODE OF ITS HOST. YOUR FRIEND CODE IS THE PUBLIC HALF OF YOUR "
-    "PROFILE KEY. NOTHING IS SENT BEFORE YOU HOST OR SEARCH OR JOIN.";
+    "YOUR FRIEND CODE. THE HOST AND PLAYERS ON YOUR NETWORK SEE YOUR IP ADDRESS. THE WHOLE ROOM DOES IF YOU ARE "
+    "NEXT TO HOST OR HAVE DIRECT LINKS ON IN ONLINE SETTINGS. OPEN AND CODE AND FRIENDS ROOMS USE A CLOUDFLARE "
+    "RELAY AND ARE LISTED IN THE ROOM DIRECTORY WITH THE ADDRESS AND FRIEND CODE OF THEIR HOST. YOUR FRIEND CODE "
+    "IS THE PUBLIC HALF OF YOUR PROFILE KEY. NOTHING IS SENT BEFORE YOU HOST OR SEARCH OR JOIN.";
 
 #define NOTICE_Y 58
 #define NOTICE_LINES 14
@@ -2562,6 +2578,9 @@ static void draw_room(void) {
                 snprintf(text, sizeof(text), "NEEDS %u.%u MBIT UPLOAD", tenths / 10u, tenths % 10u);
                 put_text(124, y, GDX_NET_ROOM_FONT_SMALL, GDX_NET_ROOM_ALIGN_LEFT, GDX_NET_ROOM_COLOUR_DIM, text);
             }
+        } else if (sRows[i].id == ROW_COURSE) {
+            put_text(FIELD_LEFT, y, GDX_NET_ROOM_FONT_SMALL, GDX_NET_ROOM_ALIGN_LEFT, row_colour(i),
+                     sView.lastPlacePicks ? "LAST PLACE PICKS" : "VOTE");
         } else if (sRows[i].id == ROW_CUSTOM) {
             put_text(FIELD_LEFT, y, GDX_NET_ROOM_FONT_SMALL, GDX_NET_ROOM_ALIGN_LEFT, row_colour(i),
                      sView.customTracks ? "ON" : "OFF");

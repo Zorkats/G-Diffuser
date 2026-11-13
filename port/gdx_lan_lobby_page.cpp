@@ -14,6 +14,7 @@
 #include "gdx_lan_lobby.h"
 #include "gdx_net_room_view.h"
 #include "gdx_profile.h"
+#include "gdx_update.h"
 
 #include "imgui.h"
 
@@ -325,7 +326,7 @@ void DrawLobbyPhase(const View& view, const PlayerInfo& me, bool isHost) {
         sCapEdit = view.room.racerCap;
     }
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
-    ImGui::SliderInt("Race seats##lanlobby", &sCapEdit, static_cast<int>(kDefaultRacers), static_cast<int>(kMaxRacers));
+    ImGui::SliderInt("Race seats##lanlobby", &sCapEdit, static_cast<int>(kMinRacers), static_cast<int>(kMaxRacers));
     if (ImGui::IsItemDeactivatedAfterEdit()) {
         gdx::lan::SetRacerCap(static_cast<uint8_t>(sCapEdit));
         sCapEdit = -1;
@@ -333,7 +334,7 @@ void DrawLobbyPhase(const View& view, const PlayerInfo& me, bool isHost) {
         sCapEdit = -1;
     }
     ImGui::SetItemTooltip("How many players may race, from %u to %u. %u more may watch.",
-                          static_cast<unsigned>(kDefaultRacers), static_cast<unsigned>(kMaxRacers),
+                          static_cast<unsigned>(kMinRacers), static_cast<unsigned>(kMaxRacers),
                           static_cast<unsigned>(kMaxWatchers));
 }
 
@@ -789,6 +790,10 @@ void GdxLanLobbyPage_Draw() {
     const View view = gdx::lan::Snapshot();
     const bool inSession = view.mode == Mode::Hosting || view.mode == Mode::Joining || view.mode == Mode::Joined ||
                            view.mode == Mode::Closed;
+    if (!inSession && gdx_build_is_nightly()) {
+        ImGui::TextWrapped("G-NET opens in a stable release. This nightly build cannot host or join rooms.");
+        return;
+    }
     if (!inSession && !ActiveProfile(me)) {
         ImGui::TextWrapped("Make a profile in Online > Profile first. The room shows its name and colour.");
         return;

@@ -114,6 +114,8 @@ void SkipLottery();
 void EndSeries();
 void SetRacerCap(uint8_t cap);
 void SetCustomTracks(bool on);
+// The course choice (decision 75): false, the racers vote; true, last place picks.
+void SetLastPlacePicks(bool on);
 // CPUs fill the grid slots the humans leave free (D2).
 void SetCpuFill(bool on);
 void Kick(uint8_t id);

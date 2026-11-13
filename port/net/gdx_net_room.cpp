@@ -199,11 +199,10 @@ std::optional<RoomMachine> RoomMachine::Promote(const RoomMirror& mirror, uint8_
     }
     // The old host raced, so the racers do not outnumber the seats it had.
     const size_t racers = m.Racers();
-    m.racerCap_ = static_cast<uint8_t>(std::min<size_t>(kMaxRacers, std::max<size_t>(room.racerCap, racers)));
-    if (m.racerCap_ < kDefaultRacers) {
-        m.racerCap_ = static_cast<uint8_t>(kDefaultRacers);
-    }
+    m.racerCap_ = static_cast<uint8_t>(
+        std::min<size_t>(kMaxRacers, std::max<size_t>({ size_t{ room.racerCap }, racers, kMinRacers })));
     m.customTracks_ = room.customTracks;
+    m.lastPlacePicks_ = room.lastPlacePicks;
     m.cpu_.fill = room.cpuFill;
     m.cpu_.aiAggression = room.aiAggression < kAiAggressionMin   ? kAiAggressionMin
                           : room.aiAggression > kAiAggressionMax ? kAiAggressionMax
@@ -467,6 +466,7 @@ RoomState RoomMachine::State(uint32_t nowMs) const {
     s.phaseLeftMs = spent < phaseMs_ ? phaseMs_ - spent : 0;
     s.racerCap = racerCap_;
     s.customTracks = customTracks_;
+    s.lastPlacePicks = lastPlacePicks_;
     s.pool = config_.pool;
     s.track = track_;
     if (track_ == kTrackCustom) {
@@ -770,7 +770,7 @@ void RoomMachine::BeginTrackChoice(uint32_t nowMs, std::vector<Outgoing>& out) {
     picker_ = kSystemId;
     salt_ = Bytes32{};
     commitment_ = Bytes32{};
-    if (Racers() >= kVoteMinRacers) {
+    if (!lastPlacePicks_) {
         // An Open room commits to this race's lottery before the first ballot (decision 39).
         if (config_.type == RoomType::Open && !IsZero32(config_.lotteryKey)) {
             salt_ = lottery::RaceSalt(config_.lotteryKey, config_.roomId, raceIndex_);
@@ -780,7 +780,7 @@ void RoomMachine::BeginTrackChoice(uint32_t nowMs, std::vector<Outgoing>& out) {
         out.push_back({ kEveryone, kMsgVotes, EncodeVotes(votes_) });
         return;
     }
-    // Under four racers last place picks. A series' first race has no last place, so the host draws.
+    // The host chose last place picks. A series' first race has no last place, so the host draws.
     const uint8_t picker = seriesRaces_ > 0 ? LastPlace() : kSystemId;
     if (picker == kSystemId) {
         ChooseDrawn(kSystemId, nowMs, out);
@@ -1230,7 +1230,7 @@ bool RoomMachine::EndSeries(uint32_t nowMs, std::vector<Outgoing>& out) {
 }
 
 bool RoomMachine::SetRacerCap(uint8_t cap, uint32_t nowMs, std::vector<Outgoing>& out) {
-    if (cap < kDefaultRacers || cap > kMaxRacers || cap < Racers()) {
+    if (cap < kMinRacers || cap > kMaxRacers || cap < Racers()) {
         return false;
     }
     if (cap != racerCap_) {
@@ -1244,6 +1244,15 @@ bool RoomMachine::SetRacerCap(uint8_t cap, uint32_t nowMs, std::vector<Outgoing>
 bool RoomMachine::SetCustomTracks(bool on, uint32_t nowMs, std::vector<Outgoing>& out) {
     if (on != customTracks_) {
         customTracks_ = on;
+        roomDirty_ = true;
+    }
+    Flush(nowMs, out);
+    return true;
+}
+
+bool RoomMachine::SetLastPlacePicks(bool on, uint32_t nowMs, std::vector<Outgoing>& out) {
+    if (on != lastPlacePicks_) {
+        lastPlacePicks_ = on;
         roomDirty_ = true;
     }
     Flush(nowMs, out);

@@ -27,7 +27,7 @@ extern "C" {
 #define GDX_NET_ROOM_LINES 4
 #define GDX_NET_ROOM_MESSAGES 8 /* the preset messages a player can send */
 #define GDX_NET_ROOM_WATCH_SEATS 2
-#define GDX_NET_ROOM_SEATS_MIN 8
+#define GDX_NET_ROOM_SEATS_MIN 1
 #define GDX_NET_ROOM_SEATS_MAX 12
 #define GDX_NET_ROOM_DEFAULT_PORT 24302u
 
@@ -184,6 +184,7 @@ typedef struct GdxNetRoomView {
     unsigned raceIndex;
     int racerCap;
     int customTracks; /* the host's switch: racers may vote for and pick custom tracks */
+    int lastPlacePicks; /* the host's course choice: 0 the racers vote, 1 last place picks */
     int cpuFill;      /* the host's switch: CPUs take the grid slots the humans leave free */
     int successor;    /* the next host's id, or GDX_NET_ROOM_NOBODY */
     unsigned pool;    /* bit n set: track n can be voted, picked or drawn */
@@ -306,6 +307,7 @@ void gdx_lan_room_set_muted(int id, int muted);
 void gdx_lan_room_start(void);
 void gdx_lan_room_racer_cap(int cap);
 void gdx_lan_room_custom_tracks(int on);
+void gdx_lan_room_last_place_picks(int on);
 void gdx_lan_room_cpu_fill(int on);
 void gdx_lan_room_kick(int id);
 /* Removes the player and refuses their friend key for the rest of the room (O7.3). */

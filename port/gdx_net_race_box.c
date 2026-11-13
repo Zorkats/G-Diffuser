@@ -99,7 +99,7 @@ int gdx_net_race_box_frame(int start, int accept, int back, int up, int down, in
 
     /* The stick is followed while the box is closed or opening too, so a stick that was already leaning
        when the box came up does not move the cursor at once. Its hold stays short until the box takes a
-       press: a lean held through the 60 frames of opening would otherwise reach its repeat just then. */
+       press: a lean held before the box came up would otherwise reach its repeat just then. */
     step = cursor_step(up, down, stickY);
     if ((!sOpen || sWait > 0) && sHold > 2) {
         sHold = 2;
@@ -161,7 +161,7 @@ int gdx_net_race_box_rows(void) {
 }
 
 int gdx_net_race_box_opening(void) {
-    return sOpen ? sWait : 0;
+    return sOpen ? sWait * GDX_NET_RACE_BOX_OPEN_STEP : 0;
 }
 
 int gdx_net_race_box_cursor(void) {

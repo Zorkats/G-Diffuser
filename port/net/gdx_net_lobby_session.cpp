@@ -1320,6 +1320,13 @@ bool LobbyHost::SetCustomTracks(bool on, uint32_t nowMs) {
     return ok;
 }
 
+bool LobbyHost::SetLastPlacePicks(bool on, uint32_t nowMs) {
+    std::vector<Outgoing> out;
+    const bool ok = !closed_ && machine_.SetLastPlacePicks(on, nowMs, out);
+    Dispatch(out);
+    return ok;
+}
+
 bool LobbyHost::SetCpuOptions(const CpuOptions& cpu, uint32_t nowMs) {
     std::vector<Outgoing> out;
     const bool ok = !closed_ && machine_.SetCpuOptions(cpu, nowMs, out);

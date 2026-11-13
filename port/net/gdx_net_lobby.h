@@ -133,8 +133,10 @@ namespace gdx::net::lobby {
 constexpr uint16_t kDefaultPort = 24302;
 // One number for the channel and the room (decision 26): see kProtocolVersion.
 constexpr uint16_t kLobbyVersion = kProtocolVersion;
-// Race seats: 8 unless the host raises the cap, 12 at most (owner decision D12).
+// Race seats: 8 unless the host changes the cap, from 1 to 12 (owner decision D12, and decision 76: the floor
+// was 8 until protocol 11).
 constexpr size_t kDefaultRacers = 8;
+constexpr size_t kMinRacers = 1;
 constexpr size_t kMaxRacers = 12;
 // Watch-only seats, on top of the race seats (D14).
 constexpr size_t kMaxWatchers = 2;
@@ -306,9 +308,9 @@ enum class Seat : uint8_t {
 // Wire values. The room's state, in the order a race goes through them (design document section 3.4).
 enum class Phase : uint8_t {
     Lobby = 0,     // waiting for the host to start
-    Voting = 1,    // four or more racers: each picks a track
+    Voting = 1,    // each racer picks a track (the host's course choice, decision 75)
     Lottery = 2,   // the winning ballot is shown
-    Pick = 3,      // under four racers: last place picks
+    Pick = 3,      // last place picks (the host's course choice)
     Machine = 4,   // the lock-in screen
     GridSync = 5,  // every racer loads the track
     Countdown = 6, // the race intro
@@ -445,6 +447,9 @@ struct RoomState {
     bool cpusOut = false;       // the host's game left this race: the CPU machines it drove are out of it
     CustomTrack custom;         // the track's identity and title, when track is kTrackCustom
     bool customTracks = false;  // the host's switch (D8): voters may name custom tracks
+    // Version 11 (decision 75). The host's switch: false, every room votes for its tracks; true, last place
+    // picks (D13, the rule for rooms under four racers until protocol 11).
+    bool lastPlacePicks = false;
     // Version 4 (D28.1). Every setting a successor needs to run the room as the host did (decision 24).
     bool cpuFill = true;                          // CPUs take the grid slots the humans leave free (D2)
     uint16_t aiAggression = kAiAggressionDefault; // the host's gEnhancements.Gameplay.AiAggression
@@ -466,6 +471,7 @@ struct RoomState {
                phaseTotalMs == o.phaseTotalMs && racerCap == o.racerCap && pool == o.pool && track == o.track &&
                lastTrack == o.lastTrack && picker == o.picker && locked == o.locked && racers == o.racers &&
                cpusOut == o.cpusOut && custom == o.custom && customTracks == o.customTracks &&
+               lastPlacePicks == o.lastPlacePicks &&
                cpuFill == o.cpuFill && aiAggression == o.aiAggression && cpuTrackHazards == o.cpuTrackHazards &&
                rules == o.rules && successor == o.successor && successorIp == o.successorIp &&
                successorPort == o.successorPort && type == o.type && commitment == o.commitment && code == o.code;

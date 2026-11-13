@@ -307,6 +307,16 @@ struct Rig {
         return table;
     }
 
+    // Starts the series and goes on to the lock-in screen: the vote that opens by default (decision 75)
+    // runs out with no ballot cast, and a room on LAST PLACE PICKS draws its first race.
+    void Begin() {
+        CHECK(m.Start(now, out));
+        if (P() == Phase::Voting) {
+            SkipVote();
+        }
+        CHECK(P() == Phase::Machine);
+    }
+
     // From an open vote to the lock-in screen, with no ballot cast.
     void SkipVote() {
         CHECK(P() == Phase::Voting);
@@ -413,7 +423,8 @@ void TestSeats() {
     CHECK(r.m.Racers() == 8 && r.m.Watchers() == 0);
     CHECK(r.Refusal(r.Request("Late", Seat::Race, 3)) == RejectReason::RaceSeatsFull);
 
-    CHECK(!r.m.SetRacerCap(7, r.now, r.out));
+    CHECK(!r.m.SetRacerCap(7, r.now, r.out)); // under the eight racers seated
+    CHECK(!r.m.SetRacerCap(0, r.now, r.out));
     CHECK(!r.m.SetRacerCap(13, r.now, r.out));
     CHECK(r.S().racerCap == 8);
     CHECK(r.m.SetRacerCap(12, r.now, r.out));
@@ -482,15 +493,17 @@ void TestLobby() {
     CHECK(r.Who(ana)->pingMs == 42 && r.out.back().type == kMsgRoster);
 
     CHECK(r.m.SetReady(ana, true, r.now, r.out)); // two racers, every one ready: the series starts
-    CHECK(r.P() != Phase::Lobby);
+    CHECK(r.P() == Phase::Voting); // and two racers vote for the track (decision 75)
     CHECK(!r.Who(kHostId)->ready && !r.Who(ana)->ready);
     CHECK(!r.m.SetReady(ana, true, r.now, r.out)); // no ready mark outside the lobby
     CHECK(!r.m.Start(r.now, r.out));
     r.Verify();
 
-    // The host may start alone.
+    // The host may start alone, and a room of one votes too (decision 75).
     Rig solo;
     CHECK(solo.m.Start(solo.now, solo.out));
+    CHECK(solo.P() == Phase::Voting);
+    solo.SkipVote();
     CHECK(solo.P() == Phase::Machine && solo.S().racers == 1);
     solo.Verify();
 }
@@ -531,10 +544,11 @@ void TestTimeouts() {
     CHECK(r.S().racers == 2 && !r.Who(1)->locked && !r.Who(1)->watcher);
     r.Verify();
 
-    // Under four racers last place picks, and has kPickMs to do it.
+    // When the host chose LAST PLACE PICKS, last place has kPickMs to pick.
     Rig p;
     p.Add("Ana");
-    CHECK(p.m.Start(p.now, p.out));
+    CHECK(p.m.SetLastPlacePicks(true, p.now, p.out));
+    p.Begin();
     p.Race({ 0, 1 });
     p.After(kResultsMs);
     ExpectTimeout(p, Phase::Pick, kPickMs, Phase::Machine);
@@ -543,7 +557,8 @@ void TestTimeouts() {
     // Nobody on the grid: there is no race to run.
     Rig g;
     g.Add("Ana");
-    CHECK(g.m.Start(g.now, g.out));
+    CHECK(g.m.SetLastPlacePicks(true, g.now, g.out));
+    g.Begin();
     g.LockAll();
     ExpectTimeout(g, Phase::GridSync, kGridMs, Phase::Results);
     CHECK(g.m.LastOrder().empty() && g.OnGrid().empty());
@@ -769,8 +784,10 @@ void TestPick() {
     const uint8_t ana = r.Add("Ana");
     const uint8_t bo = r.Add("Bo");
     CHECK(!r.m.Pick(ana, 3, r.now, r.out));
+    CHECK(r.m.SetLastPlacePicks(true, r.now, r.out));
+    CHECK(r.S().lastPlacePicks);
     CHECK(r.m.Start(r.now, r.out));
-    // Three racers, first race of the series: nobody finished last yet, so the room draws.
+    // First race of the series: nobody finished last yet, so the room draws.
     CHECK(r.P() == Phase::Machine);
     Picked sent;
     const Outgoing* picked = r.Last(kMsgPicked);
@@ -822,6 +839,7 @@ void TestPick() {
     for (uint32_t room = 1; room <= 300; room++) {
         Rig t(Config(room));
         t.Add("Ana");
+        CHECK(t.m.SetLastPlacePicks(true, t.now, t.out));
         CHECK(t.m.Start(t.now, t.out));
         const uint8_t raced = t.S().track;
         t.Race({ 0, 1 });
@@ -834,17 +852,24 @@ void TestPick() {
     }
     CHECK(drawn.size() > 12);
 
-    // Four racers vote; when one leaves, the three left pick.
+    // The host turns LAST PLACE PICKS on during a series: the next race is picked, and the one after it
+    // voted again once it is off.
     Rig v;
     v.Add("Ana");
     v.Add("Bo");
     v.Add("Cy");
     CHECK(v.m.Start(v.now, v.out));
     v.SkipVote();
+    CHECK(v.m.SetLastPlacePicks(true, v.now, v.out));
     v.Race({ 3, 2, 1, 0 });
     v.m.Leave(2, v.now, v.out);
     v.After(kResultsMs);
     CHECK(v.P() == Phase::Pick && v.S().picker == kHostId);
+    CHECK(v.m.Pick(kHostId, 5, v.now, v.out));
+    CHECK(v.m.SetLastPlacePicks(false, v.now, v.out));
+    v.Race({ 3, 1, 0 });
+    v.After(kResultsMs);
+    CHECK(v.P() == Phase::Voting && !v.S().lastPlacePicks);
     v.Verify();
 }
 
@@ -858,7 +883,7 @@ void TestMachine() {
     CHECK(r.Who(ana)->machine == 7 && !r.Who(ana)->locked);
     CHECK(r.S().racers == 0 && r.S().locked == 0);
     CHECK(r.m.Start(r.now, r.out));
-    CHECK(r.P() == Phase::Machine);
+    r.SkipVote();
     CHECK(r.S().racers == 3 && r.S().locked == 0); // the watcher is not counted
     CHECK(r.Who(ana)->inRace && !r.Who(wim)->inRace);
 
@@ -891,7 +916,6 @@ void TestMachine() {
     r.After(kCountdownMs);
     r.CapRace({ ana, bo, kHostId });
     r.After(kResultsMs);
-    CHECK(r.P() == Phase::Voting); // four racers now
     r.SkipVote();
     CHECK(r.S().racers == 4 && r.S().locked == 0 && r.Who(cy)->inRace && !r.Who(ana)->locked);
     CHECK(r.Who(ana)->machine == 5); // the roster keeps the last machine locked
@@ -903,7 +927,7 @@ void TestMachine() {
     const uint8_t b = t.Add("Bo", Seat::Race, kNoMachine);
     const uint8_t c = t.Add("Cy", Seat::Race, 11);
     CHECK(t.m.Start(t.now, t.out));
-    t.SkipVote(); // four racers
+    t.SkipVote();
     CHECK(t.m.Lock(a, LockOf(5, 1, 10), t.now, t.out));
     ExpectTimeout(t, Phase::Machine, kMachineMs, Phase::GridSync);
     CHECK(t.Who(kHostId)->machine == kHostMachine && !t.Who(kHostId)->locked && t.Who(kHostId)->inRace);
@@ -917,6 +941,7 @@ void TestMachine() {
     l.Add("Ana");
     l.Add("Bo");
     CHECK(l.m.Start(l.now, l.out));
+    l.SkipVote();
     CHECK(l.m.Lock(0, LockOf(1, 0, 50), l.now, l.out));
     CHECK(l.m.Lock(1, LockOf(1, 0, 50), l.now, l.out));
     CHECK(l.P() == Phase::Machine);
@@ -961,6 +986,7 @@ void TestRaceNext() {
     CHECK(t.m.SeatNext(wim, true, t.now, t.out));
     CHECK(t.m.SeatNext(wim, false, t.now, t.out));
     CHECK(t.m.Start(t.now, t.out));
+    t.SkipVote();
     CHECK(t.P() == Phase::Machine && t.Who(wim)->watcher && !t.Who(wim)->inRace && t.S().racers == 2);
     t.Verify();
 }
@@ -971,6 +997,7 @@ void TestGrid() {
     const uint8_t ana = r.Add("Ana");
     const uint8_t wim = r.Add("Wim", Seat::Watch);
     CHECK(r.m.Start(r.now, r.out));
+    r.SkipVote();
     CHECK(!r.GridReady(ana)); // not yet
     r.LockAll();
     CHECK(r.P() == Phase::GridSync);
@@ -1003,7 +1030,7 @@ void TestGrid() {
     Rig l;
     l.Add("Ana");
     l.Add("Bo");
-    CHECK(l.m.Start(l.now, l.out));
+    l.Begin();
     l.LockAll();
     CHECK(l.GridReady(0));
     CHECK(l.GridReady(1));
@@ -1019,7 +1046,7 @@ void TestGridOrder() {
     const uint8_t bo = r.Add("Bo", Seat::Race, kNoMachine);
     r.Add("Wim", Seat::Watch);
     CHECK(r.m.LastGrid().humans.empty());
-    CHECK(r.m.Start(r.now, r.out));
+    r.Begin();
     CHECK(Count(r.out, kMsgGrid) == 0);
     CHECK(r.m.Lock(ana, LockOf(9, 2, 50), r.now, r.out));
     CHECK(r.m.Lock(bo, LockOf(12, 0, 50), r.now, r.out));
@@ -1062,12 +1089,12 @@ void TestGridOrder() {
     // The same room and race give the same seed on any host; another room does not.
     Rig same;
     Rig other(Config(78));
-    CHECK(same.m.Start(same.now, same.out));
-    CHECK(other.m.Start(other.now, other.out));
+    same.Begin();
+    other.Begin();
     same.LockAll();
     other.LockAll();
     Rig again;
-    CHECK(again.m.Start(again.now, again.out));
+    again.Begin();
     again.LockAll();
     CHECK(same.m.LastGrid().seed == again.m.LastGrid().seed && same.m.LastGrid().seed != other.m.LastGrid().seed);
     CHECK(Ids(same.m.LastGrid()) == std::vector<uint8_t>{ kHostId } && same.m.LastGrid().cpus == kGridSlots - 1);
@@ -1077,7 +1104,7 @@ void TestGridOrder() {
     bare.cpuFill = false;
     Rig n(bare);
     n.Add("Ana");
-    CHECK(n.m.Start(n.now, n.out));
+    n.Begin();
     n.LockAll();
     CHECK(n.m.LastGrid().cpus == 0 && n.m.LastGrid().humans.size() == 2);
     n.Verify();
@@ -1085,7 +1112,7 @@ void TestGridOrder() {
     // The time runs out on the lock-in screen: the grid goes out with the racers who never locked too.
     Rig e;
     const uint8_t only = e.Add("Ana");
-    CHECK(e.m.Start(e.now, e.out));
+    e.Begin();
     CHECK(e.m.Lock(only, LockOf(1, 0, 50), e.now, e.out));
     e.After(kMachineMs);
     CHECK(e.P() == Phase::GridSync && Count(e.out, kMsgGrid) == 1);
@@ -1100,7 +1127,7 @@ void TestTrackCheck() {
     Rig r;
     const uint8_t ana = r.Add("Ana");
     const uint8_t bo = r.Add("Bo");
-    CHECK(r.m.Start(r.now, r.out));
+    r.Begin();
     r.LockAll();
     CHECK(r.GridReady(ana, 9));
     CHECK(r.GridReady(bo, 4));
@@ -1117,7 +1144,7 @@ void TestTrackCheck() {
     // Without the host copy there is nobody to run the CPUs: no race, and the room moves on.
     Rig h;
     const uint8_t a = h.Add("Ana");
-    CHECK(h.m.Start(h.now, h.out));
+    h.Begin();
     h.LockAll();
     CHECK(h.GridReady(a));
     ExpectTimeout(h, Phase::GridSync, kGridMs, Phase::Results);
@@ -1127,7 +1154,7 @@ void TestTrackCheck() {
     // Everyone but the host has another track: the host races alone.
     Rig o;
     const uint8_t x = o.Add("Ana");
-    CHECK(o.m.Start(o.now, o.out));
+    o.Begin();
     o.LockAll();
     CHECK(o.GridReady(kHostId, 1));
     CHECK(o.GridReady(x, 2));
@@ -1161,7 +1188,7 @@ void TestRules() {
     CHECK(r.m.Rules() == RaceRules());
 
     CHECK(r.m.SetRules(rules)); // in the lobby
-    CHECK(r.m.Start(r.now, r.out));
+    r.Begin();
     rules.laps = 7;
     CHECK(r.m.SetRules(rules)); // on the lock-in screen
     r.LockAll();
@@ -1219,6 +1246,7 @@ void TestSeries() {
     std::printf("series\n");
     Rig r;
     const uint8_t ana = r.Add("Ana");
+    CHECK(r.m.SetLastPlacePicks(true, r.now, r.out));
     CHECK(!r.m.EndSeries(r.now, r.out));
     CHECK(r.m.Start(r.now, r.out));
     CHECK(!r.m.EndSeries(r.now, r.out));
@@ -1231,7 +1259,7 @@ void TestSeries() {
     r.After(3600000);
     CHECK(r.P() == Phase::Lobby);
 
-    // A new series starts with a draw again, whoever finished last in the one before.
+    // On LAST PLACE PICKS a new series starts with a draw again, whoever finished last in the one before.
     CHECK(r.m.Start(r.now, r.out));
     CHECK(r.P() == Phase::Machine && r.m.LastPicked().drawn && r.m.LastPicked().by == kSystemId);
     CHECK(r.S().track != first);
@@ -1261,7 +1289,7 @@ void TestFinishCheck() {
     const uint8_t ana = r.Add("Ana");
     const uint8_t bo = r.Add("Bo");
     const uint8_t wim = r.Add("Wim", Seat::Watch);
-    CHECK(r.m.Start(r.now, r.out));
+    r.Begin();
     r.LockAll();
     r.GridAll();
     // Nothing is taken before the race runs.
@@ -1319,7 +1347,7 @@ void TestFinishCheck() {
     // The first second of a race: nothing can be a second behind yet.
     Rig e;
     const uint8_t eve = e.Add("Eve");
-    CHECK(e.m.Start(e.now, e.out));
+    e.Begin();
     e.ToRacing();
     e.After(500);
     CHECK(!e.Finish(eve, 1501));
@@ -1335,7 +1363,7 @@ void TestRaceEnd() {
         Rig r;
         const uint8_t ana = r.Add("Ana");
         const uint8_t bo = r.Add("Bo");
-        CHECK(r.m.Start(r.now, r.out));
+        r.Begin();
         r.ToRacing();
         r.At(r.go + 90000);
         CHECK(r.Finish(ana, 90000));
@@ -1353,7 +1381,7 @@ void TestRaceEnd() {
         Rig r;
         const uint8_t ana = r.Add("Ana");
         const uint8_t bo = r.Add("Bo");
-        CHECK(r.m.Start(r.now, r.out));
+        r.Begin();
         r.ToRacing();
         r.At(r.go + 10000);
         CHECK(r.Retire(bo)); // a retirement starts no clock
@@ -1382,7 +1410,7 @@ void TestRaceEnd() {
         Rig r;
         const uint8_t ana = r.Add("Ana");
         const uint8_t bo = r.Add("Bo");
-        CHECK(r.m.Start(r.now, r.out));
+        r.Begin();
         r.ToRacing();
         r.At(r.go + 90000);
         CHECK(r.Finish(ana, 90000));
@@ -1397,7 +1425,7 @@ void TestRaceEnd() {
     {
         Rig r;
         const uint8_t ana = r.Add("Ana");
-        CHECK(r.m.Start(r.now, r.out));
+        r.Begin();
         r.ToRacing();
         r.At(r.go + kRaceCapMs - kAfterWinnerMs + 5000);
         CHECK(r.Finish(ana, kRaceCapMs - kAfterWinnerMs + 5000) && r.S().phaseTotalMs == kRaceCapMs &&
@@ -1413,7 +1441,7 @@ void TestRaceEnd() {
         quick.afterWinnerMs = 5000;
         Rig r(quick);
         const uint8_t ana = r.Add("Ana");
-        CHECK(r.m.Start(r.now, r.out));
+        r.Begin();
         r.ToRacing();
         r.At(r.go + 30000);
         CHECK(r.Finish(ana, 30000) && r.S().phaseTotalMs == 35000);
@@ -1427,7 +1455,7 @@ void TestRaceEnd() {
         Rig r;
         const uint8_t ana = r.Add("Ana");
         const uint8_t bo = r.Add("Bo");
-        CHECK(r.m.Start(r.now, r.out));
+        r.Begin();
         r.ToRacing();
         ExpectTimeout(r, Phase::Racing, kRaceCapMs, Phase::Results);
         const RaceResults t = r.Table();
@@ -1443,7 +1471,7 @@ void TestRaceEnd() {
         Rig r;
         const uint8_t ana = r.Add("Ana");
         const uint8_t bo = r.Add("Bo");
-        CHECK(r.m.Start(r.now, r.out));
+        r.Begin();
         r.m.SetStanding({ ana, bo, kHostId }); // not racing yet: not kept
         r.ToRacing();
         r.m.SetStanding({ bo, 99, ana });
@@ -1459,7 +1487,7 @@ void TestRaceEnd() {
         Rig r;
         const uint8_t ana = r.Add("Ana");
         const uint8_t bo = r.Add("Bo");
-        CHECK(r.m.Start(r.now, r.out));
+        r.Begin();
         r.LockAll();
         r.GridAll();
         CHECK(r.P() == Phase::Countdown);
@@ -1523,7 +1551,7 @@ void TestRaceEnd() {
         Rig r;
         const uint8_t ana = r.Add("Ana");
         const uint8_t bo = r.Add("Bo");
-        CHECK(r.m.Start(r.now, r.out));
+        r.Begin();
         r.ToRacing();
         r.m.SetStanding({ bo, kHostId, ana });
         r.m.NoteLap(ana, 2);
@@ -1540,7 +1568,7 @@ void TestRaceEnd() {
         Rig r;
         const uint8_t ana = r.Add("Ana");
         const uint8_t bo = r.Add("Bo");
-        CHECK(r.m.Start(r.now, r.out));
+        r.Begin();
         r.ToRacing();
         r.m.SetStanding({ kHostId });
         r.At(r.go + 60000);
@@ -1618,7 +1646,7 @@ void TestResultsOrder() {
         const uint8_t ana = r.Add("Ana");
         const uint8_t bo = r.Add("Bo");
         const uint8_t wim = r.Add("Wim", Seat::Watch);
-        CHECK(r.m.Start(r.now, r.out));
+        r.Begin();
         r.LockAll();
         CHECK(r.GridReady(kHostId) && r.GridReady(ana) && r.GridReady(bo, 9));
         r.After(kCountdownMs);
@@ -1640,7 +1668,7 @@ void TestRaceLeaveAndJoin() {
         Rig r;
         const uint8_t ana = r.Add("Ana");
         const uint8_t bo = r.Add("Bo");
-        CHECK(r.m.Start(r.now, r.out));
+        r.Begin();
         r.ToRacing();
         r.At(r.go + 40000);
         CHECK(r.Finish(ana, 40000) && r.Retire(kHostId) && r.P() == Phase::Racing);
@@ -1656,7 +1684,7 @@ void TestRaceLeaveAndJoin() {
         Rig r;
         const uint8_t ana = r.Add("Ana");
         const uint8_t bo = r.Add("Bo");
-        CHECK(r.m.Start(r.now, r.out));
+        r.Begin();
         r.ToRacing();
         r.At(r.go + 40000);
         CHECK(r.Finish(ana, 40000) && Count(r.out, kMsgResults) == 1);
@@ -1674,7 +1702,7 @@ void TestRaceLeaveAndJoin() {
         const uint8_t ana = r.Add("Ana");
         const uint8_t bo = r.Add("Bo");
         const uint8_t wim = r.Add("Wim", Seat::Watch);
-        CHECK(r.m.Start(r.now, r.out));
+        r.Begin();
         r.ToRacing();
         r.m.Leave(bo, r.now, r.out);
         r.m.Leave(wim, r.now, r.out);
@@ -1731,8 +1759,7 @@ void TestMachineRecord() {
     Rig r;
     const uint8_t ana = r.Add("Ana");
     const uint8_t bo = r.Add("Bo");
-    CHECK(r.m.Start(r.now, r.out));
-    CHECK(r.P() == Phase::Machine);
+    r.Begin();
 
     // The host's own lock never passes a decoder, so the room checks the record itself.
     LockRequest bad = LockOf(1, 0, 50);
@@ -1787,7 +1814,7 @@ void TestSeriesPoints() {
     Rig r;
     const uint8_t ana = r.Add("Ana");
     const uint8_t bo = r.Add("Bo");
-    CHECK(r.m.Start(r.now, r.out));
+    r.Begin();
     r.ToRacing();
     r.At(r.go + 80000);
     CHECK(r.Finish(ana, 80000));
@@ -1849,7 +1876,8 @@ TrackChoice CustomChoice(uint8_t seed) {
     return c;
 }
 
-// Three racers through one series race, then last place (Ana) is the picker. Custom tracks are on.
+// Three racers on LAST PLACE PICKS through one series race, then last place (Ana) is the picker. Custom
+// tracks are on.
 struct CustomRig : Rig {
     uint8_t ana = kSystemId;
     uint8_t bo = kSystemId;
@@ -1861,6 +1889,7 @@ struct CustomRig : Rig {
     explicit CustomRig(const RoomConfig& config) : Rig(config) {
         ana = Add("Ana");
         bo = Add("Bo");
+        CHECK(m.SetLastPlacePicks(true, now, out));
         CHECK(m.Start(now, out));
         raced = S().track;
         Race({ bo, kHostId, ana });
@@ -1885,7 +1914,8 @@ void TestCustomTrack() {
         Rig r;
         const uint8_t ana = r.Add("Ana");
         const uint8_t bo = r.Add("Bo");
-        CHECK(r.m.Start(r.now, r.out));
+        CHECK(r.m.SetLastPlacePicks(true, r.now, r.out));
+        r.Begin();
         r.Race({ bo, kHostId, ana });
         r.After(kResultsMs);
         CHECK(r.P() == Phase::Pick && r.S().picker == ana);
@@ -2153,7 +2183,7 @@ void TestSuccessorState() {
     CHECK(Count(c.out, kMsgRoom) == 0);
     // Without CPU fill the grid has the humans alone.
     c.Add("Ana");
-    CHECK(c.m.Start(c.now, c.out));
+    c.Begin();
     c.LockAll();
     CHECK(c.m.LastGrid().cpus == 0 && c.m.LastGrid().humans.size() == 2);
     // Once the grid is out, the CPU settings stay as they are.
@@ -2197,7 +2227,8 @@ void TestPromote() {
         const uint8_t bo = r.Add("Bo");
         const uint8_t wim = r.Add("Wim", Seat::Watch);
         r.m.SetAddress(ana, MappedV4(0x0A000001), 4001);
-        CHECK(r.m.Start(r.now, r.out));
+        CHECK(r.m.SetLastPlacePicks(true, r.now, r.out)); // the new host keeps it: last place picks below
+        r.Begin();
         r.ToRacing();
         r.At(r.go + 80000);
         CHECK(r.Finish(ana, 80000));
@@ -2247,7 +2278,7 @@ void TestPromote() {
         Rig r;
         const uint8_t ana = r.Add("Ana");
         const uint8_t bo = r.Add("Bo");
-        CHECK(r.m.Start(r.now, r.out));
+        r.Begin();
         r.ToRacing();
         r.At(r.go + 30000);
         const RoomMirror mirror = MirrorOf(r);
@@ -2260,8 +2291,9 @@ void TestPromote() {
         Rig q;
         q.m = std::move(*promoted);
         q.now = r.now;
-        // A series' first race has no last place, so the new host draws, and the lock-in screen opens.
-        CHECK(q.P() == Phase::Machine && q.S().raceIndex == mirror.room.raceIndex + 1);
+        // The room votes, as it did before: the next race's vote opens at once.
+        CHECK(q.P() == Phase::Voting && q.S().raceIndex == mirror.room.raceIndex + 1 && !q.S().lastPlacePicks);
+        q.SkipVote();
         CHECK(q.Who(kHostId)->name == "Bo" && q.Who(ana) != nullptr && q.Who(bo) == nullptr);
         CHECK(q.Who(kHostId)->points == 0 && q.Who(ana)->points == 0);
         // The new host is on the grid of the next race, with Ana.
@@ -2300,7 +2332,7 @@ void TestPromote() {
         q.now = r.now;
         CHECK(q.P() == Phase::Lobby && q.m.Racers() == 1 && q.m.Watchers() == 1);
         CHECK(!q.Who(kHostId)->watcher && q.Who(val)->watcher);
-        CHECK(q.m.Start(q.now, q.out));
+        q.Begin();
         CHECK(q.P() == Phase::Machine && q.OnGrid() == std::vector<uint8_t>({ kHostId }));
         q.LockAll();
         CHECK(q.P() == Phase::GridSync);
@@ -2315,6 +2347,7 @@ void TestPromote() {
         Rig r;
         const uint8_t ana = r.Add("Ana");
         CHECK(r.m.SetRacerCap(8, r.now, r.out) && r.m.SetCustomTracks(true, r.now, r.out));
+        CHECK(r.m.SetLastPlacePicks(true, r.now, r.out));
         CpuOptions cpu;
         cpu.fill = false;
         cpu.aiAggression = 250;
@@ -2334,6 +2367,7 @@ void TestPromote() {
         const RoomState was = r.S();
         const RoomState after = promoted->State(r.now);
         CHECK(after.racerCap == 8 && after.customTracks && after.rules == rules && after.pool == was.pool);
+        CHECK(after.lastPlacePicks);
         CHECK(promoted->Cpu() == cpu && !after.cpuFill && after.aiAggression == 250 && after.cpuTrackHazards);
         CHECK(after.phase == Phase::Lobby && after.roomId == was.roomId);
         CHECK(!promoted->Roster()[0].ready);
@@ -2341,6 +2375,7 @@ void TestPromote() {
 }
 
 int main() {
+    std::setvbuf(stdout, nullptr, _IONBF, 0); // a crash keeps the lines before it
     TestDraws();
     TestSeats();
     TestLobby();

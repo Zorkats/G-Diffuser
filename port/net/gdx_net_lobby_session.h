@@ -232,6 +232,7 @@ public:
     bool EndSeries(uint32_t nowMs);
     bool SetRacerCap(uint8_t cap, uint32_t nowMs);
     bool SetCustomTracks(bool on, uint32_t nowMs);
+    bool SetLastPlacePicks(bool on, uint32_t nowMs);
     // The CPU settings a successor needs (decision 24). Refused once a grid has been sent.
     bool SetCpuOptions(const CpuOptions& cpu, uint32_t nowMs);
     const CpuOptions& Cpu() const {
