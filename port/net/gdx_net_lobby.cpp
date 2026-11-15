@@ -910,6 +910,9 @@ std::vector<uint8_t> EncodeState(const RaceState& state) {
         w.U16(static_cast<uint16_t>(pose.lap));
         w.U32(pose.flags);
         w.U8(pose.attack);
+        w.U16(pose.boost);
+        w.U8(pose.burst);
+        w.U8(pose.ramp);
     }
     return w.Take();
 }
@@ -1362,6 +1365,9 @@ bool DecodeState(const uint8_t* data, size_t len, RaceState& out) {
         pose.lap = static_cast<int16_t>(r.U16());
         pose.flags = r.U32();
         pose.attack = r.U8();
+        pose.boost = r.U16();
+        pose.burst = r.U8();
+        pose.ramp = r.U8();
         if (!r.Ok() || !StatePoseOk(pose)) {
             return false;
         }

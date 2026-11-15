@@ -56,6 +56,8 @@
 #include "net/gdx_net_race.h"
 #include "gdx_net_race_room.h"
 #include "gdx_net_race_box.h"
+#include "gdx_net_spectate.h"
+#include "gdx_net_text.h"
 #include "gdx_net_room_course.h"
 
 extern s32 gGameMode;
@@ -109,6 +111,7 @@ extern void (*D_800CF4B8[])(Racer*); // the track shape callbacks, by TRACK_SHAP
 
 extern s16 gRacersFinished;
 extern void Racer_RetireRacer(Racer* racer);
+extern f32 D_800F80A4; // racer.c: where unk_17C starts, 7 in a race
 
 extern int gdx_net_race_dev_echo_ticks(void);
 extern int gdx_net_race_dev_autopilot(void);
@@ -324,6 +327,83 @@ static void gdx_net_race_cpus_out(void) {
                  (int) sRoom.raceIndex, sGrid.racers - sGrid.humans, sRaceTicks);
 }
 
+// The humans' names for WATCH's label (gdx_net_spectate.h), by place among the humans, as the small stock
+// font draws them. Taken once when the race is set up: a name does not change during a race, and the room's
+// lock is not taken every frame for it. An empty name is one the room did not know.
+static char sNames[GDX_NET_RACE_HUMANS][GDX_NET_SPECTATE_NAME_BYTES];
+
+static void gdx_net_race_names_take(void) {
+    char name[GDX_NET_SPECTATE_NAME_BYTES];
+    s32 human;
+
+    for (human = 0; human < GDX_NET_RACE_HUMANS; human++) {
+        sNames[human][0] = '\0';
+        if ((human < sGrid.humans) && gdx_lan_race_name(sRoom.raceIndex, human, name, sizeof(name))) {
+            gdx_net_text_filter(GDX_NET_ROOM_FONT_SMALL, name, sNames[human], sizeof(sNames[human]));
+        }
+    }
+}
+
+// The humans of the room's race for WATCH: each one's racer, race position and whether it still drives.
+int gdx_net_race_spectate_field(GdxNetSpectateField* field) {
+    Racer* racer;
+    s32 human;
+    s32 local;
+
+    if (!sRoomRace || !gdx_net_race_online() || (sGrid.humans <= 0) || (sGrid.humans > GDX_NET_SPECTATE_HUMANS)) {
+        return 0;
+    }
+    field->count = sGrid.humans;
+    field->self = -1;
+    for (human = 0; human < sGrid.humans; human++) {
+        local = gdx_net_race_local_slot(sRoom.self, human);
+        racer = &gRacers[local];
+        field->human[human].racer = local;
+        field->human[human].position = racer->position;
+        field->human[human].driving =
+            !(racer->stateFlags & (RACER_STATE_FINISHED | RACER_STATE_CRASHED | RACER_STATE_RETIRED));
+        if (local == 0) {
+            field->self = human;
+        }
+    }
+    return 1;
+}
+
+// A human's name for WATCH's label, or its place on the grid ("PLAYER 2") when the room did not know it.
+// No <stdio.h> here (the decomp's libc headers), so the text is put together by hand.
+void gdx_net_race_spectate_name(int racer, char* out, int size) {
+    char place[] = "PLAYER 00";
+    const char* text;
+    s32 human;
+    s32 i;
+
+    if (size <= 0) {
+        return;
+    }
+    out[0] = '\0';
+    for (human = 0; (human < sGrid.humans) && (human < GDX_NET_RACE_HUMANS); human++) {
+        if (gdx_net_race_local_slot(sRoom.self, human) != racer) {
+            continue;
+        }
+        text = sNames[human];
+        if (text[0] == '\0') {
+            if (human + 1 >= 10) {
+                place[7] = (char) ('0' + (human + 1) / 10);
+                place[8] = (char) ('0' + (human + 1) % 10);
+            } else {
+                place[7] = (char) ('0' + human + 1);
+                place[8] = '\0';
+            }
+            text = place;
+        }
+        for (i = 0; (i < size - 1) && (text[i] != '\0'); i++) {
+            out[i] = text[i];
+        }
+        out[i] = '\0';
+        return;
+    }
+}
+
 // The player chose to leave the race from the quit box (gdx_net_race_box.c): the next frame goes back to
 // the room screen. The others race on.
 void gdx_net_race_quit(void) {
@@ -357,6 +437,7 @@ static void gdx_net_race_leave(void) {
     GdxNetRaceRoom room;
 
     gdx_net_race_box_reset(); // an open box would hold the controller in the next race
+    gdx_net_spectate_reset();
     if (sRoomRace) {
         gdx_dbg_logf("[net-race] race %d: back to the room page after %d frames\n", (int) sRoom.raceIndex,
                      sUpdates);
@@ -462,6 +543,8 @@ s32 gdx_net_race_begin(s32 stockRacers) {
         sReadySent = sUpdates = sGoLogged = 0;
         sRaceTicks = sFinishSent = sCpusGone = sEndHeld = 0;
         gdx_net_race_box_reset();
+        gdx_net_spectate_reset();
+        gdx_net_race_names_take();
         sHeldAtGo = 0;
         sElapsedMs = -1;
         return sGrid.racers;
@@ -644,6 +727,34 @@ static s32 gdx_net_race_clock(u32* ms) {
     return sClockOk;
 }
 
+// The booster flames of a machine this copy drives (protocol 14). The flame draw in racer.c reads the boost
+// timer, the burst of an accelerator press and unk_17C, which grows from D_800F80A4 to 13 after GO and
+// scales the whole flame: Racer_UpdateFromControls feeds all three, and a puppet never runs it.
+#define GDX_NET_RAMP_TOP 13.0f
+
+static void gdx_net_race_flames_of(const Racer* racer, GdxNetPose* pose) {
+    f32 share = 0.0f;
+
+    if (GDX_NET_RAMP_TOP > D_800F80A4) {
+        share = (racer->unk_17C - D_800F80A4) / (GDX_NET_RAMP_TOP - D_800F80A4);
+    }
+    if (!(share > 0.0f)) {
+        share = 0.0f; // also a NaN
+    } else if (share > 1.0f) {
+        share = 1.0f;
+    }
+    pose->ramp = (int) (share * 255.0f + 0.5f);
+    pose->boost = (racer->boostTimer < 0) ? 0 : (racer->boostTimer > 0xFFFF) ? 0xFFFF : racer->boostTimer;
+    pose->burst = (racer->unk_214 < 0) ? 0 : (racer->unk_214 > 0xFF) ? 0xFF : racer->unk_214;
+}
+
+// The same three on a puppet, as its owner sent them.
+static void gdx_net_race_flames_to(Racer* racer, const GdxNetPose* pose) {
+    racer->unk_17C = D_800F80A4 + ((GDX_NET_RAMP_TOP - D_800F80A4) * (f32) pose->ramp) / 255.0f;
+    racer->boostTimer = pose->boost;
+    racer->unk_214 = pose->burst;
+}
+
 // A machine this copy drives, as the others will be told. `side` moves it sideways across the road.
 static void gdx_net_race_pose_of(Racer* racer, f32 side, u32 nowMs, GdxNetPose* pose) {
     pose->tick = sTick;
@@ -663,6 +774,7 @@ static void gdx_net_race_pose_of(Racer* racer, f32 side, u32 nowMs, GdxNetPose* 
     pose->lap = racer->lap;
     pose->flags = (u32) racer->stateFlags;
     pose->attack = racer->attackState;
+    gdx_net_race_flames_of(racer, pose);
 }
 
 // GDX_NET_DEV_TRACE: where this copy has every machine of the race after this tick, by race slot.
@@ -914,6 +1026,7 @@ void gdx_net_race_puppet_update(Racer* racer) {
     gdx_net_race_speed_cap(pose.vel);
     // The pair loop reads this, so a remote machine that attacks pushes and damages ours as one here would.
     racer->attackState = (s16) pose.attack;
+    gdx_net_race_flames_to(racer, &pose);
 
     // Where its owner has it now. In the air or off the track a machine does not follow the road.
     gdx_net_race_advance(&pose, ahead,

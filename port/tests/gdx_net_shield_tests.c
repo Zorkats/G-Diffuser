@@ -37,8 +37,9 @@ static GdxNetShield full_shield(void) {
     return shield;
 }
 
-static int span_is(const GdxNetShieldSpan* span, int from, int to, int colour) {
-    return (span->from == from) && (span->to == to) && (span->colour == colour);
+static int bar_is(const GdxNetShieldBar* bar, int health, int healthColour, int shield, int shieldColour) {
+    return (bar->health == health) && (bar->healthColour == healthColour) && (bar->shield == shield) &&
+           (bar->shieldColour == shieldColour);
 }
 
 static void test_reset(void) {
@@ -146,83 +147,83 @@ static void test_pit(void) {
     CHECK(shield.pool == 100.0f);
 }
 
-/* Lap 1: energy red over the green super shield. */
+/* Lap 1: the stock red health bar over a full shield bar, the super shield. */
 static void test_bar_lap_one(void) {
     GdxNetShield shield = full_shield();
-    GdxNetShieldSpan spans[2];
+    GdxNetShieldBar bar;
 
-    CHECK(gdx_net_shield_bar(&shield, 1, 50.0f, 100.0f, 68, spans) == 2);
-    CHECK(span_is(&spans[0], 0, 34, GDX_NET_SHIELD_BAR_RED));
-    CHECK(span_is(&spans[1], 34, 68, GDX_NET_SHIELD_BAR_GREEN));
-    /* Full energy leaves no green; the shield pool plays no part on lap 1. */
+    gdx_net_shield_bar(&shield, 1, 50.0f, 100.0f, 68, &bar);
+    CHECK(bar_is(&bar, 34, GDX_NET_SHIELD_BAR_RED, 68, GDX_NET_SHIELD_BAR_BLUE));
+    /* The pool plays no part on lap 1: the shield bar stays full. */
     shield.pool = 0.0f;
-    CHECK(gdx_net_shield_bar(&shield, 1, 100.0f, 100.0f, 68, spans) == 1);
-    CHECK(span_is(&spans[0], 0, 68, GDX_NET_SHIELD_BAR_RED));
-    CHECK(gdx_net_shield_bar(&shield, 1, 0.0f, 100.0f, 68, spans) == 1);
-    CHECK(span_is(&spans[0], 0, 68, GDX_NET_SHIELD_BAR_GREEN));
+    gdx_net_shield_bar(&shield, 1, 100.0f, 100.0f, 68, &bar);
+    CHECK(bar_is(&bar, 68, GDX_NET_SHIELD_BAR_RED, 68, GDX_NET_SHIELD_BAR_BLUE));
+    gdx_net_shield_bar(&shield, 1, 0.0f, 100.0f, 68, &bar);
+    CHECK(bar_is(&bar, 0, GDX_NET_SHIELD_BAR_RED, 68, GDX_NET_SHIELD_BAR_BLUE));
 }
 
-/* From lap 2, the four states: both full, shield lower, energy lower, both empty. */
+/* From lap 2 each bar shows its own number, whichever is the larger: the case of the second brother test,
+   where a shield longer than the health hid the health's edge, is the second one here. */
 static void test_bar_states(void) {
     GdxNetShield shield = full_shield();
-    GdxNetShieldSpan spans[2];
+    GdxNetShieldBar bar;
 
-    CHECK(gdx_net_shield_bar(&shield, 0, 100.0f, 100.0f, 68, spans) == 1);
-    CHECK(span_is(&spans[0], 0, 68, GDX_NET_SHIELD_BAR_CYAN));
+    gdx_net_shield_bar(&shield, 0, 100.0f, 100.0f, 68, &bar);
+    CHECK(bar_is(&bar, 68, GDX_NET_SHIELD_BAR_GREEN, 68, GDX_NET_SHIELD_BAR_BLUE));
 
-    shield.pool = 50.0f;
-    CHECK(gdx_net_shield_bar(&shield, 0, 100.0f, 100.0f, 68, spans) == 2);
-    CHECK(span_is(&spans[0], 0, 34, GDX_NET_SHIELD_BAR_CYAN));
-    CHECK(span_is(&spans[1], 34, 68, GDX_NET_SHIELD_BAR_GREEN));
+    shield.pool = 80.0f;
+    gdx_net_shield_bar(&shield, 0, 25.0f, 100.0f, 68, &bar);
+    CHECK(bar_is(&bar, 17, GDX_NET_SHIELD_BAR_GREEN, 54, GDX_NET_SHIELD_BAR_BLUE));
 
-    CHECK(gdx_net_shield_bar(&shield, 0, 25.0f, 100.0f, 68, spans) == 2);
-    CHECK(span_is(&spans[0], 0, 17, GDX_NET_SHIELD_BAR_CYAN));
-    CHECK(span_is(&spans[1], 17, 34, GDX_NET_SHIELD_BAR_BLUE));
-
-    CHECK(gdx_net_shield_bar(&shield, 0, 0.0f, 100.0f, 68, spans) == 1);
-    CHECK(span_is(&spans[0], 0, 34, GDX_NET_SHIELD_BAR_BLUE));
+    shield.pool = 25.0f;
+    gdx_net_shield_bar(&shield, 0, 75.0f, 100.0f, 68, &bar);
+    CHECK(bar_is(&bar, 51, GDX_NET_SHIELD_BAR_GREEN, 17, GDX_NET_SHIELD_BAR_BLUE));
 
     shield.pool = 0.0f;
-    CHECK(gdx_net_shield_bar(&shield, 0, 50.0f, 100.0f, 68, spans) == 1);
-    CHECK(span_is(&spans[0], 0, 34, GDX_NET_SHIELD_BAR_GREEN));
-    CHECK(gdx_net_shield_bar(&shield, 0, 0.0f, 100.0f, 68, spans) == 0);
+    gdx_net_shield_bar(&shield, 0, 50.0f, 100.0f, 68, &bar);
+    CHECK(bar_is(&bar, 34, GDX_NET_SHIELD_BAR_GREEN, 0, GDX_NET_SHIELD_BAR_BLUE));
+    gdx_net_shield_bar(&shield, 0, 0.0f, 100.0f, 68, &bar);
+    CHECK(bar_is(&bar, 0, GDX_NET_SHIELD_BAR_GREEN, 0, GDX_NET_SHIELD_BAR_BLUE));
 }
 
 static void test_bar_flash_and_edges(void) {
     GdxNetShield shield = full_shield();
-    GdxNetShieldSpan spans[2];
+    GdxNetShieldBar bar;
 
+    /* A hit turns the shield bar yellow and leaves the health its own colour. */
     shield.pool = 50.0f;
     shield.flash = 1;
-    CHECK(gdx_net_shield_bar(&shield, 0, 100.0f, 100.0f, 68, spans) == 2);
-    CHECK(span_is(&spans[0], 0, 34, GDX_NET_SHIELD_BAR_YELLOW));
-    CHECK(span_is(&spans[1], 34, 68, GDX_NET_SHIELD_BAR_YELLOW));
-    CHECK(gdx_net_shield_bar(&shield, 1, 50.0f, 100.0f, 68, spans) == 2);
-    CHECK(spans[0].colour == GDX_NET_SHIELD_BAR_YELLOW && spans[1].colour == GDX_NET_SHIELD_BAR_YELLOW);
+    gdx_net_shield_bar(&shield, 0, 100.0f, 100.0f, 68, &bar);
+    CHECK(bar_is(&bar, 68, GDX_NET_SHIELD_BAR_GREEN, 34, GDX_NET_SHIELD_BAR_YELLOW));
+    gdx_net_shield_bar(&shield, 1, 50.0f, 100.0f, 68, &bar);
+    CHECK(bar_is(&bar, 34, GDX_NET_SHIELD_BAR_RED, 68, GDX_NET_SHIELD_BAR_YELLOW));
 
     shield.flash = 0;
     shield.pool = 100.0f;
-    CHECK(gdx_net_shield_bar(&shield, 0, 100.0f, 100.0f, 0, spans) == 0);
+    gdx_net_shield_bar(&shield, 0, 100.0f, 100.0f, 0, &bar);
+    CHECK(bar.health == 0 && bar.shield == 0);
+    gdx_net_shield_bar(&shield, 1, 100.0f, 100.0f, -4, &bar);
+    CHECK(bar.health == 0 && bar.shield == 0);
     /* Rounded to the nearest pixel and kept inside the bar. */
-    CHECK(gdx_net_shield_bar(&shield, 0, 150.0f, 100.0f, 68, spans) == 1);
-    CHECK(span_is(&spans[0], 0, 68, GDX_NET_SHIELD_BAR_CYAN));
-    CHECK(gdx_net_shield_bar(&shield, 0, 0.75f, 100.0f, 68, spans) == 2);
-    CHECK(span_is(&spans[0], 0, 1, GDX_NET_SHIELD_BAR_CYAN));
-    CHECK(gdx_net_shield_bar(&shield, 0, 0.5f, 100.0f, 68, spans) == 1);
-    CHECK(span_is(&spans[0], 0, 68, GDX_NET_SHIELD_BAR_BLUE));
+    gdx_net_shield_bar(&shield, 0, 150.0f, 100.0f, 68, &bar);
+    CHECK(bar.health == 68);
+    gdx_net_shield_bar(&shield, 0, 0.75f, 100.0f, 68, &bar);
+    CHECK(bar.health == 1);
+    gdx_net_shield_bar(&shield, 0, 0.5f, 100.0f, 68, &bar);
+    CHECK(bar.health == 0 && bar.shield == 68);
     /* The split screen's narrower bar: 51 pixels. */
     shield.pool = 50.0f;
-    CHECK(gdx_net_shield_bar(&shield, 0, 100.0f, 100.0f, 51, spans) == 2);
-    CHECK(span_is(&spans[0], 0, 26, GDX_NET_SHIELD_BAR_CYAN));
-    CHECK(span_is(&spans[1], 26, 51, GDX_NET_SHIELD_BAR_GREEN));
+    gdx_net_shield_bar(&shield, 0, 100.0f, 100.0f, 51, &bar);
+    CHECK(bar_is(&bar, 51, GDX_NET_SHIELD_BAR_GREEN, 26, GDX_NET_SHIELD_BAR_BLUE));
     /* A machine of no max energy draws nothing rather than dividing by 0. */
     gdx_net_shield_reset(&shield, 0.0f);
-    CHECK(gdx_net_shield_bar(&shield, 0, 0.0f, 0.0f, 68, spans) == 0);
+    gdx_net_shield_bar(&shield, 0, 0.0f, 0.0f, 68, &bar);
+    CHECK(bar.health == 0 && bar.shield == 0);
 }
 
 /* The game-side calls do nothing while the rule is off, and keep one shield for each racer. */
 static void test_racers(void) {
-    int out[6];
+    int out[4] = { -1, -1, -1, -1 };
 
     sRule = 0;
     CHECK(gdx_net_shield_on() == 0);
@@ -230,6 +231,7 @@ static void test_racers(void) {
     CHECK(gdx_net_shield_racer_take(3, 0, 100.0f, 30.0f, GDX_NET_SHIELD_HIT) == 30.0f);
     CHECK(gdx_net_shield_racer_take(3, 1, 10.0f, 40.0f, GDX_NET_SHIELD_HIT) == 40.0f);
     CHECK(gdx_net_shield_racer_bar(3, 0, 100.0f, 100.0f, 68, out) == 0);
+    CHECK(out[0] == -1 && out[3] == -1);
 
     sRule = 1;
     CHECK(gdx_net_shield_on() == 1);
@@ -239,17 +241,16 @@ static void test_racers(void) {
     CHECK(gdx_net_shield_racer_take(3, 0, 100.0f, 80.0f, GDX_NET_SHIELD_HIT) == 10.0f);
     /* Racer 4 keeps its own full shield. */
     CHECK(gdx_net_shield_racer_take(4, 0, 100.0f, 30.0f, GDX_NET_SHIELD_HIT) == 0.0f);
-    CHECK(gdx_net_shield_racer_bar(4, 0, 100.0f, 100.0f, 68, out) == 2);
-    CHECK(out[0] == 0 && out[1] == 48 && out[2] == GDX_NET_SHIELD_BAR_YELLOW);
-    CHECK(out[3] == 48 && out[4] == 68 && out[5] == GDX_NET_SHIELD_BAR_YELLOW);
+    CHECK(gdx_net_shield_racer_bar(4, 0, 100.0f, 100.0f, 68, out) == 1);
+    CHECK(out[0] == 68 && out[1] == GDX_NET_SHIELD_BAR_GREEN && out[2] == 48 && out[3] == GDX_NET_SHIELD_BAR_YELLOW);
     {
         int i;
         for (i = 0; i < GDX_NET_SHIELD_FLASH_FRAMES; i++) {
             gdx_net_shield_racer_frame(4);
         }
     }
-    CHECK(gdx_net_shield_racer_bar(4, 0, 100.0f, 100.0f, 68, out) == 2);
-    CHECK(out[2] == GDX_NET_SHIELD_BAR_CYAN && out[5] == GDX_NET_SHIELD_BAR_GREEN);
+    CHECK(gdx_net_shield_racer_bar(4, 0, 100.0f, 100.0f, 68, out) == 1);
+    CHECK(out[2] == 48 && out[3] == GDX_NET_SHIELD_BAR_BLUE);
     gdx_net_shield_racer_pit(3, 100.0f, 100.0f, 0.5f, 0);
     CHECK(gdx_net_shield_racer_take(3, 0, 100.0f, 1.0f, GDX_NET_SHIELD_HIT) == 0.75f);
 

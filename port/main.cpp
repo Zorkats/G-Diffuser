@@ -45,6 +45,7 @@
 #include "gdx_workshop.h"
 #include "gdx_gp_resume.h"
 #include "gdx_death_race.h"
+#include "gdx_hang_watchdog.h"
 #include "n64_gfx_bridge.h"
 #include <SDL2/SDL.h>
 
@@ -1453,8 +1454,12 @@ int main(int argc, char** argv) {
     gdx_gfx_interp_set_now_fn(&gdx_host_now_seconds);
 
     logStep("entering frame loop");
+    // A freeze raises no exception, so the crash handler never sees one: the watchdog writes the main
+    // thread's stack when the beat below stops for 5 s. gdx.HangWatchdog=0 turns it off.
+    gdx_hang_watchdog_start(CVarGetInteger("gdx.HangWatchdog", 1) != 0);
     auto w = ctx->GetWindow();
     while (w != nullptr && w->IsRunning()) {
+        gdx_hang_watchdog_beat();
         // The one per-frame refresh point for every developer gate: one CVar read per gate here
         // means no hot path (per draw call, per display-list command, per audio frame) ever hashes
         // a CVar name, and everything downstream this frame sees a consistent snapshot. The Dev

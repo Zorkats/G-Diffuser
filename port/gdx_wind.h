@@ -9,6 +9,8 @@
  *     crosswind.
  *   - Where: on the segments that have wind, and everywhere else the track's wind if it has one. Tunnels block
  *     both.
+ *   - When: from GO on. During the countdown the grid stands still, so no wind can push it into a wall. The
+ *     streaks show from the start, so the players see what is coming.
  *   - Push: along the road surface. The part along your heading is halved, so a tailwind or headwind changes
  *     your speed without taking over the race. The side part stops growing near the side speed cap. Strength
  *     grows faster than its percent: 100% (Gale) pushes twice as hard as a straight ramp would, and its side
@@ -54,6 +56,12 @@ int gdx_wind_resolve_track(int pointStrength, int pointAngle, int trackStrength,
 
 /* The strength scale for a strength 0..100: 1 + (GDX_WIND_GALE_SCALE - 1) * strength / 100. */
 float gdx_wind_strength_scale(int strength);
+
+/* The countdown value (gRaceIntroTimer) the race starts below: GO comes at 40 and race time counts under it. */
+#define GDX_WIND_START_TIMER 40
+
+/* 1 when the wind may push this frame: the countdown is over, or the mode has none (introTimer 0). */
+int gdx_wind_blows(int introTimer);
 
 /* The unit direction the wind blows toward, on the ground plane. */
 void gdx_wind_direction(int angle, float* x, float* z);

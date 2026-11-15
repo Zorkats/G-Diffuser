@@ -778,6 +778,9 @@ StatePose PoseOf(uint8_t slot, uint32_t tick) {
     pose.lap = 1;
     pose.flags = 0x80000000u | tick;
     pose.attack = static_cast<uint8_t>(slot % 3);
+    pose.boost = static_cast<uint16_t>(tick % 101u);
+    pose.burst = static_cast<uint8_t>(slot % 28);
+    pose.ramp = static_cast<uint8_t>(255 - slot);
     return pose;
 }
 
@@ -800,9 +803,15 @@ void TestStateCodec() {
     one.poses[0].up = { kStateAxisMax, -kStateAxisMax, -0.25f };
     one.poses[0].lap = kStateLapMin;
     one.poses[0].flags = 0xFFFFFFFFu;
+    one.poses[0].boost = 0xFFFF;
+    one.poses[0].burst = 0xFF;
+    one.poses[0].ramp = 0xFF;
     std::vector<uint8_t> b = EncodeState(one);
     RaceState out;
-    CHECK(kStatePoseBytes == 64 && b.size() == kStateHeaderBytes + kStatePoseBytes);
+    CHECK(kStatePoseBytes == 68 && b.size() == kStateHeaderBytes + kStatePoseBytes);
+    // Protocol 14: 17 poses of 68 bytes are the most one message holds.
+    CHECK(kStatePoses == 17 && kStateHeaderBytes + kStatePoses * kStatePoseBytes <= kMaxMessagePayload &&
+          kStateHeaderBytes + (kStatePoses + 1) * kStatePoseBytes > kMaxMessagePayload);
     CHECK(StatePoseOk(one.poses[0]) && DecodeState(b.data(), b.size(), out) && out == one);
     // Every field has its own bytes: one changed and nothing else, the message says so.
     {
@@ -819,6 +828,9 @@ void TestStateCodec() {
         CHECK(differs([](StatePose& p) { p.vel[2] = 1.5f; }));
         CHECK(differs([](StatePose& p) { p.attack = 1; }));
         CHECK(differs([](StatePose& p) { p.tick = 9; }));
+        CHECK(differs([](StatePose& p) { p.boost = 100; }));
+        CHECK(differs([](StatePose& p) { p.burst = 27; }));
+        CHECK(differs([](StatePose& p) { p.ramp = 0; }));
     }
     CheckEdges(b, decode);
     one.poses[0].lap = kStateLapMax;
@@ -1754,8 +1766,8 @@ void TestMachineRecordBounds() {
 
 void TestCustomTrackWire() {
     std::printf("codec: custom tracks, machine records, hack identity, boost length\n");
-    CHECK(kLobbyVersion == kProtocolVersion && kProtocolVersion == 13); // O5.1, O5.3, O6.1, O7.3, R4, direct links, the course choice, relay tickets and
-                                                                         // the 64DD pool with the room rules bumped it
+    CHECK(kLobbyVersion == kProtocolVersion && kProtocolVersion == 14); // O5.1, O5.3, O6.1, O7.3, R4, direct links, the course choice, relay tickets,
+                                                                         // the 64DD pool with the room rules and the pose flames bumped it
     CHECK(static_cast<uint8_t>(Phase::Assets) == 9 && kPhaseCount == 10);
     CHECK(std::string(PhaseName(Phase::Assets)) == "Getting the track");
     CHECK(static_cast<uint8_t>(RejectReason::Hack) == 7 && RejectReasonText(RejectReason::Hack)[0] != '\0');
@@ -3892,10 +3904,11 @@ void TestRacePoses() {
     CHECK(StatesOf(raw) == field && StatesOf(eve) == field && raw.Count(kMsgState) == 2);
     CHECK(hostGot().empty());
 
-    // Each of the two messages is whole on its own: with the larger one lost, the other ten poses arrive.
+    // Each of the two messages is whole on its own: with the full one lost, the other eleven poses arrive. The
+    // full one is the only datagram as long as a full message's payload; the other carries 11 poses.
     const NetAddress boAddr = lan.clientAddrs[0];
     lan.net.SetFilter([&](const NetAddress& from, const NetAddress& to, size_t len) {
-        return from == lan.hostAddr && to == boAddr && len > 700;
+        return from == lan.hostAddr && to == boAddr && len >= kStateHeaderBytes + kStatePoses * kStatePoseBytes;
     });
     // A newer tick: a copy of one already taken never reaches the game a second time.
     std::vector<StatePose> next;

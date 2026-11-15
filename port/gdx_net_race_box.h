@@ -5,7 +5,8 @@
  * included, is a small box in the style of the stock Retry box: START opens it while the race runs on
  * behind it, and it comes up by itself a little after the copy's own machine crashed or retired. Its rows:
  *
- *   CONTINUE          closes the box. It reads WATCH once the machine has finished or is out.
+ *   CONTINUE          closes the box. It reads WATCH once the machine has finished or is out, and then
+ *                     the camera also goes to another human of the room (gdx_net_spectate.h).
  *   RETURN TO ROOM    leaves the race for the room screen. The machine is retired for the room unless it
  *                     had finished, and the player waits there for the results.
  *   LEAVE THE ROOM    leaves the room as well, for the front page of the room screen, where the rooms
@@ -16,9 +17,9 @@
  * the buttons belong to it: the copy's own machine gets no input and coasts (gdx_net_race_box_holds_input).
  *
  * The room and the race decide everything. This module keeps the box: open or closed, the cursor, and
- * what a press does. The six functions it calls (gdx_lan_race_room, gdx_net_race_own_state,
- * gdx_net_race_quit, gdx_net_race_hand_over, gdx_lan_room_stop, gdx_net_room_screen_want_front) are its
- * whole view of the game, so the tests replace them.
+ * what a press does. The seven functions it calls (gdx_lan_race_room, gdx_net_race_own_state,
+ * gdx_net_race_quit, gdx_net_race_hand_over, gdx_lan_room_stop, gdx_net_room_screen_want_front,
+ * gdx_net_spectate_watch) are its whole view of the game, so the tests replace them.
  *
  * The functions take and return plain numbers: the game's menu code is built without the port's headers
  * and declares them itself (decomp/src/overlays/ovl_i3/menus.c).

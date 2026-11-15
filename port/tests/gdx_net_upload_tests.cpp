@@ -254,7 +254,7 @@ public:
         CHECK(!guestRefused);
 
         // Floors and ceilings on what each guest link carries. The floor is the pose payload the link is owed: every
-        // other machine, at 30 Hz, in 64-byte poses. The ceiling is twice that, which a duplicating relay would break.
+        // other machine, at 30 Hz, in 68-byte poses. The ceiling is twice that, which a duplicating relay would break.
         bool racerAtLeast = true;
         bool racerAtMost = true;
         bool watcherAtLeast = true;
@@ -712,11 +712,11 @@ Burst RunBurst(const std::vector<uint8_t>& bytes, const track::TrackId& id, uint
 }  // namespace
 
 int main() {
-    // The floors assume a pose is 64 bytes on the wire. The difference of a two-pose and a one-pose state is one pose.
+    // The floors assume a pose is 68 bytes on the wire (protocol 14). The difference of a two-pose and a one-pose state is one pose.
     const size_t oneBytes = EncodeState(RaceState{ 0, { PoseFor(0, 0, 0) } }).size();
     const size_t twoBytes = EncodeState(RaceState{ 0, { PoseFor(0, 0, 0), PoseFor(1, 0, 0) } }).size();
     const uint64_t poseBytes = twoBytes - oneBytes;
-    CHECK(poseBytes == 64);
+    CHECK(poseBytes == 68);
 
     std::vector<RaceRow> races;
     for (uint32_t humans : { 4u, 8u, 12u }) {

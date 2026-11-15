@@ -67,46 +67,15 @@ static int bar_pixels(float value, float maxValue, int width) {
     return (int) pixels;
 }
 
-static int add_span(GdxNetShieldSpan spans[2], int count, int from, int to, int colour) {
-    if (to > from) {
-        spans[count].from = from;
-        spans[count].to = to;
-        spans[count].colour = colour;
-        count++;
+void gdx_net_shield_bar(const GdxNetShield* shield, int lapOne, float energy, float maxEnergy, int width,
+                        GdxNetShieldBar* out) {
+    if (width < 0) {
+        width = 0;
     }
-    return count;
-}
-
-int gdx_net_shield_bar(const GdxNetShield* shield, int lapOne, float energy, float maxEnergy, int width,
-                       GdxNetShieldSpan spans[2]) {
-    int count = 0;
-    int energyPixels;
-    int shieldPixels;
-    int i;
-
-    if (width <= 0) {
-        return 0;
-    }
-    energyPixels = bar_pixels(energy, maxEnergy, width);
-    if (lapOne) {
-        count = add_span(spans, count, 0, energyPixels, GDX_NET_SHIELD_BAR_RED);
-        count = add_span(spans, count, energyPixels, width, GDX_NET_SHIELD_BAR_GREEN);
-    } else {
-        shieldPixels = bar_pixels(shield->pool, shield->maxPool, width);
-        if (energyPixels < shieldPixels) {
-            count = add_span(spans, count, 0, energyPixels, GDX_NET_SHIELD_BAR_CYAN);
-            count = add_span(spans, count, energyPixels, shieldPixels, GDX_NET_SHIELD_BAR_BLUE);
-        } else {
-            count = add_span(spans, count, 0, shieldPixels, GDX_NET_SHIELD_BAR_CYAN);
-            count = add_span(spans, count, shieldPixels, energyPixels, GDX_NET_SHIELD_BAR_GREEN);
-        }
-    }
-    if (shield->flash > 0) {
-        for (i = 0; i < count; i++) {
-            spans[i].colour = GDX_NET_SHIELD_BAR_YELLOW;
-        }
-    }
-    return count;
+    out->health = bar_pixels(energy, maxEnergy, width);
+    out->healthColour = lapOne ? GDX_NET_SHIELD_BAR_RED : GDX_NET_SHIELD_BAR_GREEN;
+    out->shield = lapOne ? width : bar_pixels(shield->pool, shield->maxPool, width);
+    out->shieldColour = (shield->flash > 0) ? GDX_NET_SHIELD_BAR_YELLOW : GDX_NET_SHIELD_BAR_BLUE;
 }
 
 int gdx_net_shield_on(void) {
@@ -154,20 +123,17 @@ void gdx_net_shield_racer_frame(int racer) {
     }
 }
 
-int gdx_net_shield_racer_bar(int racer, int lapOne, float energy, float maxEnergy, int width, int out[6]) {
+int gdx_net_shield_racer_bar(int racer, int lapOne, float energy, float maxEnergy, int width, int out[4]) {
     GdxNetShield* shield = racer_shield(racer);
-    GdxNetShieldSpan spans[2];
-    int count;
-    int i;
+    GdxNetShieldBar bar;
 
     if ((shield == 0) || !gdx_net_shield_on()) {
         return 0;
     }
-    count = gdx_net_shield_bar(shield, lapOne, energy, maxEnergy, width, spans);
-    for (i = 0; i < count; i++) {
-        out[i * 3] = spans[i].from;
-        out[i * 3 + 1] = spans[i].to;
-        out[i * 3 + 2] = spans[i].colour;
-    }
-    return count;
+    gdx_net_shield_bar(shield, lapOne, energy, maxEnergy, width, &bar);
+    out[0] = bar.health;
+    out[1] = bar.healthColour;
+    out[2] = bar.shield;
+    out[3] = bar.shieldColour;
+    return 1;
 }

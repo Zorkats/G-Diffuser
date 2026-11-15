@@ -116,6 +116,10 @@ void gdx_lan_race_standing(unsigned raceIndex, const unsigned char* humans, int 
 /* The host's table of that race so far. 0 while there is none; out is then left alone. */
 int gdx_lan_race_results(unsigned raceIndex, GdxNetRaceResults* out);
 
+/* The name of the human at that place among the humans of the race's grid, NUL-terminated in size bytes.
+ * 1 when the room knows it; 0 otherwise, and out is then "". */
+int gdx_lan_race_name(unsigned raceIndex, int human, char* out, int size);
+
 #ifdef __cplusplus
 }
 #endif

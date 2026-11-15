@@ -3,6 +3,7 @@
 
 #include "gdx_net_race_box.h"
 #include "gdx_net_race_words.h"
+#include "gdx_net_spectate.h"
 
 #include "gdx_net_race_room.h"
 #include "gdx_net_room_screen.h"
@@ -133,6 +134,9 @@ int gdx_net_race_box_frame(int start, int accept, int back, int up, int down, in
 
         close_box();
         if (row == ROW_STAY) {
+            if (sOwn != OWN_DRIVES) {
+                gdx_net_spectate_watch(); /* the row reads WATCH: the camera goes to another human */
+            }
             return GDX_NET_RACE_BOX_CLOSED;
         }
         if (row == ROW_LEAVE && room.host) {

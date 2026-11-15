@@ -61,7 +61,8 @@
 //   23 State        both ways       u16 race index, u8 count (1 to kStatePoses), count x { u8 race slot,
 //                                   u32 the owner's race tick, u32 host clock at that tick (ms), 3 x u32
 //                                   position, 3 x u32 velocity, 3 x u32 forward, 3 x u32 up (float bits),
-//                                   s16 lap, u32 racer state flags, u8 attack state }. Unreliable: a pose
+//                                   s16 lap, u32 racer state flags, u8 attack state, u16 boost timer,
+//                                   u8 flame burst, u8 flame ramp }. Unreliable: a pose
 //                                   that is late is worth less than the next one. A client sends its own
 //                                   machine; the host sends its own, the CPUs', and every other player's
 //   24 Finish       client to host  u16 race index, u8 ResultKind (Finished or Retired), u32 race time in ms
@@ -694,9 +695,10 @@ struct ClockPong {
 };
 
 // Poses in one State message. A field above this goes out as two messages, each whole on its own.
-constexpr size_t kStatePoses = 18;
+// 17 is the most that fit kMaxMessagePayload: 3 + 17 x 68 = 1159 of 1179 bytes.
+constexpr size_t kStatePoses = 17;
 constexpr size_t kStateHeaderBytes = 3;
-constexpr size_t kStatePoseBytes = 64;
+constexpr size_t kStatePoseBytes = 68;
 // What a decoder lets through. A track is a few tens of thousands of units across, a machine at full boost
 // moves well under a hundred units a tick, the two axes are unit vectors, and a race has at most kLapsMax
 // laps; the room around each limit is for values in passing. The attack state is 0, 1 (side) or 2 (spin).
@@ -720,10 +722,14 @@ struct StatePose {
     int16_t lap = 0;
     uint32_t flags = 0;
     uint8_t attack = 0;
+    uint16_t boost = 0; // the booster flames (protocol 14): boost timer in frames
+    uint8_t burst = 0;  // the burst of an accelerator press
+    uint8_t ramp = 0;   // how far the flames have grown since GO, 0 to 255
 
     bool operator==(const StatePose& o) const {
         return slot == o.slot && tick == o.tick && timeMs == o.timeMs && pos == o.pos && vel == o.vel &&
-               forward == o.forward && up == o.up && lap == o.lap && flags == o.flags && attack == o.attack;
+               forward == o.forward && up == o.up && lap == o.lap && flags == o.flags && attack == o.attack &&
+               boost == o.boost && burst == o.burst && ramp == o.ramp;
     }
 };
 

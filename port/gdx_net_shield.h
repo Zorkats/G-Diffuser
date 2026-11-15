@@ -56,27 +56,27 @@ void gdx_net_shield_pit(GdxNetShield* shield, float energy, float maxEnergy, flo
 /* One game frame: the flash counts down. */
 void gdx_net_shield_frame(GdxNetShield* shield);
 
-/* The colours of the bar. */
-#define GDX_NET_SHIELD_BAR_RED 0    /* energy on lap 1 */
-#define GDX_NET_SHIELD_BAR_GREEN 1  /* energy above the shield, or the lap-1 super shield */
-#define GDX_NET_SHIELD_BAR_BLUE 2   /* shield above the energy */
-#define GDX_NET_SHIELD_BAR_CYAN 3   /* both */
-#define GDX_NET_SHIELD_BAR_YELLOW 4 /* a hit just landed */
+/* The colours of the two bars (option B of the shield HUD: the stock health bar, and a shield bar under it). */
+#define GDX_NET_SHIELD_BAR_RED 0    /* health on lap 1 */
+#define GDX_NET_SHIELD_BAR_GREEN 1  /* health from lap 2, once the boost is open */
+#define GDX_NET_SHIELD_BAR_BLUE 2   /* the shield */
+#define GDX_NET_SHIELD_BAR_YELLOW 3 /* the shield, while a hit just landed */
 
-/* A run of the bar's pixels, from from (included) to to (excluded), counted from its left end. */
-typedef struct GdxNetShieldSpan {
-    int from;
-    int to;
-    int colour;
-} GdxNetShieldSpan;
+/* What the HUD draws, in pixels from the bars' left end. */
+typedef struct GdxNetShieldBar {
+    int health;       /* the health bar, as the stock bar measures it */
+    int healthColour; /* RED on lap 1, GREEN after */
+    int shield;       /* the shield bar under it */
+    int shieldColour; /* BLUE, or YELLOW while the flash runs */
+} GdxNetShieldBar;
 
-/* The bar of width pixels as at most 2 spans, left to right, in spans. Past the last span the bar is empty.
-   Returns how many spans there are.
-   - Lap 1: energy red, then the super shield green to the bar's end.
-   - Later: cyan as far as both reach, then green when energy reaches further, blue when the shield does.
-   - While the flash runs, every span is yellow. */
-int gdx_net_shield_bar(const GdxNetShield* shield, int lapOne, float energy, float maxEnergy, int width,
-                       GdxNetShieldSpan spans[2]);
+/* The two bars, each width pixels long at most, in out.
+   - Health: energy over max energy, red on lap 1 and green after, as the stock bar.
+   - Shield: the pool over its max from lap 2. On lap 1 the super shield halves every hit instead, and the
+     bar is full.
+   - While the flash runs, the shield bar is yellow. The health bar keeps its colour, so it always reads. */
+void gdx_net_shield_bar(const GdxNetShield* shield, int lapOne, float energy, float maxEnergy, int width,
+                        GdxNetShieldBar* out);
 
 /* Game side, by racer id. Each does nothing, or hands damage back unchanged, while the room's rules leave
    the shield off (gdx_net_race_rule_shield). */
@@ -85,10 +85,10 @@ void gdx_net_shield_racer_init(int racer, float maxEnergy);
 float gdx_net_shield_racer_take(int racer, int lapOne, float energy, float damage, int kind);
 void gdx_net_shield_racer_pit(int racer, float energy, float maxEnergy, float energyIncrease, int boosting);
 void gdx_net_shield_racer_frame(int racer);
-/* gdx_net_shield_bar for racer, with the spans as from, to, colour in out, for code that cannot include this
-   header (ovl_i3/hud.c). Returns how many spans; 0 also when the shield is off or racer is out of range,
-   so the HUD asks gdx_net_shield_on first. */
-int gdx_net_shield_racer_bar(int racer, int lapOne, float energy, float maxEnergy, int width, int out[6]);
+/* gdx_net_shield_bar for racer, as health, health colour, shield, shield colour in out, for code that cannot
+   include this header (ovl_i3/hud.c). Returns 1, or 0 when the shield is off or racer is out of range, and
+   then out is left alone. */
+int gdx_net_shield_racer_bar(int racer, int lapOne, float energy, float maxEnergy, int width, int out[4]);
 
 /* The room's rule, supplied by the race module (net/gdx_net_race.h); the tests supply their own. */
 int gdx_net_race_rule_shield(void);

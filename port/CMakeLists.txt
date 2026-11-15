@@ -459,7 +459,10 @@ gdx_add_main_target(G-Diffuser
     net/gdx_net_succession.cpp     # D28 who takes the room over when its host is lost
     gdx_net_machine_select.c       # O3 lock-in screen: when the stock machine screens belong to the room
     gdx_net_shield.c               # G4 room rule: the shield beside energy, and its bar
+    gdx_hang_watchdog.c            # Hang watchdog: when a freeze starts and ends, and its [hang] lines
+    gdx_hang_watchdog_thread.c     # Hang watchdog: the thread, the main thread stack and the minidump
     gdx_net_race_box.c             # O3 room race: the quit box every racer has (continue, return to room, leave the room)
+    gdx_net_spectate.c             # O3 room race: WATCH, the camera on another human, L/R and the cinematic
     gdx_net_race_words.c           # O3 room race: the quit box words as stock-style CI textures (original art)
     gdx_net_room_screen.c          # O3 room screen of the main menu: pages, cursor and the texts to draw
     gdx_net_text.c                 # O3 room screens: text the two stock fonts can draw, wrapping and the timer
@@ -1693,6 +1696,30 @@ if(MSVC)
 elseif(GDX_PORT_WARN_FLAGS)
     target_compile_options(gdx_net_shield_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
 endif()
+# Hang watchdog: when a freeze starts and ends, the arming after boot, the dump cap and the [hang] line
+# format. The clock is the test's, so no thread runs and nothing waits.
+add_executable(gdx_hang_watchdog_tests
+    tests/gdx_hang_watchdog_tests.c
+    gdx_hang_watchdog.c)
+target_include_directories(gdx_hang_watchdog_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_hang_watchdog_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_hang_watchdog_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+add_test(NAME gdx_hang_watchdog_tests COMMAND gdx_hang_watchdog_tests)
+# Online O3 room race: WATCH. Who it picks, L and R round the humans who still drive, CPUs and finished
+# machines skipped, the move on when the watched machine is done, the cinematic toggle and the label. The
+# field and the names are the two functions the test supplies.
+add_executable(gdx_net_spectate_tests
+    tests/gdx_net_spectate_tests.c
+    gdx_net_spectate.c)
+target_include_directories(gdx_net_spectate_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_net_spectate_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_net_spectate_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
 # Online O3 room race: the quit box every racer has. Its rows on a host and on a client, what opens and
 # closes it, the cursor, and what each row does. The room and the race are the five functions the test supplies.
 add_executable(gdx_net_race_box_tests
@@ -1793,6 +1820,7 @@ foreach(gdx_net_test IN ITEMS
         gdx_net_machine_select_tests
         gdx_net_shield_tests
         gdx_net_race_box_tests
+        gdx_net_spectate_tests
         gdx_net_room_screen_tests
         gdx_net_track_choice_tests
         gdx_net_race_tests
@@ -2435,7 +2463,10 @@ if(GDX_BUILD_JP AND NOT ANDROID)
         gdx_net_track_cache.cpp
         gdx_net_machine_select.c
         gdx_net_shield.c
+        gdx_hang_watchdog.c
+        gdx_hang_watchdog_thread.c
         gdx_net_race_box.c
+        gdx_net_spectate.c
         gdx_net_race_words.c
         gdx_net_room_screen.c
         gdx_net_text.c

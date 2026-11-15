@@ -1,7 +1,7 @@
 /* port/tests/gdx_net_race_box_tests.c -- unit tests for the quit box of a room's race (gdx_net_race_box.h).
  * Copyright (c) Zorkats
  *
- * Standalone: links gdx_net_race_box.c and gdx_net_race_words.c. The room and the race are the six functions below. Expected
+ * Standalone: links gdx_net_race_box.c and gdx_net_race_words.c. The room and the race are the seven functions below. Expected
  * values are written out by hand from the header.
  *
  * The module keeps the box between calls, so every test starts from a reset and a race number of its own.
@@ -37,6 +37,7 @@ static int sCalls;       /* the quit and the stop, in the order they came */
 static int sStopWasCall; /* which call the room's stop was, 1 for the first */
 static int sQuitWasCall;
 static int sHandOverCalls;
+static int sWatchCalls; /* WATCH turned spectating on */
 
 void gdx_lan_race_room(GdxNetRaceRoom* out) {
     *out = sFakeRoom;
@@ -64,6 +65,11 @@ void gdx_net_room_screen_want_front(void) {
     sFrontCalls++;
 }
 
+int gdx_net_spectate_watch(void) {
+    sWatchCalls++;
+    return 1;
+}
+
 enum { DRIVES = 0, FINISHED = 1, OUT = 2 };
 
 static void racing(unsigned raceIndex, int host) {
@@ -74,7 +80,7 @@ static void racing(unsigned raceIndex, int host) {
     sFakeRoom.raceIndex = raceIndex;
     sFakeRoom.onGrid = 1;
     sOwnState = DRIVES;
-    sQuitCalls = sStopCalls = sFrontCalls = sCalls = sStopWasCall = sQuitWasCall = sHandOverCalls = 0;
+    sQuitCalls = sStopCalls = sFrontCalls = sCalls = sStopWasCall = sQuitWasCall = sHandOverCalls = sWatchCalls = 0;
     gdx_net_race_box_reset();
 }
 
@@ -424,11 +430,23 @@ static void test_watch_once_the_machine_is_done(void) {
     CHECK(strcmp(gdx_net_race_box_text(2), "LEAVE THE ROOM") == 0);
     CHECK(choose() == GDX_NET_RACE_BOX_CLOSED);
     CHECK(sQuitCalls == 0);
+    CHECK(sWatchCalls == 1); /* WATCH sends the camera to another human */
 
     racing(22, 0);
     sOwnState = OUT;
     open_ready();
     CHECK(strcmp(gdx_net_race_box_text(0), "WATCH") == 0);
+    CHECK(gdx_net_race_box_frame(1, 0, 0, 0, 0, 0) == GDX_NET_RACE_BOX_CLOSED); /* START chooses as A does */
+    CHECK(sWatchCalls == 1 && sQuitCalls == 0);
+
+    /* CONTINUE while the machine drives, and B with WATCH on the cursor, leave the camera alone. */
+    racing(22, 0);
+    open_ready();
+    CHECK(choose() == GDX_NET_RACE_BOX_CLOSED);
+    sOwnState = OUT;
+    open_ready();
+    CHECK(back() == GDX_NET_RACE_BOX_CLOSED);
+    CHECK(sWatchCalls == 0);
 
     /* The word follows the machine while the box is open. */
     racing(22, 0);

@@ -589,6 +589,10 @@ void SendRacePoses(LobbyHost* host, LobbyClient* client) {
         to.flags = from.flags;
         // The same for an attack state the game should never have.
         to.attack = static_cast<uint8_t>(from.attack < 0 || from.attack > kStateAttackMax ? 0 : from.attack);
+        // The flame fields are clamped to what they travel in: a wrong one only draws a wrong flame.
+        to.boost = static_cast<uint16_t>(std::clamp(from.boost, 0, 0xFFFF));
+        to.burst = static_cast<uint8_t>(std::clamp(from.burst, 0, 0xFF));
+        to.ramp = static_cast<uint8_t>(std::clamp(from.ramp, 0, 0xFF));
     }
     if (host != nullptr) {
         host->SendPoses(static_cast<uint16_t>(raceIndex), poses);
@@ -619,6 +623,9 @@ void DeliverRacePoses(LobbyHost* host, LobbyClient* client) {
         to.lap = from.lap;
         to.flags = from.flags;
         to.attack = from.attack;
+        to.boost = from.boost;
+        to.burst = from.burst;
+        to.ramp = from.ramp;
         gdx_net_race_deliver(raceIndex, from.slot, &to);
     }
 }
@@ -2049,6 +2056,31 @@ extern "C" int gdx_lan_race_results(unsigned raceIndex, GdxNetRaceResults* out) 
         }
     }
     return 1;
+}
+
+extern "C" int gdx_lan_race_name(unsigned raceIndex, int human, char* out, int size) {
+    using namespace gdx::lan;
+    if (out == nullptr || size <= 0) {
+        return 0;
+    }
+    out[0] = '\0';
+    Runtime& rt = Rt();
+    std::lock_guard<std::mutex> guard(rt.lock);
+    const View& view = rt.view;
+    if ((view.mode != Mode::Hosting && view.mode != Mode::Joined) || !view.haveGrid ||
+        view.grid.raceIndex != raceIndex || human < 0 || static_cast<size_t>(human) >= view.grid.humans.size()) {
+        return 0;
+    }
+    const uint8_t id = view.grid.humans[static_cast<size_t>(human)].id;
+    for (const gdx::net::lobby::PlayerInfo& player : view.roster) {
+        if (player.id == id && !player.name.empty()) {
+            const size_t length = (std::min)(player.name.size(), static_cast<size_t>(size - 1));
+            std::copy(player.name.begin(), player.name.begin() + static_cast<std::ptrdiff_t>(length), out);
+            out[length] = '\0';
+            return 1;
+        }
+    }
+    return 0;
 }
 
 extern "C" unsigned gdx_lan_now_ms(void) {

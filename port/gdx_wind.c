@@ -30,6 +30,10 @@ int gdx_wind_resolve_track(int pointStrength, int pointAngle, int trackStrength,
     return gdx_wind_resolve(trackStrength, trackAngle, blocked, angle);
 }
 
+int gdx_wind_blows(int introTimer) {
+    return introTimer < GDX_WIND_START_TIMER;
+}
+
 float gdx_wind_strength_scale(int strength) {
     if (strength <= 0) {
         return 1.0f;

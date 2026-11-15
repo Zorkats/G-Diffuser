@@ -45,6 +45,11 @@ typedef struct GdxNetPose {
     int lap;
     unsigned int flags; // the owner's racer state flags
     int attack;         // the owner's attack state: 0 none, 1 side attack, 2 spin
+    // What the booster flames are drawn from (protocol 14). A puppet never runs the controls code that
+    // feeds them, so its owner sends them.
+    int boost; // the owner's boost timer, in frames, 0 to 65535
+    int burst; // the flame burst of an accelerator press, which starts at 27 and counts down, 0 to 255
+    int ramp;  // how far the flames have grown since GO, 0 (none) to 255 (full)
 } GdxNetPose;
 
 // gdx_net_race_sample result bits.

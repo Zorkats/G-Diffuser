@@ -37,6 +37,16 @@ static void test_resolve(void) {
     CHECK(gdx_wind_resolve(50, 90, 0, NULL) == 50, "the angle pointer may be NULL");
 }
 
+/* wizmer, 2026-11-07: the wind pushed the grid into a wall before GO. */
+static void test_blows_from_go(void) {
+    CHECK(!gdx_wind_blows(460), "no wind when the countdown starts");
+    CHECK(!gdx_wind_blows(100), "no wind during the countdown");
+    CHECK(!gdx_wind_blows(41), "no wind while an Expansion Kit disk retry holds the countdown before GO");
+    CHECK(!gdx_wind_blows(40), "no wind on the GO frame, before race time counts");
+    CHECK(gdx_wind_blows(39), "wind from the first frame of race time");
+    CHECK(gdx_wind_blows(0), "wind once the countdown is over, and in modes that have none");
+}
+
 static void test_resolve_track(void) {
     int angle = -1;
 
@@ -525,6 +535,7 @@ int main(void) {
     test_road_quad();
     test_road_texture();
     test_resolve();
+    test_blows_from_go();
     test_resolve_track();
     test_track_rows();
     test_direction();
