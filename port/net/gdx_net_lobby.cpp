@@ -446,11 +446,15 @@ bool ColourOk(uint32_t colour) {
     return colour <= 0xFFFFFFu;
 }
 
-bool TrackInPool(uint8_t track, uint32_t pool) {
-    return track == kTrackRandom || (track < kStockTracks && ((pool >> track) & 1u) != 0);
+bool RaceTrackOk(uint8_t track) {
+    return track < kStockTracks || (track >= kDiskTrackFirst && track < kDiskTrackFirst + kDiskTracks);
 }
 
-bool PoolOk(uint32_t pool) {
+bool TrackInPool(uint8_t track, uint64_t pool) {
+    return track == kTrackRandom || (RaceTrackOk(track) && ((pool >> track) & 1u) != 0);
+}
+
+bool PoolOk(uint64_t pool) {
     return pool != 0 && (pool & ~kPoolAll) == 0;
 }
 
@@ -584,7 +588,9 @@ namespace {
 
 constexpr uint8_t kRuleIgnoreTrackSettings = 1 << 0;
 constexpr uint8_t kRuleLavaNoKill = 1 << 1;
-constexpr uint8_t kRuleFlagsAll = kRuleIgnoreTrackSettings | kRuleLavaNoKill;
+constexpr uint8_t kRuleShield = 1 << 2;
+constexpr uint8_t kRuleEngineFixed = 1 << 3;
+constexpr uint8_t kRuleFlagsAll = kRuleIgnoreTrackSettings | kRuleLavaNoKill | kRuleShield | kRuleEngineFixed;
 
 constexpr uint8_t kCpuFill = 1 << 0;
 constexpr uint8_t kCpuTrackHazards = 1 << 1;
@@ -602,12 +608,14 @@ float BitsFloat(uint32_t bits) {
     return value;
 }
 
-// u8 laps, u8 rule flags, u32 magnet range, u32 magnet strength (float bits), u32 boost frames: the rules
-// as Grid and Room both carry them.
+// u8 laps, u8 rule flags, u8 contact damage, u32 magnet range, u32 magnet strength (float bits), u32 boost
+// frames: the rules as Grid and Room both carry them.
 void WriteRules(Writer& w, const RaceRules& rules) {
     w.U8(rules.laps);
     w.U8(static_cast<uint8_t>((rules.ignoreTrackSettings ? kRuleIgnoreTrackSettings : 0) |
-                              (rules.lavaNoKill ? kRuleLavaNoKill : 0)));
+                              (rules.lavaNoKill ? kRuleLavaNoKill : 0) | (rules.shield ? kRuleShield : 0) |
+                              (rules.engineFixed ? kRuleEngineFixed : 0)));
+    w.U8(rules.contactDamage);
     w.U32(FloatBits(rules.magnetRange));
     w.U32(FloatBits(rules.magnetStrength));
     w.U32(rules.boostFrames);
@@ -617,6 +625,7 @@ void WriteRules(Writer& w, const RaceRules& rules) {
 bool ReadRules(Reader& r, RaceRules& rules) {
     rules.laps = r.U8();
     const uint8_t flags = r.U8();
+    rules.contactDamage = r.U8();
     rules.magnetRange = BitsFloat(r.U32());
     rules.magnetStrength = BitsFloat(r.U32());
     rules.boostFrames = r.U32();
@@ -625,6 +634,8 @@ bool ReadRules(Reader& r, RaceRules& rules) {
     }
     rules.ignoreTrackSettings = (flags & kRuleIgnoreTrackSettings) != 0;
     rules.lavaNoKill = (flags & kRuleLavaNoKill) != 0;
+    rules.shield = (flags & kRuleShield) != 0;
+    rules.engineFixed = (flags & kRuleEngineFixed) != 0;
     return RulesOk(rules);
 }
 
@@ -646,7 +657,7 @@ std::vector<uint8_t> EncodeRoomState(const RoomState& room) {
     w.U32(room.phaseLeftMs);
     w.U32(room.phaseTotalMs);
     w.U8(room.racerCap);
-    w.U32(room.pool);
+    w.U64(room.pool);
     WriteTrack(w, room.track, room.custom);
     w.U8(room.lastTrack);
     w.U8(room.picker);
@@ -811,7 +822,8 @@ bool RulesOk(const RaceRules& rules) {
     // Every comparison is false for a NaN, so one never passes.
     return rules.laps >= 1 && rules.laps <= kLapsMax && rules.magnetRange >= kMagnetRangeMin &&
            rules.magnetRange <= kMagnetRangeMax && rules.magnetStrength >= kMagnetStrengthMin &&
-           rules.magnetStrength <= kMagnetStrengthMax && rules.boostFrames <= kBoostFramesMax;
+           rules.magnetStrength <= kMagnetStrengthMax && rules.boostFrames <= kBoostFramesMax &&
+           rules.contactDamage <= kContactOff;
 }
 
 std::vector<uint8_t> EncodeReadyToRace(const ReadyToRace& ready) {
@@ -1056,7 +1068,7 @@ bool DecodeRoomState(const uint8_t* data, size_t len, RoomState& out) {
     room.phaseLeftMs = r.U32();
     room.phaseTotalMs = r.U32();
     room.racerCap = r.U8();
-    room.pool = r.U32();
+    room.pool = r.U64();
     if (!ReadTrack(r, room.track, room.custom)) {
         return false;
     }
@@ -1078,7 +1090,7 @@ bool DecodeRoomState(const uint8_t* data, size_t len, RoomState& out) {
     room.commitment = r.B32();
     room.code = r.U32();
     const uint8_t lastPlacePicks = r.U8();
-    const auto trackOrNone = [](uint8_t t) { return t < kStockTracks || t == kTrackNone || t == kTrackCustom; };
+    const auto trackOrNone = [](uint8_t t) { return RaceTrackOk(t) || t == kTrackNone || t == kTrackCustom; };
     if (!r.Done() || phase >= kPhaseCount || room.phaseLeftMs > room.phaseTotalMs ||
         room.racerCap < kMinRacers || room.racerCap > kMaxRacers || !PoolOk(room.pool) || lastPlacePicks > 1 ||
         !trackOrNone(room.track) || !trackOrNone(room.lastTrack) ||
@@ -1142,7 +1154,7 @@ bool DecodeLottery(const uint8_t* data, size_t len, LotteryResult& out) {
     const bool trackOk = ReadTrack(r, lottery.track, lottery.custom);
     lottery.salt = r.B32();
     if (!trackOk || !r.Done() ||
-        (lottery.track >= kStockTracks && lottery.track != kTrackCustom)) {
+        (!RaceTrackOk(lottery.track) && lottery.track != kTrackCustom)) {
         return false;
     }
     // The winner is one of the ballots, and a ballot that named a track won with that track. A draw (no
@@ -1181,11 +1193,11 @@ bool DecodePicked(const uint8_t* data, size_t len, Picked& out) {
     }
     const uint8_t drawn = r.U8();
     picked.by = r.U8();
-    if (!r.Done() || (picked.track >= kStockTracks && picked.track != kTrackCustom) || drawn > 1 ||
+    if (!r.Done() || (!RaceTrackOk(picked.track) && picked.track != kTrackCustom) || drawn > 1 ||
         (picked.by >= kMaxPlayers && picked.by != kSystemId)) {
         return false;
     }
-    // Only a player picks a custom track: the host draws from the stock courses alone.
+    // Only a player picks a custom track: the host draws from the pool's courses alone.
     if (picked.track == kTrackCustom && (drawn == 1 || picked.by == kSystemId)) {
         return false;
     }
@@ -1258,7 +1270,7 @@ bool DecodeGrid(const uint8_t* data, size_t len, Grid& out) {
         return false;
     }
     if (!ReadTrack(r, grid.track.track, grid.track.custom) ||
-        (grid.track.track >= kStockTracks && grid.track.track != kTrackCustom)) {
+        (!RaceTrackOk(grid.track.track) && grid.track.track != kTrackCustom)) {
         return false;
     }
     grid.cpus = r.U8();
@@ -1637,6 +1649,28 @@ bool DecodeKeys(const uint8_t* data, size_t len, std::vector<MemberKey>& out) {
         return false;
     }
     out = std::move(keys);
+    return true;
+}
+
+std::vector<uint8_t> EncodeRelayTicket(const RelayTicket& ticket) {
+    Writer w;
+    w.U32(ticket.code);
+    w.U64(ticket.expires);
+    w.Raw(ticket.sig.data(), ticket.sig.size());
+    return w.Take();
+}
+
+bool DecodeRelayTicket(const uint8_t* data, size_t len, RelayTicket& out) {
+    Reader r(data, len);
+    RelayTicket ticket;
+    ticket.code = r.U32();
+    ticket.expires = r.U64();
+    const std::string sig = r.Bytes(ticket.sig.size());
+    if (!r.Done() || ticket.code >= kRoomCodeValues || ticket.expires == 0 || ticket.expires > kTicketExpiresMax) {
+        return false;
+    }
+    std::memcpy(ticket.sig.data(), sig.data(), ticket.sig.size());
+    out = ticket;
     return true;
 }
 

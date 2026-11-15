@@ -30,20 +30,23 @@ typedef struct GdxNetLockInRoom {
     unsigned leftMs;    /* time left on the room's timer */
     int lockedCount;    /* racers who have locked in */
     int racers;         /* racers on the grid */
-    int track;          /* the stock course of this race, or GDX_NET_LOCK_IN_TRACK_CUSTOM */
+    int engineFixed;    /* the room's rules fix the engine setting at GDX_NET_LOCK_IN_ENGINE_FIXED */
+    int track;          /* the course of this race, or GDX_NET_LOCK_IN_TRACK_CUSTOM */
     char title[21];     /* when track is GDX_NET_LOCK_IN_TRACK_CUSTOM: the track's title, else empty */
 } GdxNetLockInRoom;
 
 #define GDX_NET_LOCK_IN_TRACK_CUSTOM 0xFD /* net::lobby::kTrackCustom: a racer's own track */
 #define GDX_NET_LOCK_IN_COURSE_CUSTOM 24  /* COURSE_EDIT_1: the course slot a room's custom track races in */
+#define GDX_NET_LOCK_IN_ENGINE_FIXED 0.5f /* net::lobby::kEngineFixed on the slider's 0 to 1 */
 
 /* The room and the menu, as this module sees them (gdx_lan_lobby.cpp, gdx_menu.cpp). */
 void gdx_lan_lock_in_room(GdxNetLockInRoom* out);
 void gdx_lan_lock_in_send(int machine, int skin, int enginePercent);
 /* The port menu steps aside for the lock-in screen. */
 void gdx_menu_request_close(void);
-/* The host's driving options become the rules of the race this lock-in is for (gdx_lan_lobby.cpp). */
-void gdx_lan_race_capture_rules(void);
+/* The host's CPU options go to the room for the race this lock-in is for (gdx_lan_lobby.cpp). The rules are
+ * the RULES page's. */
+void gdx_lan_race_capture_cpu(void);
 /* The race after the lock-in (gdx_net_race_bridge.c): 0 when this player has none, 1 while its grid is on
  * the way, 2 when the next Practice race is the room's. */
 int gdx_net_race_arm(unsigned raceIndex);
@@ -52,7 +55,7 @@ int gdx_net_race_arm(unsigned raceIndex);
  * course gdx_net_machine_select_track(). Calling it also records that the screen is not up, which is true
  * whenever the main menu runs. */
 int gdx_net_machine_select_poll_open(void);
-/* The course the race runs on: the stock course, or GDX_NET_LOCK_IN_COURSE_CUSTOM for a custom track. */
+/* The course the race runs on: a stock or 64DD course, or GDX_NET_LOCK_IN_COURSE_CUSTOM for a custom track. */
 int gdx_net_machine_select_track(void);
 /* The name the race shows for its track: NULL for a stock track, which keeps its own name. For a custom
  * track its title as the title font draws it. Valid until the next call. */
@@ -70,6 +73,10 @@ int gdx_net_machine_select_should_leave(void);
 /* 1 once the local player has locked in. The screen takes no more input. */
 int gdx_net_machine_select_waiting(void);
 
+/* 1 while the lock-in screen is up for a room whose rules fix the engine setting: the slider stays at
+ * GDX_NET_LOCK_IN_ENGINE_FIXED. */
+int gdx_net_machine_select_engine_fixed(void);
+
 /* The second OK on machine settings. character is a roster index, skin 0..3, engine 0..1. A lock is final,
  * so a second call for the same race does nothing. */
 void gdx_net_machine_select_confirm(int character, int skin, float engine);
@@ -83,6 +90,8 @@ const char* gdx_net_machine_select_wait_text(void);
 
 /* The pieces, for the tests. */
 int gdx_net_lock_in_engine_percent(float engine);
+/* A course a room races: 0 to 23 and 30 to 41. */
+int gdx_net_lock_in_course_ok(int track);
 void gdx_net_lock_in_format_timer(unsigned leftMs, char* out, int size);
 void gdx_net_lock_in_format_count(int locked, int racers, char* out, int size);
 

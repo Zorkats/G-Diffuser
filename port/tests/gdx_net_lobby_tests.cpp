@@ -642,15 +642,16 @@ Grid SampleGrid() {
     return grid;
 }
 
-// The bytes of a grid message with a stock track: 23 of header, then four per human with no machine record.
+// The bytes of a grid message with a stock track: 24 of header, then four per human with no machine record.
 constexpr size_t kGridLaps = 6;
 constexpr size_t kGridFlags = 7;
-constexpr size_t kGridRange = 8;
-constexpr size_t kGridBoost = 16;
-constexpr size_t kGridTrack = 20;
-constexpr size_t kGridCpus = 21;
-constexpr size_t kGridCount = 22;
-constexpr size_t kGridHumans = 23;
+constexpr size_t kGridContact = 8;
+constexpr size_t kGridRange = 9;
+constexpr size_t kGridBoost = 17;
+constexpr size_t kGridTrack = 21;
+constexpr size_t kGridCpus = 22;
+constexpr size_t kGridCount = 23;
+constexpr size_t kGridHumans = 24;
 constexpr size_t kGridStride = 4;
 
 void TestRaceCodec() {
@@ -687,7 +688,9 @@ void TestRaceCodec() {
     };
     CHECK(refuses(kGridLaps, 0) && refuses(kGridLaps, static_cast<uint8_t>(kLapsMax + 1)));
     CHECK(!refuses(kGridLaps, kLapsMax) && !refuses(kGridLaps, 1));
-    CHECK(refuses(kGridFlags, 4) && refuses(kGridFlags, 0x80) && !refuses(kGridFlags, 3) && !refuses(kGridFlags, 0));
+    CHECK(refuses(kGridFlags, 0x10) && refuses(kGridFlags, 0x80) && !refuses(kGridFlags, 0x0F) && !refuses(kGridFlags, 0));
+    CHECK(refuses(kGridContact, static_cast<uint8_t>(kContactOff + 1)) && !refuses(kGridContact, kContactOff) &&
+          !refuses(kGridContact, kContactHalf));
     CHECK(refuses(kGridCpus, 28)); // three humans and 28 CPUs: one racer too many
     CHECK(refuses(kGridCount, 0) && refuses(kGridCount, 2) && refuses(kGridCount, 4)); // the count and the bytes
     CHECK(refuses(kGridHumans, static_cast<uint8_t>(kMaxPlayers))); // no such player
@@ -1174,7 +1177,7 @@ void TestRoomCodec() {
     state.phaseLeftMs = 59000;
     state.phaseTotalMs = 60000;
     state.racerCap = 12;
-    state.pool = 0x00F0F0F0;
+    state.pool = 0x00F0F0F0 | (uint64_t{ 0x801 } << kDiskTrackFirst); // two 64DD courses: 30 and 41
     state.track = 7;
     state.lastTrack = 23;
     state.picker = 13;
@@ -1186,7 +1189,7 @@ void TestRoomCodec() {
     CHECK(DecodeRoomState(stateBytes.data(), stateBytes.size(), stateOut) && stateOut == state);
     CHECK(stateOut.cpusOut);
     // The CPU machines are in the race or out of it: that byte is 0 or 1 and nothing else. After it come
-    // the custom-track switch (1), the CPU flags (1), AI aggression (2), the rules (14) and the successor
+    // the custom-track switch (1), the CPU flags (1), AI aggression (2), the rules (15) and the successor
     // with its address (19), the room type (1), the lottery commitment (32), the room code (4) and the
     // course choice (1).
     {
@@ -1194,7 +1197,7 @@ void TestRoomCodec() {
         plain.cpusOut = false;
         CHECK(!(plain == state));
         std::vector<uint8_t> bytes = EncodeRoomState(plain);
-        const size_t at = bytes.size() - 76;
+        const size_t at = bytes.size() - 77;
         CHECK(bytes.size() == stateBytes.size() && bytes[at] == 0 && stateBytes[at] == 1);
         CHECK(DecodeRoomState(bytes.data(), bytes.size(), stateOut) && stateOut == plain && !stateOut.cpusOut);
         bytes[at] = 2;
@@ -1284,6 +1287,9 @@ void TestRoomCodec() {
         full.rules.magnetRange = 150.5f;
         full.rules.magnetStrength = 0.75f;
         full.rules.boostFrames = 420;
+        full.rules.contactDamage = kContactOff; // protocol 13
+        full.rules.shield = true;
+        full.rules.engineFixed = true;
         full.successor = 5;
         full.successorIp = MappedV4(0xC0A8010A); // 192.168.1.10
         full.successorPort = 41234;
@@ -1311,7 +1317,7 @@ void TestRoomCodec() {
               plain.rules == RaceRules());
         // The CPU flags byte takes two bits and nothing else.
         std::vector<uint8_t> flagged = fullBytes;
-        const size_t cpuFlagsAt = fullBytes.size() - 74;
+        const size_t cpuFlagsAt = fullBytes.size() - 75;
         CHECK(flagged[cpuFlagsAt] == 2);
         for (uint8_t bad : { uint8_t{ 4 }, uint8_t{ 0x80 }, uint8_t{ 0xFF } }) {
             flagged[cpuFlagsAt] = bad;
@@ -1369,15 +1375,23 @@ void TestRoomCodec() {
     CHECK(PoolOk(kPoolAll) && PoolOk(1u << 23) && !PoolOk(0) && !PoolOk(1u << 24));
     CHECK(TrackInPool(3, 1u << 3) && TrackInPool(kTrackRandom, 1u << 3));
     CHECK(!TrackInPool(4, 1u << 3) && !TrackInPool(24, kPoolAll) && !TrackInPool(kTrackNone, kPoolAll));
+    // The 64DD courses (protocol 13): 30 to 41, and no Edit Cup or X Cup course between or after them.
+    CHECK(kPoolAll == (0xFFFFFFull | (0xFFFull << 30)));
+    CHECK(PoolOk(uint64_t{ 1 } << 30) && PoolOk(uint64_t{ 1 } << 41) && !PoolOk(uint64_t{ 1 } << 29) &&
+          !PoolOk(uint64_t{ 1 } << 42) && !PoolOk(uint64_t{ 1 } << 63));
+    CHECK(TrackInPool(30, kPoolAll) && TrackInPool(41, kPoolAll) && !TrackInPool(29, kPoolAll) &&
+          !TrackInPool(42, kPoolAll) && !TrackInPool(48, kPoolAll) && !TrackInPool(30, kPoolStock));
+    CHECK(RaceTrackOk(0) && RaceTrackOk(23) && RaceTrackOk(30) && RaceTrackOk(41) && !RaceTrackOk(24) &&
+          !RaceTrackOk(29) && !RaceTrackOk(42) && !RaceTrackOk(kTrackRandom) && !RaceTrackOk(kTrackCustom));
 
     uint8_t track = 0;
-    for (uint8_t value : { uint8_t{ 0 }, uint8_t{ 23 }, kTrackRandom }) {
+    for (uint8_t value : { uint8_t{ 0 }, uint8_t{ 23 }, uint8_t{ 30 }, uint8_t{ 41 }, kTrackRandom }) {
         std::vector<uint8_t> v = EncodeVote(value);
         CHECK(DecodeVote(v.data(), v.size(), track) && track == value);
         v = EncodePick(value);
         CHECK(DecodePick(v.data(), v.size(), track) && track == value);
     }
-    for (uint8_t value : { uint8_t{ 24 }, kTrackNone }) {
+    for (uint8_t value : { uint8_t{ 24 }, uint8_t{ 29 }, uint8_t{ 42 }, uint8_t{ 48 }, kTrackNone }) {
         std::vector<uint8_t> v = EncodeVote(value);
         CHECK(!DecodeVote(v.data(), v.size(), track));
         v = EncodePick(value);
@@ -1740,7 +1754,8 @@ void TestMachineRecordBounds() {
 
 void TestCustomTrackWire() {
     std::printf("codec: custom tracks, machine records, hack identity, boost length\n");
-    CHECK(kLobbyVersion == kProtocolVersion && kProtocolVersion == 11); // O5.1, O5.3, O6.1, O7.3, R4, direct links and the course choice bumped it
+    CHECK(kLobbyVersion == kProtocolVersion && kProtocolVersion == 13); // O5.1, O5.3, O6.1, O7.3, R4, direct links, the course choice, relay tickets and
+                                                                         // the 64DD pool with the room rules bumped it
     CHECK(static_cast<uint8_t>(Phase::Assets) == 9 && kPhaseCount == 10);
     CHECK(std::string(PhaseName(Phase::Assets)) == "Getting the track");
     CHECK(static_cast<uint8_t>(RejectReason::Hack) == 7 && RejectReasonText(RejectReason::Hack)[0] != '\0');
@@ -1866,9 +1881,9 @@ void TestCustomTrackWire() {
     v = EncodeRoomState(room);
     RoomState roomOut;
     CHECK(DecodeRoomState(v.data(), v.size(), roomOut) && roomOut == room && roomOut.customTracks);
-    // The switch is the byte before the version 4 tail: CPU flags, aggression, rules, successor (36 bytes),
+    // The switch is the byte before the version 4 tail: CPU flags, aggression, rules, successor (37 bytes),
     // then the version 7 room type, commitment and code (37 bytes) and the version 11 course choice (1 byte).
-    const size_t switchAt = v.size() - 75;
+    const size_t switchAt = v.size() - 76;
     CHECK(v[switchAt] == 1);
     CheckEdges(v, [](const uint8_t* d, size_t n) {
         RoomState o;
@@ -1931,6 +1946,29 @@ void TestCustomTrackWire() {
     CHECK(RulesOk(rules));
     rules.boostFrames = kBoostFramesMax + 1;
     CHECK(!RulesOk(rules));
+    // Contact damage is one of three (protocol 13), and the new rules travel in the grid.
+    rules = RaceRules();
+    rules.contactDamage = kContactOff;
+    CHECK(RulesOk(rules));
+    rules.contactDamage = kContactOff + 1;
+    CHECK(!RulesOk(rules));
+    {
+        Grid fixed = grid;
+        fixed.rules.contactDamage = kContactHalf;
+        fixed.rules.shield = true;
+        fixed.rules.engineFixed = true;
+        v = EncodeGrid(fixed);
+        CHECK(DecodeGrid(v.data(), v.size(), gridOut) && gridOut == fixed && gridOut.rules.contactDamage == kContactHalf &&
+              gridOut.rules.shield && gridOut.rules.engineFixed);
+        fixed.rules.contactDamage = kContactOff + 1;
+        v = EncodeGrid(fixed);
+        CHECK(!DecodeGrid(v.data(), v.size(), gridOut));
+        // A grid on a 64DD course.
+        fixed = grid;
+        fixed.track.track = 36;
+        v = EncodeGrid(fixed);
+        CHECK(DecodeGrid(v.data(), v.size(), gridOut) && gridOut.track.track == 36);
+    }
 
     // The join carries the hack: the stock game is an empty name and zero bytes.
     CHECK(HackOk(HackIdentity()));
@@ -2289,7 +2327,7 @@ void TestDecoderSweep() {
         LotteryResult l;
         if (DecodeLottery(d, n, l)) {
             accepted++;
-            CHECK((l.track < kStockTracks || l.track == kTrackCustom) &&
+            CHECK((RaceTrackOk(l.track) || l.track == kTrackCustom) &&
                   (l.ballots.empty() ? l.winner == kNoWinner : l.winner < l.ballots.size()));
             CHECK(l.track != kTrackCustom || (!l.ballots.empty() && l.ballots[l.winner].custom == l.custom));
             CHECK(EncodeLottery(l) == bytes);
@@ -2297,7 +2335,7 @@ void TestDecoderSweep() {
         Picked p;
         if (DecodePicked(d, n, p)) {
             accepted++;
-            CHECK((p.track < kStockTracks || (p.track == kTrackCustom && !p.drawn && p.by != kSystemId)) &&
+            CHECK((RaceTrackOk(p.track) || (p.track == kTrackCustom && !p.drawn && p.by != kSystemId)) &&
                   EncodePicked(p) == bytes);
         }
         LockRequest k;
@@ -2977,6 +3015,79 @@ void TestTakeoverSecret() {
     CHECK(!lan.host->TakeSecretExposed());
 }
 
+// A relay ticket with every field set, as a host would sign it (CONTRACT.md §5.9).
+RelayTicket SampleRelayTicket() {
+    RelayTicket ticket;
+    ticket.code = 123456789;
+    ticket.expires = 1700000600;
+    for (size_t i = 0; i < ticket.sig.size(); i++) {
+        ticket.sig[i] = static_cast<uint8_t>(i * 7 + 1);
+    }
+    return ticket;
+}
+
+// Protocol 12: the RelayTicket codec, and the host sends its ticket to every member, to each member who joins
+// later, and again only when it changes.
+void TestRelayTickets() {
+    std::printf("relay tickets reach every member (protocol 12)\n");
+    const RelayTicket ticket = SampleRelayTicket();
+    std::vector<uint8_t> bytes = EncodeRelayTicket(ticket);
+    RelayTicket back;
+    CHECK(bytes.size() == 4 + 8 + 64 && DecodeRelayTicket(bytes.data(), bytes.size(), back) && back == ticket);
+
+    // Refused: a code out of range, no expiry, one past the JSON integer limit, a byte too many or too few. The
+    // output is left alone.
+    const auto refused = [&](const std::vector<uint8_t>& wire) {
+        RelayTicket out = ticket;
+        return !DecodeRelayTicket(wire.data(), wire.size(), out) && out == ticket;
+    };
+    RelayTicket bad = ticket;
+    bad.code = kRoomCodeValues;
+    CHECK(refused(EncodeRelayTicket(bad)));
+    bad.code = kNoRoomCode;
+    CHECK(refused(EncodeRelayTicket(bad)));
+    bad = ticket;
+    bad.expires = 0;
+    CHECK(refused(EncodeRelayTicket(bad)));
+    bad.expires = kTicketExpiresMax + 1;
+    CHECK(refused(EncodeRelayTicket(bad)));
+    bad.expires = kTicketExpiresMax;
+    bad.code = kRoomCodeValues - 1;
+    bytes = EncodeRelayTicket(bad);
+    CHECK(DecodeRelayTicket(bytes.data(), bytes.size(), back) && back == bad);
+    bytes = EncodeRelayTicket(ticket);
+    bytes.push_back(0);
+    CHECK(refused(bytes));
+    bytes.resize(75);
+    CHECK(refused(bytes));
+    CHECK(refused({}));
+
+    Lan lan;
+    LobbyClient& ana = lan.AddClient("Ana");
+    lan.Settle();
+    CHECK(ana.TicketSerial() == 0); // no ticket until the host signs one
+    lan.host->SetRelayTicket(ticket);
+    lan.Tick(20);
+    CHECK(ana.TicketSerial() == 1 && ana.Ticket() == ticket);
+    lan.host->SetRelayTicket(ticket); // the ticket it holds: nothing is sent
+    lan.Tick(20);
+    CHECK(ana.TicketSerial() == 1);
+
+    // A member who joins while the host holds a ticket gets it with the room.
+    LobbyClient& bo = lan.AddClient("Bo");
+    lan.Settle();
+    CHECK(bo.GetState() == LobbyClient::State::Joined && bo.TicketSerial() == 1 && bo.Ticket() == ticket);
+
+    // A new ticket goes to everyone.
+    RelayTicket next = ticket;
+    next.expires += 300;
+    next.sig[0] ^= 0xFF;
+    lan.host->SetRelayTicket(next);
+    lan.Tick(20);
+    CHECK(ana.TicketSerial() == 2 && ana.Ticket() == next);
+    CHECK(bo.TicketSerial() == 2 && bo.Ticket() == next);
+}
+
 void TestUploadTotals() {
     std::printf("upload totals (L2)\n");
     Lan lan;
@@ -3069,6 +3180,7 @@ void TestHostChecksEveryMessage() {
     CHECK(refusedAfter(kMsgRoster, EncodeRoster(lan.host->Roster()))); // a host message from a client
     CHECK(refusedAfter(kMsgWelcome, EncodeWelcome(1)));
     CHECK(refusedAfter(kMsgResults, EncodeResults(RaceResults()))); // a host message from a client
+    CHECK(refusedAfter(kMsgRelayTicket, EncodeRelayTicket(SampleRelayTicket()))); // only a host signs tickets
     CHECK(refusedAfter(kMsgFinish, EncodeFinish({ 0, ResultKind::Retired, 0 }))); // no race is run
     CHECK(refusedAfter(kMsgFinish, { 0, 0, 0 }));                  // truncated
     CHECK(refusedAfter(kMsgFinish, { 0, 0, 1, 0, 0, 0, 0 }));      // nobody reports that they are still driving
@@ -3940,7 +4052,8 @@ void TestRacePoses() {
     run(4);
     CHECK(hostGot().size() == 1 && clientGot(bo).size() == 2 && clientGot(wim).size() == 3);
 
-    // The two racers go out and the race is over: what is still on its way is dropped without a word.
+    // The two racers go out and the race is over. Every copy keeps the race on screen a moment before it
+    // fades out, so the racers' poses still flow through the results, and one from off the grid is refused.
     FinishReport out;
     out.raceIndex = 0;
     out.kind = ResultKind::Retired;
@@ -3952,7 +4065,22 @@ void TestRacePoses() {
     refused = lan.host->Refused();
     bo.SendPoses(0, { PoseOf(2, 800) });
     lan.host->SendPoses(0, { PoseOf(0, 800) });
+    run(4);
+    CHECK(hostGot().size() == 1 && clientGot(bo).size() == 1 && clientGot(wim).size() == 2);
     loose(raw, { 0, { PoseOf(1, 800) } });
+    CHECK(refusedOnce());
+
+    // Once the results are over and every copy knows it, what is still on its way is dropped without a word.
+    for (int i = 0; i < 3000 && lan.HostPhase() == Phase::Results; i++) {
+        run(1);
+    }
+    CHECK(lan.HostPhase() != Phase::Results);
+    run(10); // every copy has heard it
+    quiet();
+    refused = lan.host->Refused();
+    bo.SendPoses(0, { PoseOf(2, 900) });
+    lan.host->SendPoses(0, { PoseOf(0, 900) });
+    loose(raw, { 0, { PoseOf(1, 900) } });
     CHECK(lan.host->Refused() == refused && quiet());
     CHECK(bo.Refused() == 0 && wim.Refused() == 0);
 
@@ -4677,7 +4805,8 @@ void TestDirectLinksRace() {
     CHECK(bo.Refused() == 0 && linkDatagrams > 0);
 
     // The link opens again. The race ends; Bo hears it a second before Ana, whose poses still come direct in
-    // that second. Bo's game gets none of them: the links keep to the phases the host relays poses in.
+    // that second. Bo's game gets them all: every copy keeps the race on screen a moment after it ends, so
+    // the links, like the host, pass poses through the results.
     lan.Tick(20);
     CHECK(bo.Links().Open(anaId, lan.now + lan.skew[1], best));
     lan.net.SetDelay([&](const NetAddress& from, const NetAddress& to) {
@@ -4702,7 +4831,7 @@ void TestDirectLinksRace() {
     drain();
     CHECK(ana.Room(lan.now).phase == Phase::Racing);
     CHECK(bo.Links().Stats().posesReceived[static_cast<size_t>(links::PathKind::Public)] > direct);
-    CHECK(boGot[static_cast<uint8_t>(anaSlot)] == 2 * sends);
+    CHECK(boGot[static_cast<uint8_t>(anaSlot)] == 2 * sends + 10);
 }
 
 // Bo is behind a NAT that gives each destination its own outside port, so nothing he sends to Ana comes from
@@ -5720,6 +5849,7 @@ int main() {
     TestUploadTotals();
     TestRoomTypeWire();
     TestTakeoverSecret();
+    TestRelayTickets();
     TestOldVersionRefused();
     TestHostChecksEveryMessage();
     TestKeyCodecs();

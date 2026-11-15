@@ -14,6 +14,33 @@
 #define STOCK_CUPS 4
 #define EDIT_FIRST GDX_NET_TRACK_CHOICE_EDIT_TRACK
 #define EDIT_END (GDX_NET_TRACK_CHOICE_EDIT_TRACK + GDX_NET_OWN_TRACK_SLOTS)
+#define DISK_FIRST GDX_NET_ROOM_DISK_TRACK_FIRST
+#define DISK_END GDX_NET_ROOM_DISK_TRACK_END
+
+/* A course a room can race: a stock one or a 64DD one, as net::lobby::RaceTrackOk has it. */
+static int room_course(int track) {
+    return (track >= 0 && track < STOCK_TRACKS) || (track >= DISK_FIRST && track < DISK_END);
+}
+
+/* The first track of a place on the cup screen, or -1 for the X Cup's place and anything else. */
+static int cup_first(int cup) {
+    switch (cup) {
+        case GDX_NET_TRACK_CHOICE_EDIT_CUP:
+            return EDIT_FIRST;
+        case GDX_NET_TRACK_CHOICE_DD_1_CUP:
+            return GDX_NET_TRACK_CHOICE_DD_1_TRACK;
+        case GDX_NET_TRACK_CHOICE_DD_2_CUP:
+            return GDX_NET_TRACK_CHOICE_DD_2_TRACK;
+        default:
+            return (cup >= 0 && cup < STOCK_CUPS) ? cup * CUP_TRACKS : -1;
+    }
+}
+
+/* The place on the cup screen of a stock or 64DD course. */
+static int cup_of(int track) {
+    return track < STOCK_TRACKS ? track / CUP_TRACKS
+                                : GDX_NET_TRACK_CHOICE_DD_1_CUP + (track - DISK_FIRST) / CUP_TRACKS;
+}
 
 /* Layout, in 320 x 240 screen pixels. The course select keeps its header at the top, the track's name on row
  * 200 and its subtitle on row 210; the two rows under them are the room's. An Edit Cup track's captions keep to
@@ -189,7 +216,7 @@ static int state_of(const GdxNetRoomView* view) {
         }
         if (view->phase == GDX_NET_ROOM_PHASE_LOTTERY) {
             /* The track travels with the room's state; the ballots follow in a message of their own. */
-            return ((view->track >= 0 && view->track < STOCK_TRACKS) || view->track == GDX_NET_ROOM_TRACK_CUSTOM)
+            return (room_course(view->track) || view->track == GDX_NET_ROOM_TRACK_CUSTOM)
                        ? GDX_NET_TRACK_CHOICE_SHOW
                        : GDX_NET_TRACK_CHOICE_WAIT;
         }
@@ -244,7 +271,7 @@ int gdx_net_track_choice_allowed(int track) {
     if (track >= EDIT_FIRST && track < EDIT_END) {
         return sView.customTracks && gdx_net_own_track(track - EDIT_FIRST, NULL, NULL, 0);
     }
-    return track >= 0 && track < STOCK_TRACKS && ((sView.pool >> track) & 1u) != 0;
+    return room_course(track) && ((sView.pool >> track) & 1ull) != 0;
 }
 
 /* Sends the ballot or the pick. A custom track goes by its identity and title. */
@@ -332,6 +359,11 @@ static int count_votes(const GdxNetRoomBallot* ballots, int count, int track) {
     return votes;
 }
 
+/* The ballots for a custom track this copy lacks, which no cup counts. */
+static int count_foreign(const GdxNetRoomBallot* ballots, int count) {
+    return count_votes(ballots, count, GDX_NET_ROOM_TRACK_CUSTOM);
+}
+
 /* The ballot of a player in a list, or GDX_NET_ROOM_TRACK_NONE. */
 static int ballot_of(const GdxNetRoomBallot* ballots, int count, int id) {
     int i;
@@ -349,7 +381,7 @@ static int ballot_of(const GdxNetRoomBallot* ballots, int count, int id) {
  * track given as marked stands out. */
 static void put_counts(int cup, const GdxNetRoomBallot* ballots, int count, int marked) {
     char text[GDX_NET_ROOM_TEXT_BYTES];
-    int first;
+    const int first = cup_first(cup);
     int i;
 
     if (cup == GDX_NET_TRACK_CHOICE_RANDOM_CUP) {
@@ -359,11 +391,7 @@ static void put_counts(int cup, const GdxNetRoomBallot* ballots, int count, int 
         put_info(marked == GDX_NET_ROOM_TRACK_RANDOM ? GDX_NET_ROOM_COLOUR_GOLD : GDX_NET_ROOM_COLOUR_WHITE, text);
         return;
     }
-    if (cup == GDX_NET_TRACK_CHOICE_EDIT_CUP) {
-        first = EDIT_FIRST;
-    } else if (cup >= 0 && cup < STOCK_CUPS) {
-        first = cup * CUP_TRACKS;
-    } else {
+    if (first < 0) {
         return;
     }
     put_text(COUNTS_LABEL_RIGHT, INFO_Y, GDX_NET_ROOM_FONT_SMALL, GDX_NET_ROOM_ALIGN_RIGHT, GDX_NET_ROOM_COLOUR_DIM,
@@ -386,8 +414,8 @@ static void draw_choose(int cup, int trackNo) {
                sKind == GDX_NET_TRACK_CHOICE_VOTE ? "VOTE FOR THE NEXT TRACK" : "YOU PICK THE NEXT TRACK");
     if (cup == GDX_NET_TRACK_CHOICE_RANDOM_CUP) {
         put_info(GDX_NET_ROOM_COLOUR_DIM, "THIS PLACE IS A RANDOM TRACK");
-    } else if (cup >= 0 && cup < STOCK_CUPS && trackNo >= 0 && trackNo < CUP_TRACKS &&
-               !gdx_net_track_choice_allowed(cup * CUP_TRACKS + trackNo)) {
+    } else if (cup != GDX_NET_TRACK_CHOICE_EDIT_CUP && cup_first(cup) >= 0 && trackNo >= 0 &&
+               trackNo < CUP_TRACKS && !gdx_net_track_choice_allowed(cup_first(cup) + trackNo)) {
         put_info(GDX_NET_ROOM_COLOUR_RED, "THE ROOM DOES NOT RACE THIS TRACK");
     } else if (cup == GDX_NET_TRACK_CHOICE_EDIT_CUP && trackNo >= 0 && trackNo < CUP_TRACKS &&
                !gdx_net_track_choice_allowed(EDIT_FIRST + trackNo)) {
@@ -399,6 +427,7 @@ static void draw_choose(int cup, int trackNo) {
 static void draw_wait(int cup) {
     char text[GDX_NET_ROOM_TEXT_BYTES];
     int racers = 0;
+    int foreign;
     int own;
     int i;
 
@@ -413,7 +442,14 @@ static void draw_wait(int cup) {
     for (i = 0; i < sView.playerCount; i++) {
         racers += sView.players[i].watcher ? 0 : 1;
     }
-    snprintf(text, sizeof(text), "%d OF %d VOTED", sView.ballotCount, racers);
+    foreign = count_foreign(sView.ballots, sView.ballotCount);
+    if (foreign == 0) {
+        snprintf(text, sizeof(text), "%d OF %d VOTED", sView.ballotCount, racers);
+    } else {
+        /* At most "12 OF 12 VOTED. 11 FOR TRACKS YOU LACK": 38 of the line's 40 places. */
+        snprintf(text, sizeof(text), "%d OF %d VOTED. %d FOR %s YOU LACK", sView.ballotCount, racers, foreign,
+                 foreign == 1 ? "A TRACK" : "TRACKS");
+    }
     put_status(GDX_NET_ROOM_COLOUR_WHITE, text);
     /* The player's own ballot, as the room has it or, until the room answers, as it was sent. */
     own = ballot_of(sView.ballots, sView.ballotCount, sView.localId);
@@ -447,7 +483,7 @@ static void draw_show(void) {
     if (winner->track == GDX_NET_ROOM_TRACK_RANDOM) {
         put_info(GDX_NET_ROOM_COLOUR_DIM, "A RANDOM TRACK WAS DRAWN");
     } else if (sView.track != GDX_NET_ROOM_TRACK_CUSTOM) {
-        put_counts(sView.track / CUP_TRACKS, sView.lottery, sView.lotteryCount, sView.track);
+        put_counts(cup_of(sView.track), sView.lottery, sView.lotteryCount, sView.track);
     } else {
         const int shown = gdx_net_track_choice_shown_track();
 

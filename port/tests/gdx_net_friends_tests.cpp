@@ -503,6 +503,15 @@ void CheckDirectorySign(const Bytes& seed, const Bytes& otherSeed) {
           "the directory signature checks under the friend key");
     Check(crypto_ed25519_check(sig.data(), other.data(), message.data(), message.size()) != 0,
           "the directory signature fails under another key");
+    // A relay ticket and a friend request are directory messages too: the host and the player sign them.
+    for (const char* text : {"G-NET relay v1\nPOST /v1/turn\n{\"code\":\"ABC234\",\"expires\":1}",
+                             "G-NET friends v1\nPOST /v1/friends/00/inbox\n{\"expires\":1}"}) {
+        const Bytes labeled = Text(text);
+        friends::Signature other_sig{};
+        Check(friends::DirectorySign(seed.data(), labeled.data(), labeled.size(), other_sig) &&
+                  crypto_ed25519_check(other_sig.data(), key.data(), labeled.data(), labeled.size()) == 0,
+              std::string("a directory message is signed: ") + text);
+    }
 
     friends::Signature keep{};
     keep.fill(0x77);
@@ -511,6 +520,12 @@ void CheckDirectorySign(const Bytes& seed, const Bytes& otherSeed) {
     const Bytes noLineFeed = Text("G-NET directory v1 POST");
     Check(!friends::DirectorySign(seed.data(), noLineFeed.data(), noLineFeed.size(), keep),
           "the label without its line feed is not signed");
+    for (const char* text : {"G-NET relay v1 POST", "G-NET friends v1", "G-NET relay v2\n", "g-net friends v1\n",
+                             " G-NET directory v1\n"}) {
+        const Bytes near = Text(text);
+        Check(!friends::DirectorySign(seed.data(), near.data(), near.size(), keep),
+              std::string("a label that is not a directory line is not signed: ") + text);
+    }
     const Bytes shortText = Text("G-NET");
     Check(!friends::DirectorySign(seed.data(), shortText.data(), shortText.size(), keep), "a short message is not signed");
     Check(!friends::DirectorySign(seed.data(), nullptr, 0, keep), "no message is not signed");

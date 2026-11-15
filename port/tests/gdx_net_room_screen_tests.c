@@ -56,6 +56,8 @@ static int sCourseCalls;
 static int sCourseValue;
 static int sCpuFillCalls;
 static int sCpuFillValue;
+static int sRulesCalls;
+static GdxNetRoomRules sRulesSent;
 static int sKickCalls;
 static int sKickId;
 static int sSetPortCalls;
@@ -227,6 +229,11 @@ void gdx_lan_room_last_place_picks(int on) {
 void gdx_lan_room_cpu_fill(int on) {
     sCpuFillCalls++;
     sCpuFillValue = on;
+}
+
+void gdx_lan_room_set_rules(const GdxNetRoomRules* rules) {
+    sRulesCalls++;
+    sRulesSent = *rules;
 }
 
 void gdx_lan_room_kick(int id) {
@@ -502,6 +509,113 @@ int gdx_lan_room_clipboard_get(char* out, int size) {
     return out[0] != '\0';
 }
 
+/* ---- friend requests (CONTRACT.md 5.10, 5.11) ---- */
+
+static char sFakeRequestNames[GDX_NET_ROOM_REQUESTS_MAX][GDX_NET_ROOM_NAME_BYTES];
+static char sFakeRequestFill[GDX_NET_ROOM_REQUESTS_MAX]; /* the one letter of the sender's code */
+static int sFakeRequestCount;
+static int sFakeMailState;
+static char sFakeMailText[GDX_NET_ROOM_STATUS_BYTES];
+static int sCollectCalls;
+static int sCollectAnswer;    /* what gdx_lan_room_requests_collect returns; 1 also starts a collect */
+static int sFakeAcceptAnswer; /* -1: the fake adds the sender; otherwise what the accept returns */
+static int sAcceptCalls;
+static int sAcceptIndex;
+static int sDeclineCalls;
+static int sDeclineIndex;
+
+static void fake_request(const char* name, char fill) {
+    snprintf(sFakeRequestNames[sFakeRequestCount], GDX_NET_ROOM_NAME_BYTES, "%s", name);
+    sFakeRequestFill[sFakeRequestCount] = fill;
+    sFakeRequestCount++;
+}
+
+static void drop_request(int index) {
+    int i;
+
+    for (i = index; i + 1 < sFakeRequestCount; i++) {
+        memcpy(sFakeRequestNames[i], sFakeRequestNames[i + 1], sizeof(sFakeRequestNames[0]));
+        sFakeRequestFill[i] = sFakeRequestFill[i + 1];
+    }
+    sFakeRequestCount--;
+}
+
+int gdx_lan_room_requests_collect(void) {
+    sCollectCalls++;
+    if (!sCollectAnswer) {
+        return 0;
+    }
+    sFakeMailState = GDX_NET_ROOM_MAIL_ASKING;
+    sFakeMailText[0] = '\0';
+    return 1;
+}
+
+int gdx_lan_room_requests_state(char* text, int size) {
+    if (text != NULL && size > 0) {
+        snprintf(text, (size_t) size, "%s", sFakeMailText);
+    }
+    return sFakeMailState;
+}
+
+int gdx_lan_room_request_count(void) {
+    return sFakeRequestCount;
+}
+
+int gdx_lan_room_request_name(int index, char* out, int size) {
+    if (index < 0 || index >= sFakeRequestCount) {
+        out[0] = '\0';
+        return 0;
+    }
+    snprintf(out, (size_t) size, "%s", sFakeRequestNames[index]);
+    return 1;
+}
+
+/* The display form, as gdx_lan_room_friend_code gives it. */
+int gdx_lan_room_request_code(int index, char* out, int size) {
+    int at = 0;
+    int i;
+
+    if (index < 0 || index >= sFakeRequestCount || size < GDX_NET_ROOM_FRIEND_CODE_BYTES) {
+        out[0] = '\0';
+        return 0;
+    }
+    for (i = 0; i < GDX_NET_ROOM_FRIEND_CODE_CHARS; i++) {
+        if (i > 0 && i % 4 == 0) {
+            out[at++] = ' ';
+        }
+        out[at++] = sFakeRequestFill[index];
+    }
+    out[at] = '\0';
+    return 1;
+}
+
+int gdx_lan_room_request_accept(int index) {
+    sAcceptCalls++;
+    sAcceptIndex = index;
+    if (index < 0 || index >= sFakeRequestCount) {
+        return GDX_NET_ROOM_FRIEND_GONE;
+    }
+    if (sFakeAcceptAnswer >= 0) {
+        if (sFakeAcceptAnswer == GDX_NET_ROOM_FRIEND_RENAMED || sFakeAcceptAnswer == GDX_NET_ROOM_FRIEND_LISTED) {
+            drop_request(index);
+        }
+        return sFakeAcceptAnswer;
+    }
+    fake_friend(sFakeRequestNames[index], sFakeRequestFill[index]);
+    drop_request(index);
+    return GDX_NET_ROOM_FRIEND_ADDED;
+}
+
+int gdx_lan_room_request_decline(int index) {
+    sDeclineCalls++;
+    sDeclineIndex = index;
+    if (index < 0 || index >= sFakeRequestCount) {
+        return 0;
+    }
+    drop_request(index);
+    return 1;
+}
+
 static void reset_friends(void) {
     sFakeMyCode[0] = '\0';
     sFakeFriendCount = 0;
@@ -521,6 +635,16 @@ static void reset_friends(void) {
     sClipboard[0] = '\0';
     sClipboardOk = 1;
     sClipboardSets = 0;
+    sFakeRequestCount = 0;
+    sFakeMailState = GDX_NET_ROOM_MAIL_IDLE;
+    sFakeMailText[0] = '\0';
+    sCollectCalls = 0;
+    sCollectAnswer = 1;
+    sFakeAcceptAnswer = -1;
+    sAcceptCalls = 0;
+    sAcceptIndex = -1;
+    sDeclineCalls = 0;
+    sDeclineIndex = -1;
 }
 
 /* No session, a profile, the default port, and every counter at zero. */
@@ -574,6 +698,8 @@ static void reset(void) {
     sCourseCalls = 0;
     sCourseValue = -1;
     sCpuFillCalls = 0;
+    sRulesCalls = 0;
+    memset(&sRulesSent, 0, sizeof(sRulesSent));
     sCpuFillValue = -1;
     sKickCalls = 0;
     sKickId = -1;
@@ -1525,9 +1651,9 @@ static void test_room_racer(void) {
     CHECK(has_text("4 OF 8 RACERS - 0 OF 2 WATCHING"));
     CHECK(has_text("THE RACES START WHEN EVERYONE IS READY"));
     CHECK(has_text("OR WHEN THE HOST STARTS THEM."));
-    CHECK(has_text("READY UP") && has_text("SEND A MESSAGE") && has_text("LEAVE THE ROOM"));
-    CHECK(find_text("READY UP")->y == 108 && find_text("SEND A MESSAGE")->y == 118);
-    CHECK(find_text("LEAVE THE ROOM")->y == 128);
+    CHECK(has_text("READY UP") && has_text("RACE RULES") && has_text("SEND A MESSAGE") && has_text("LEAVE THE ROOM"));
+    CHECK(find_text("READY UP")->y == 108 && find_text("RACE RULES")->y == 118);
+    CHECK(find_text("SEND A MESSAGE")->y == 128 && find_text("LEAVE THE ROOM")->y == 138);
     CHECK(!has_text("START THE RACES") && !has_text("RACE SEATS") && !has_text("RACE NEXT"));
     CHECK(!has_text("SKIP THE LOTTERY") && !has_text("BACK TO THE LOBBY"));
     CHECK(has_text("P00") && has_text("P01") && has_text("P02") && has_text("P03"));
@@ -1551,7 +1677,7 @@ static void test_room_racer(void) {
 
     /* B takes the cursor to the leave row and leaves nothing. A there asks once more. */
     CHECK(press(GDX_NET_ROOM_IN_BACK) == GDX_NET_ROOM_SCREEN_STAY);
-    CHECK(gdx_net_room_screen_row() == 2);
+    CHECK(gdx_net_room_screen_row() == 3);
     CHECK(gdx_net_room_screen_take_sound() == GDX_NET_ROOM_SOUND_BACK);
     CHECK(sStopCalls == 0);
     press(GDX_NET_ROOM_IN_CONFIRM);
@@ -1566,7 +1692,7 @@ static void test_room_racer(void) {
     CHECK(has_text("PRESS A AGAIN TO LEAVE THE ROOM"));
     /* So does B. */
     press(GDX_NET_ROOM_IN_BACK);
-    CHECK(gdx_net_room_screen_row() == 2);
+    CHECK(gdx_net_room_screen_row() == 3);
     CHECK(has_text("LEAVE THE ROOM"));
     CHECK(sStopCalls == 0);
     press(GDX_NET_ROOM_IN_CONFIRM);
@@ -1580,8 +1706,8 @@ static void test_room_racer(void) {
     reset();
     fake_room(GDX_NET_ROOM_MODE_JOINED, GDX_NET_ROOM_PHASE_LOBBY, 2, 4, 0);
     gdx_net_room_screen_open();
-    press_times(GDX_NET_ROOM_IN_DOWN, 5);
-    CHECK(gdx_net_room_screen_row() == 5);
+    press_times(GDX_NET_ROOM_IN_DOWN, 6);
+    CHECK(gdx_net_room_screen_row() == 6);
     CHECK(find_text("P02")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
     gdx_net_room_screen_take_sound();
     press(GDX_NET_ROOM_IN_CONFIRM);
@@ -1619,6 +1745,8 @@ static void test_room_watcher(void) {
         CHECK(sRaceNextCalls == 2 && sRaceNextValue == 0);
         CHECK(sReadyCalls == 0);
         press(GDX_NET_ROOM_IN_DOWN);
+        CHECK(find_text("RACE RULES")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
+        press(GDX_NET_ROOM_IN_DOWN);
         CHECK(find_text("SEND A MESSAGE")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
         press(GDX_NET_ROOM_IN_DOWN);
         CHECK(has_text("LEAVE THE ROOM"));
@@ -1635,8 +1763,10 @@ static void test_room_host(void) {
     CHECK(has_text("OR WHEN YOU START THEM."));
     CHECK(has_text("READY UP") && has_text("START THE RACES") && has_text("RACE SEATS") && has_text("CLOSE THE ROOM"));
     CHECK(has_text("CUSTOM TRACKS") && find_text("OFF") != NULL && find_text("OFF")->y == find_text("CUSTOM TRACKS")->y);
+    CHECK(find_text("RACE RULES") != NULL && find_text("RACE RULES")->y == 158);
     CHECK(find_text("SEND A MESSAGE") != NULL && find_text("SEND A MESSAGE")->y == 168);
     CHECK(find_text("CLOSE THE ROOM")->y == 178);
+    CHECK(!has_text("CPU RACERS")); /* on the RULES page, so the list keeps its rows */
     CHECK(!has_text("LEAVE THE ROOM"));
     CHECK(!has_text("SKIP THE LOTTERY") && !has_text("BACK TO THE LOBBY"));
     CHECK(find_text("8") != NULL && find_text("8")->y == find_text("RACE SEATS")->y);
@@ -1707,11 +1837,17 @@ static void test_room_host(void) {
     sFake.customTracks = 0;
     CHECK(sCapCalls == 3);
 
-    /* CPU racers: on by default; A flips it, right turns it on and left turns it off. */
+    /* CPU racers, on the RULES page under the rules: on by default; A flips it, right turns it on and left
+       turns it off. B goes back to the RACE RULES row. */
     press(GDX_NET_ROOM_IN_DOWN);
     CHECK(gdx_net_room_screen_row() == 5);
+    CHECK(find_text("RACE RULES")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
+    press(GDX_NET_ROOM_IN_CONFIRM);
+    CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_RULES);
+    press_times(GDX_NET_ROOM_IN_DOWN, 9);
+    CHECK(gdx_net_room_screen_row() == 9);
     CHECK(find_text("CPU RACERS") != NULL && find_text("CPU RACERS")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
-    CHECK(find_text("ON") != NULL && find_text("ON")->y == find_text("CPU RACERS")->y);
+    CHECK(find_text_at("ON", find_text("CPU RACERS")->y) != NULL);
     press(GDX_NET_ROOM_IN_RIGHT);
     CHECK(sCpuFillCalls == 0); /* already on */
     press(GDX_NET_ROOM_IN_LEFT);
@@ -1719,11 +1855,13 @@ static void test_room_host(void) {
     CHECK(gdx_net_room_screen_take_sound() == GDX_NET_ROOM_SOUND_MOVE);
     sFake.cpuFill = 0;
     press(0);
-    CHECK(find_text_at("OFF", find_text("CPU RACERS")->y) != NULL); /* CUSTOM TRACKS draws OFF too */
+    CHECK(find_text_at("OFF", find_text("CPU RACERS")->y) != NULL);
     press(GDX_NET_ROOM_IN_CONFIRM);
     CHECK(sCpuFillCalls == 2 && sCpuFillValue == 1);
     sFake.cpuFill = 1;
-    CHECK(sCustomCalls == 2 && sCapCalls == 3 && sCourseCalls == 2);
+    CHECK(sCustomCalls == 2 && sCapCalls == 3 && sCourseCalls == 2 && sRulesCalls == 0);
+    press(GDX_NET_ROOM_IN_BACK);
+    CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_ROOM && gdx_net_room_screen_row() == 5);
 
     /* Close the room: asked twice, like leaving. */
     press_times(GDX_NET_ROOM_IN_DOWN, 2);
@@ -1785,8 +1923,9 @@ static void test_room_host(void) {
     gdx_net_room_screen_open();
     CHECK(!has_text("READY UP") && !has_text("START THE RACES") && !has_text("RACE SEATS"));
     CHECK(!has_text("CUSTOM TRACKS") && !has_text("CPU RACERS") && !has_text("COURSE CHOICE"));
-    CHECK(find_text("SEND A MESSAGE")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
-    CHECK(find_text("CLOSE THE ROOM") != NULL && find_text("CLOSE THE ROOM")->y == 118);
+    CHECK(find_text("RACE RULES")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
+    CHECK(find_text("SEND A MESSAGE") != NULL && find_text("SEND A MESSAGE")->y == 118);
+    CHECK(find_text("CLOSE THE ROOM") != NULL && find_text("CLOSE THE ROOM")->y == 128);
     press(GDX_NET_ROOM_IN_RIGHT);
     CHECK(sCapCalls == 0);
 }
@@ -1913,10 +2052,11 @@ static void test_room_track_row(void) {
     sFake.players[2].voted = 1;
     gdx_net_room_screen_open();
     CHECK(!has_text("VOTE FOR A TRACK") && !has_text("PICK THE TRACK"));
-    CHECK(find_text("SEND A MESSAGE")->y == 108);
-    CHECK(find_text("LEAVE THE ROOM")->y == 118);
+    CHECK(find_text("RACE RULES")->y == 108);
+    CHECK(find_text("SEND A MESSAGE")->y == 118);
+    CHECK(find_text("LEAVE THE ROOM")->y == 128);
     listY = find_text("P00")->y;
-    CHECK(listY == 136);
+    CHECK(listY == 146);
 
     /* A racer who has not voted: the row is the top one, the cursor starts on it, and the list moves down
        a row. */
@@ -1928,8 +2068,9 @@ static void test_room_track_row(void) {
     CHECK(find_text("VOTE FOR A TRACK")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
     CHECK(find_text("VOTE FOR A TRACK")->font == GDX_NET_ROOM_FONT_SMALL);
     CHECK(!has_text("PICK THE TRACK"));
-    CHECK(find_text("SEND A MESSAGE")->y == 118);
-    CHECK(find_text("LEAVE THE ROOM")->y == 128);
+    CHECK(find_text("RACE RULES")->y == 118);
+    CHECK(find_text("SEND A MESSAGE")->y == 128);
+    CHECK(find_text("LEAVE THE ROOM")->y == 138);
     CHECK(find_text("P00")->y == listY + 10);
     CHECK(find_text("VOTING")->y == find_text("P00")->y);
 
@@ -1957,8 +2098,8 @@ static void test_room_track_row(void) {
     sFake.players[2].voted = 1;
     press(0);
     CHECK(!has_text("VOTE FOR A TRACK"));
-    CHECK(find_text("SEND A MESSAGE")->y == 108);
-    CHECK(find_text("LEAVE THE ROOM")->y == 118);
+    CHECK(find_text("SEND A MESSAGE")->y == 118);
+    CHECK(find_text("LEAVE THE ROOM")->y == 128);
     CHECK(find_text("P00")->y == listY);
 
     /* A watcher has no ballot. */
@@ -2015,7 +2156,7 @@ static void test_room_full(void) {
     for (i = 0; i < GDX_NET_ROOM_PLAYERS; i++) {
         sFake.players[i].points = 100u + (unsigned) i;
         sFake.players[i].pingMs = 900u + (unsigned) i;
-        snprintf(sFake.players[i].name, sizeof(sFake.players[i].name), "WWWWWWWWWWWWWW%02d", i);
+        snprintf(sFake.players[i].name, sizeof(sFake.players[i].name), "WWWWWWWWWWWWWW%02u", (unsigned) i % 100u);
     }
     gdx_net_room_screen_open();
     CHECK(has_text("12 OF 12 RACERS - 2 OF 2 WATCHING"));
@@ -2045,14 +2186,14 @@ static void test_room_full(void) {
     CHECK(count_prefix("WWWWWWWWWWWWWW") == 2);
     CHECK(count_rects(2) == 2);
 
-    /* A client outside the lobby has two rows of its own, so more players fit. */
+    /* A client outside the lobby has three rows of its own, so more players fit. */
     reset();
     fake_room(GDX_NET_ROOM_MODE_JOINED, GDX_NET_ROOM_PHASE_RACING, 5, GDX_NET_ROOM_PLAYERS, 2);
     gdx_net_room_screen_open();
-    CHECK(count_prefix("P") == 8);
-    press_times(GDX_NET_ROOM_IN_DOWN, 15);
-    CHECK(gdx_net_room_screen_row() == 15);
-    CHECK(has_text("P13") && has_text("P06") && !has_text("P05"));
+    CHECK(count_prefix("P") == 7);
+    press_times(GDX_NET_ROOM_IN_DOWN, 16);
+    CHECK(gdx_net_room_screen_row() == 16);
+    CHECK(has_text("P13") && has_text("P07") && !has_text("P06"));
     CHECK(find_text("P13")->y == 206);
     CHECK(draw_count() <= GDX_NET_ROOM_DRAW_MAX);
 }
@@ -2062,44 +2203,44 @@ static void test_cursor_follows(void) {
     reset();
     fake_room(GDX_NET_ROOM_MODE_JOINED, GDX_NET_ROOM_PHASE_LOBBY, 2, 4, 0);
     gdx_net_room_screen_open();
-    press_times(GDX_NET_ROOM_IN_DOWN, 2);
-    CHECK(gdx_net_room_screen_row() == 2);
+    press_times(GDX_NET_ROOM_IN_DOWN, 3);
+    CHECK(gdx_net_room_screen_row() == 3);
     sFake.phase = GDX_NET_ROOM_PHASE_MACHINE;
     press(0);
-    CHECK(gdx_net_room_screen_row() == 1);
+    CHECK(gdx_net_room_screen_row() == 2);
     CHECK(find_text("LEAVE THE ROOM")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
     /* The frame between the change and the next tick draws the right row too. */
     sFake.phase = GDX_NET_ROOM_PHASE_LOBBY;
     CHECK(find_text("LEAVE THE ROOM")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
     CHECK(find_text("READY UP")->colour == GDX_NET_ROOM_COLOUR_WHITE);
-    CHECK(gdx_net_room_screen_row() == 2);
+    CHECK(gdx_net_room_screen_row() == 3);
 
     /* The cursor on the ready row when it goes: the row in its place takes it, which never leaves the room. */
-    press_times(GDX_NET_ROOM_IN_UP, 2);
+    press_times(GDX_NET_ROOM_IN_UP, 3);
     CHECK(gdx_net_room_screen_row() == 0);
     sFake.phase = GDX_NET_ROOM_PHASE_MACHINE;
     press(0);
     CHECK(gdx_net_room_screen_row() == 0);
-    CHECK(find_text("SEND A MESSAGE")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
+    CHECK(find_text("RACE RULES")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
     CHECK(find_text("LEAVE THE ROOM")->colour == GDX_NET_ROOM_COLOUR_WHITE);
     press(GDX_NET_ROOM_IN_CONFIRM);
-    CHECK(sStopCalls == 0 && sMessageCalls == 0);
-    CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_MESSAGES);
+    CHECK(sStopCalls == 0 && sMessageCalls == 0 && sRulesCalls == 0);
+    CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_RULES);
 
     /* A vote starts under the cursor: it stays on the leave row. */
     reset();
     fake_room(GDX_NET_ROOM_MODE_JOINED, GDX_NET_ROOM_PHASE_LOBBY, 2, 4, 0);
     gdx_net_room_screen_open();
-    press_times(GDX_NET_ROOM_IN_DOWN, 2);
+    press_times(GDX_NET_ROOM_IN_DOWN, 3);
     sFake.phase = GDX_NET_ROOM_PHASE_VOTING;
     press(0);
-    CHECK(gdx_net_room_screen_row() == 2);
+    CHECK(gdx_net_room_screen_row() == 3);
     CHECK(find_text("LEAVE THE ROOM")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
     CHECK(find_text("VOTE FOR A TRACK")->colour == GDX_NET_ROOM_COLOUR_WHITE);
     /* The ballot goes in: still the leave row, a row higher. */
     sFake.players[2].voted = 1;
     press(0);
-    CHECK(gdx_net_room_screen_row() == 1);
+    CHECK(gdx_net_room_screen_row() == 2);
     CHECK(find_text("LEAVE THE ROOM")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
     /* From the ready row, which goes, the vote's row takes it: the row in its place. */
     reset();
@@ -2114,17 +2255,17 @@ static void test_cursor_follows(void) {
     reset();
     fake_room(GDX_NET_ROOM_MODE_JOINED, GDX_NET_ROOM_PHASE_MACHINE, 2, 4, 0);
     gdx_net_room_screen_open();
-    press_times(GDX_NET_ROOM_IN_DOWN, 5);
-    CHECK(gdx_net_room_screen_row() == 5);
+    press_times(GDX_NET_ROOM_IN_DOWN, 6);
+    CHECK(gdx_net_room_screen_row() == 6);
     CHECK(find_text("P03")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
     remove_player(1);
     press(0);
-    CHECK(gdx_net_room_screen_row() == 4);
+    CHECK(gdx_net_room_screen_row() == 5);
     CHECK(find_text("P03")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
     /* The cursor's own player leaves: the last row left takes it. */
     remove_player(3);
     press(0);
-    CHECK(gdx_net_room_screen_row() == 3);
+    CHECK(gdx_net_room_screen_row() == 4);
     CHECK(find_text("P02")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
 
     /* The room closes under the screen: the closed page, then the front page. */
@@ -2204,7 +2345,8 @@ static void test_room_host_controls(void) {
     CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_ROOM);
     CHECK(find_text("SKIP THE LOTTERY") != NULL && find_text("SKIP THE LOTTERY")->y == 108);
     CHECK(find_text("SKIP THE LOTTERY")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
-    CHECK(find_text("SEND A MESSAGE")->y == 118 && find_text("CLOSE THE ROOM")->y == 128);
+    CHECK(find_text("RACE RULES")->y == 118);
+    CHECK(find_text("SEND A MESSAGE")->y == 128 && find_text("CLOSE THE ROOM")->y == 138);
     CHECK(!has_text("BACK TO THE LOBBY") && !has_text("START THE RACES"));
     gdx_net_room_screen_take_sound();
     press(GDX_NET_ROOM_IN_CONFIRM);
@@ -2216,7 +2358,7 @@ static void test_room_host_controls(void) {
     fake_room(GDX_NET_ROOM_MODE_JOINED, GDX_NET_ROOM_PHASE_LOTTERY, 2, 4, 0);
     gdx_net_room_screen_open();
     CHECK(!has_text("SKIP THE LOTTERY"));
-    CHECK(find_text("SEND A MESSAGE")->y == 108);
+    CHECK(find_text("RACE RULES")->y == 108 && find_text("SEND A MESSAGE")->y == 118);
 
     /* The race: nobody ends it for the others, the host included. The host's page has the rows a client's
      * has, with the room's own word for leaving. */
@@ -2224,9 +2366,10 @@ static void test_room_host_controls(void) {
     fake_room(GDX_NET_ROOM_MODE_HOSTING, GDX_NET_ROOM_PHASE_RACING, 0, 4, 0);
     gdx_net_room_screen_open();
     CHECK(!has_text("SKIP THE LOTTERY") && !has_text("BACK TO THE LOBBY") && !has_text("START THE RACES"));
-    CHECK(find_text("SEND A MESSAGE") != NULL && find_text("SEND A MESSAGE")->y == 108);
-    CHECK(find_text("SEND A MESSAGE")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
-    CHECK(find_text("CLOSE THE ROOM") != NULL && find_text("CLOSE THE ROOM")->y == 118);
+    CHECK(find_text("RACE RULES") != NULL && find_text("RACE RULES")->y == 108);
+    CHECK(find_text("RACE RULES")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
+    CHECK(find_text("SEND A MESSAGE") != NULL && find_text("SEND A MESSAGE")->y == 118);
+    CHECK(find_text("CLOSE THE ROOM") != NULL && find_text("CLOSE THE ROOM")->y == 128);
     CHECK(gdx_net_room_screen_row() == 0);
 
     /* The results: the row that ends the series comes in above. A cursor the player has not moved waits at
@@ -2235,20 +2378,21 @@ static void test_room_host_controls(void) {
     press(0);
     CHECK(find_text("BACK TO THE LOBBY") != NULL && find_text("BACK TO THE LOBBY")->y == 108);
     CHECK(find_text("BACK TO THE LOBBY")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
-    CHECK(find_text("SEND A MESSAGE")->y == 118 && find_text("SEND A MESSAGE")->colour == GDX_NET_ROOM_COLOUR_WHITE);
+    CHECK(find_text("RACE RULES")->y == 118 && find_text("RACE RULES")->colour == GDX_NET_ROOM_COLOUR_WHITE);
+    CHECK(find_text("SEND A MESSAGE")->y == 128 && find_text("SEND A MESSAGE")->colour == GDX_NET_ROOM_COLOUR_WHITE);
     CHECK(sEndSeriesCalls == 0 && sStopCalls == 0);
     /* A cursor the player has moved stays with its own row. */
     reset();
     fake_room(GDX_NET_ROOM_MODE_HOSTING, GDX_NET_ROOM_PHASE_RACING, 0, 4, 0);
     gdx_net_room_screen_open();
-    press(GDX_NET_ROOM_IN_DOWN);
+    press_times(GDX_NET_ROOM_IN_DOWN, 2);
     press(GDX_NET_ROOM_IN_UP);
-    CHECK(find_text("SEND A MESSAGE")->y == 108 && find_text("SEND A MESSAGE")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
+    CHECK(find_text("SEND A MESSAGE")->y == 118 && find_text("SEND A MESSAGE")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
     sFake.phase = GDX_NET_ROOM_PHASE_RESULTS;
     press(0);
     CHECK(find_text("BACK TO THE LOBBY") != NULL && find_text("BACK TO THE LOBBY")->y == 108);
     CHECK(find_text("BACK TO THE LOBBY")->colour == GDX_NET_ROOM_COLOUR_WHITE);
-    CHECK(find_text("SEND A MESSAGE")->y == 118 && find_text("SEND A MESSAGE")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
+    CHECK(find_text("SEND A MESSAGE")->y == 128 && find_text("SEND A MESSAGE")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
     CHECK(sEndSeriesCalls == 0 && sStopCalls == 0);
 
     /* Going back to the lobby is asked twice. */
@@ -2281,7 +2425,7 @@ static void test_room_host_controls(void) {
     reset();
     fake_room(GDX_NET_ROOM_MODE_JOINED, GDX_NET_ROOM_PHASE_RACING, 2, 4, 0);
     gdx_net_room_screen_open();
-    CHECK(find_text("SEND A MESSAGE")->y == 108 && find_text("LEAVE THE ROOM")->y == 118);
+    CHECK(find_text("SEND A MESSAGE")->y == 118 && find_text("LEAVE THE ROOM")->y == 128);
     sFake.phase = GDX_NET_ROOM_PHASE_RESULTS;
     CHECK(!has_text("BACK TO THE LOBBY"));
     press(GDX_NET_ROOM_IN_CONFIRM);
@@ -2293,7 +2437,7 @@ static void test_room_host_controls(void) {
     fake_room(GDX_NET_ROOM_MODE_HOSTING, GDX_NET_ROOM_PHASE_RESULTS, 0, 4, 0);
     gdx_net_room_screen_open();
     press(GDX_NET_ROOM_IN_CONFIRM);
-    press_times(GDX_NET_ROOM_IN_DOWN, 2);
+    press_times(GDX_NET_ROOM_IN_DOWN, 3);
     CHECK(find_text("CLOSE THE ROOM")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
     press(GDX_NET_ROOM_IN_CONFIRM);
     CHECK(sStopCalls == 0 && sEndSeriesCalls == 0);
@@ -2306,15 +2450,158 @@ static void test_room_host_controls(void) {
     reset();
     fake_room(GDX_NET_ROOM_MODE_HOSTING, GDX_NET_ROOM_PHASE_RACING, 0, 4, 0);
     gdx_net_room_screen_open();
-    press(GDX_NET_ROOM_IN_DOWN);
+    press_times(GDX_NET_ROOM_IN_DOWN, 2);
     press(GDX_NET_ROOM_IN_CONFIRM);
     CHECK(has_text("PRESS A AGAIN TO CLOSE THE ROOM") && sStopCalls == 0);
     sFake.phase = GDX_NET_ROOM_PHASE_RESULTS;
     press(0);
-    CHECK(find_text("PRESS A AGAIN TO CLOSE THE ROOM") != NULL && find_text("PRESS A AGAIN TO CLOSE THE ROOM")->y == 128);
+    CHECK(find_text("PRESS A AGAIN TO CLOSE THE ROOM") != NULL && find_text("PRESS A AGAIN TO CLOSE THE ROOM")->y == 138);
     CHECK(find_text("PRESS A AGAIN TO CLOSE THE ROOM")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
     press(GDX_NET_ROOM_IN_CONFIRM);
     CHECK(sStopCalls == 1 && sEndSeriesCalls == 0);
+}
+
+/* The room's stock rules, as a new room has them. */
+static void fake_rules(void) {
+    memset(&sFake.rules, 0, sizeof(sFake.rules));
+    sFake.rules.laps = 3;
+    sFake.rules.contactDamage = GDX_NET_ROOM_CONTACT_NORMAL;
+    sFake.rules.magnetRange = 50.0f;
+    sFake.rules.magnetStrength = 1.0f;
+}
+
+/* The value drawn on the row of a rule's label. */
+static int rule_shows(const char* label, const char* value) {
+    const GdxNetRoomDrawItem* row = find_text(label);
+    return row != NULL && find_text_at(value, row->y) != NULL;
+}
+
+/* The RULES page: the host changes the rules up to the lock-in, and everyone reads them. */
+static void test_room_rules(void) {
+    /* The host in the lobby: RACE RULES opens the page on its first rule. */
+    reset();
+    fake_room(GDX_NET_ROOM_MODE_HOSTING, GDX_NET_ROOM_PHASE_LOBBY, 0, 4, 0);
+    fake_rules();
+    gdx_net_room_screen_open();
+    press_times(GDX_NET_ROOM_IN_DOWN, 5);
+    CHECK(find_text("RACE RULES")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
+    press(GDX_NET_ROOM_IN_CONFIRM);
+    CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_RULES);
+    CHECK(find_text("RACE RULES") != NULL && find_text("RACE RULES")->font == GDX_NET_ROOM_FONT_TITLE);
+    CHECK(gdx_net_room_screen_row() == 0 && find_text("LAPS")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
+    CHECK(rule_shows("LAPS", "3") && rule_shows("CONTACT DAMAGE", "NORMAL") && rule_shows("SHIELD", "OFF"));
+    CHECK(rule_shows("ENGINE SETTING", "FREE") && rule_shows("BOOST LENGTH", "STOCK") && rule_shows("LAVA", "STOCK"));
+    CHECK(rule_shows("MAGNET RANGE", "50") && rule_shows("MAGNET STRENGTH", "1.00"));
+    CHECK(rule_shows("IGNORE TRACK SETTINGS", "OFF") && rule_shows("CPU RACERS", "ON"));
+    CHECK(has_text("BACK") && count_prefix("THE HOST SETS THE RULES") == 0 && count_prefix("THE RULES CHANGE") == 0);
+    CHECK(draw_count() <= GDX_NET_ROOM_DRAW_MAX);
+
+    /* Right and left change a number, inside its limits; A leaves a number alone. */
+    gdx_net_room_screen_take_sound();
+    press(GDX_NET_ROOM_IN_RIGHT);
+    CHECK(sRulesCalls == 1 && sRulesSent.laps == 4);
+    CHECK(sRulesSent.contactDamage == GDX_NET_ROOM_CONTACT_NORMAL && sRulesSent.magnetRange == 50.0f);
+    CHECK(gdx_net_room_screen_take_sound() == GDX_NET_ROOM_SOUND_MOVE);
+    sFake.rules.laps = 4;
+    press(GDX_NET_ROOM_IN_CONFIRM);
+    CHECK(sRulesCalls == 1 && gdx_net_room_screen_take_sound() == GDX_NET_ROOM_SOUND_NONE);
+    sFake.rules.laps = 1;
+    press(GDX_NET_ROOM_IN_LEFT);
+    CHECK(sRulesCalls == 1); /* one lap is the fewest */
+    sFake.rules.laps = GDX_NET_ROOM_LAPS_MAX;
+    press(GDX_NET_ROOM_IN_RIGHT);
+    CHECK(sRulesCalls == 1);
+    sFake.rules.laps = 3;
+
+    /* A turns a choice to the next one and round to the first; right stops at the last. */
+    press(GDX_NET_ROOM_IN_DOWN);
+    CHECK(gdx_net_room_screen_row() == 1);
+    press(GDX_NET_ROOM_IN_CONFIRM);
+    CHECK(sRulesCalls == 2 && sRulesSent.contactDamage == GDX_NET_ROOM_CONTACT_HALF && sRulesSent.laps == 3);
+    sFake.rules.contactDamage = GDX_NET_ROOM_CONTACT_OFF;
+    press(0);
+    CHECK(rule_shows("CONTACT DAMAGE", "OFF"));
+    CHECK(count_prefix("MACHINES TAKE NO DAMAGE FROM EACH OTHER.") == 1);
+    press(GDX_NET_ROOM_IN_RIGHT);
+    CHECK(sRulesCalls == 2);
+    press(GDX_NET_ROOM_IN_CONFIRM);
+    CHECK(sRulesCalls == 3 && sRulesSent.contactDamage == GDX_NET_ROOM_CONTACT_NORMAL);
+    sFake.rules.contactDamage = GDX_NET_ROOM_CONTACT_NORMAL;
+    press(0);
+    CHECK(count_prefix("MACHINES TAKE NO DAMAGE") == 0);
+
+    /* The engine setting: FIXED holds every racer's slider at the middle. */
+    press_times(GDX_NET_ROOM_IN_DOWN, 2);
+    CHECK(find_text("ENGINE SETTING")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
+    press(GDX_NET_ROOM_IN_RIGHT);
+    CHECK(sRulesCalls == 4 && sRulesSent.engineFixed == 1);
+    sFake.rules.engineFixed = 1;
+    press(0);
+    CHECK(rule_shows("ENGINE SETTING", "FIXED 50"));
+    press(GDX_NET_ROOM_IN_RIGHT);
+    CHECK(sRulesCalls == 4); /* already fixed */
+
+    /* The boost length: STOCK, then steps of ten frames. */
+    press(GDX_NET_ROOM_IN_DOWN);
+    press(GDX_NET_ROOM_IN_LEFT);
+    CHECK(sRulesCalls == 4); /* STOCK is the shortest */
+    press(GDX_NET_ROOM_IN_RIGHT);
+    CHECK(sRulesCalls == 5 && sRulesSent.boostFrames == 10);
+    sFake.rules.boostFrames = 10;
+    press(0);
+    CHECK(rule_shows("BOOST LENGTH", "10 FRAMES"));
+
+    /* BACK and B go back to the RACE RULES row. */
+    press_times(GDX_NET_ROOM_IN_DOWN, 6);
+    CHECK(find_text("BACK")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
+    press(GDX_NET_ROOM_IN_CONFIRM);
+    CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_ROOM && gdx_net_room_screen_row() == 5);
+    press(GDX_NET_ROOM_IN_CONFIRM);
+    press(GDX_NET_ROOM_IN_BACK);
+    CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_ROOM && gdx_net_room_screen_row() == 5);
+    CHECK(sRulesCalls == 5 && sStopCalls == 0 && sCpuFillCalls == 0);
+
+    /* From the lock-in to the end of the race the host reads them too, and the page says when they change. */
+    reset();
+    fake_room(GDX_NET_ROOM_MODE_HOSTING, GDX_NET_ROOM_PHASE_MACHINE, 0, 4, 0);
+    fake_rules();
+    gdx_net_room_screen_open();
+    press(GDX_NET_ROOM_IN_CONFIRM);
+    CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_RULES);
+    CHECK(find_text("BACK")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
+    CHECK(find_text("LAPS")->colour == GDX_NET_ROOM_COLOUR_DIM && rule_shows("LAPS", "3"));
+    CHECK(count_prefix("THE RULES CHANGE AGAIN") == 1);
+    press(GDX_NET_ROOM_IN_RIGHT);
+    press(GDX_NET_ROOM_IN_UP);
+    CHECK(sRulesCalls == 0 && find_text("BACK")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
+    /* The results are over the lock-in: the host changes them again. */
+    sFake.phase = GDX_NET_ROOM_PHASE_RESULTS;
+    press(0);
+    CHECK(count_prefix("THE RULES CHANGE AGAIN") == 0 && find_text("LAPS")->colour != GDX_NET_ROOM_COLOUR_DIM);
+    /* The CPU racers change in the lobby only. */
+    CHECK(find_text("CPU RACERS")->colour == GDX_NET_ROOM_COLOUR_DIM);
+
+    /* A member reads the rules and changes none. */
+    reset();
+    fake_room(GDX_NET_ROOM_MODE_JOINED, GDX_NET_ROOM_PHASE_LOBBY, 2, 4, 0);
+    fake_rules();
+    sFake.rules.shield = 1;
+    gdx_net_room_screen_open();
+    press(GDX_NET_ROOM_IN_DOWN);
+    CHECK(find_text("RACE RULES")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
+    press(GDX_NET_ROOM_IN_CONFIRM);
+    CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_RULES);
+    CHECK(find_text("BACK")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
+    CHECK(rule_shows("SHIELD", "ON") && rule_shows("LAPS", "3"));
+    CHECK(find_text("SHIELD")->colour == GDX_NET_ROOM_COLOUR_DIM && find_text("CPU RACERS")->colour == GDX_NET_ROOM_COLOUR_DIM);
+    CHECK(count_prefix("THE HOST SETS THE RULES OF THE ROOM.") == 1);
+    press(GDX_NET_ROOM_IN_LEFT);
+    press(GDX_NET_ROOM_IN_RIGHT);
+    press(GDX_NET_ROOM_IN_UP);
+    CHECK(sRulesCalls == 0 && sCpuFillCalls == 0);
+    press(GDX_NET_ROOM_IN_CONFIRM);
+    CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_ROOM && gdx_net_room_screen_row() == 1);
+    CHECK(sRulesCalls == 0 && sReadyCalls == 0);
 }
 
 /* The messages page: the eight messages a player can send, and the room's last lines above them. */
@@ -2322,7 +2609,7 @@ static void test_room_messages(void) {
     reset();
     fake_room(GDX_NET_ROOM_MODE_JOINED, GDX_NET_ROOM_PHASE_LOBBY, 2, 4, 0);
     gdx_net_room_screen_open();
-    press(GDX_NET_ROOM_IN_DOWN);
+    press_times(GDX_NET_ROOM_IN_DOWN, 2);
     CHECK(find_text("SEND A MESSAGE")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
     gdx_net_room_screen_take_sound();
     press(GDX_NET_ROOM_IN_CONFIRM);
@@ -2354,7 +2641,7 @@ static void test_room_messages(void) {
     CHECK(sMessageCalls == 1 && sMessageIndex == 2);
     CHECK(gdx_net_room_screen_take_sound() == GDX_NET_ROOM_SOUND_CONFIRM);
     CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_ROOM);
-    CHECK(gdx_net_room_screen_row() == 1);
+    CHECK(gdx_net_room_screen_row() == 2);
     CHECK(find_text("SEND A MESSAGE")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
     /* The last of them. */
     press(GDX_NET_ROOM_IN_CONFIRM);
@@ -2374,11 +2661,11 @@ static void test_room_messages(void) {
     gdx_net_room_screen_take_sound();
     press(GDX_NET_ROOM_IN_CONFIRM);
     CHECK(gdx_net_room_screen_take_sound() == GDX_NET_ROOM_SOUND_BACK);
-    CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_ROOM && gdx_net_room_screen_row() == 1);
+    CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_ROOM && gdx_net_room_screen_row() == 2);
     press(GDX_NET_ROOM_IN_CONFIRM);
     CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_MESSAGES);
     press(GDX_NET_ROOM_IN_BACK);
-    CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_ROOM && gdx_net_room_screen_row() == 1);
+    CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_ROOM && gdx_net_room_screen_row() == 2);
     CHECK(sMessageCalls == 2);
     CHECK(sReadyCalls == 0 && sStopCalls == 0);
 
@@ -2462,7 +2749,7 @@ static void test_room_log(void) {
     /* The messages page has room for both, and for a message of two lines: the square stands before its
      * first line only. */
     fake_line(3, "one two three four five six seven eight nine");
-    press(GDX_NET_ROOM_IN_DOWN);
+    press_times(GDX_NET_ROOM_IN_DOWN, 2);
     press(GDX_NET_ROOM_IN_CONFIRM);
     CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_MESSAGES);
     CHECK(!has_text("NO MESSAGE YET."));
@@ -2509,7 +2796,7 @@ static void test_room_mute(void) {
     reset();
     fake_room(GDX_NET_ROOM_MODE_JOINED, GDX_NET_ROOM_PHASE_LOBBY, 2, 4, 0);
     gdx_net_room_screen_open();
-    press_times(GDX_NET_ROOM_IN_DOWN, 4);
+    press_times(GDX_NET_ROOM_IN_DOWN, 5);
     CHECK(find_text("P01")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
     gdx_net_room_screen_take_sound();
     press(GDX_NET_ROOM_IN_CONFIRM);
@@ -2535,7 +2822,7 @@ static void test_room_mute(void) {
     CHECK(sKickCalls == 0 && sStopCalls == 0);
     /* The roster says it where the ping was. */
     press(GDX_NET_ROOM_IN_BACK);
-    CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_ROOM && gdx_net_room_screen_row() == 4);
+    CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_ROOM && gdx_net_room_screen_row() == 5);
     CHECK(find_text("MUTED") != NULL && find_text("MUTED")->y == find_text("P01")->y);
     CHECK(find_text("MUTED")->colour == GDX_NET_ROOM_COLOUR_DIM);
     CHECK(find_text("MUTED")->align == GDX_NET_ROOM_ALIGN_RIGHT && find_text("MUTED")->x == 300);
@@ -2623,13 +2910,13 @@ static void test_room_table(void) {
     CHECK(has_text("THE RACE IS ON AT TRACK 3.") && has_text("NOBODY HAS FINISHED YET."));
     CHECK(has_text("ROOM AT 192.168.1.20 PORT 24302"));
     CHECK(!has_text("TIME") && !has_text("TOTAL") && !has_text("PTS"));
-    CHECK(find_text("SEND A MESSAGE")->y == 108 && find_text("P00")->y == 136);
+    CHECK(find_text("SEND A MESSAGE")->y == 118 && find_text("P00")->y == 146);
     CHECK(count_rects(6) == 5);
     /* The table of an earlier race is not this race's. */
     fake_table(0, 4, kRunIds, kRunKinds, kRunTimes, kRunPoints);
     sFake.resultsRace = 3u;
     CHECK(has_text("NOBODY HAS FINISHED YET.") && !has_text("TIME"));
-    CHECK(find_text("P00")->y == 136);
+    CHECK(find_text("P00")->y == 146);
 
     /* The first racer is over the line. The table takes the rows of the room's address and its seat counts,
      * and has no squares. */
@@ -2639,53 +2926,54 @@ static void test_room_table(void) {
     CHECK(!has_text("NOBODY HAS FINISHED YET."));
     CHECK(!has_text("ROOM AT 192.168.1.20 PORT 24302") && count_prefix("4 OF 8 RACERS") == 0);
     CHECK(find_text_at("THE RACE IS ON AT TRACK 3.", 58) != NULL);
-    CHECK(find_text("SEND A MESSAGE")->y == 84 && find_text("LEAVE THE ROOM")->y == 94);
-    CHECK(find_text("SEND A MESSAGE")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
-    item = find_text_at("TIME", 112);
+    CHECK(find_text("RACE RULES")->y == 84);
+    CHECK(find_text("SEND A MESSAGE")->y == 94 && find_text("LEAVE THE ROOM")->y == 104);
+    CHECK(find_text("RACE RULES")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
+    item = find_text_at("TIME", 122);
     CHECK(item != NULL && item->x == 152 && item->colour == GDX_NET_ROOM_COLOUR_DIM);
-    item = find_text_at("TOTAL", 112);
+    item = find_text_at("TOTAL", 122);
     CHECK(item != NULL && item->x == 300 && item->align == GDX_NET_ROOM_ALIGN_RIGHT);
     CHECK(item != NULL && item->colour == GDX_NET_ROOM_COLOUR_DIM);
     CHECK(count_rects(6) == 0);
     /* In the table's order, then whoever is not in it. */
-    CHECK(find_text("P01")->y == 122 && find_text("P03")->y == 132 && find_text("P00")->y == 142);
-    CHECK(find_text("P02")->y == 152 && find_text("P04")->y == 162);
+    CHECK(find_text("P01")->y == 132 && find_text("P03")->y == 142 && find_text("P00")->y == 152);
+    CHECK(find_text("P02")->y == 162 && find_text("P04")->y == 172);
     CHECK(find_text("P01")->x == 34 && find_text("P01")->colour == GDX_NET_ROOM_COLOUR_WHITE);
     CHECK(find_text("P02")->colour == GDX_NET_ROOM_COLOUR_GOLD);
     /* A place only for a racer who has one: the others are still out there. */
-    item = find_text_at("1", 122);
+    item = find_text_at("1", 132);
     CHECK(item != NULL && item->x == 30 && item->align == GDX_NET_ROOM_ALIGN_RIGHT);
-    CHECK(find_text_at("2", 132) == NULL && find_text_at("3", 142) == NULL && find_text_at("4", 152) == NULL);
-    item = find_text_at("1'23\"456", 122);
+    CHECK(find_text_at("2", 142) == NULL && find_text_at("3", 152) == NULL && find_text_at("4", 162) == NULL);
+    item = find_text_at("1'23\"456", 132);
     CHECK(item != NULL && item->x == 152 && item->colour == GDX_NET_ROOM_COLOUR_WHITE);
-    item = find_text_at("RETIRED", 132);
+    item = find_text_at("RETIRED", 142);
     CHECK(item != NULL && item->x == 152 && item->colour == GDX_NET_ROOM_COLOUR_RED);
-    item = find_text_at("RACING", 142);
+    item = find_text_at("RACING", 152);
     CHECK(item != NULL && item->x == 152 && item->colour == GDX_NET_ROOM_COLOUR_DIM);
-    CHECK(find_text_at("RACING", 152) != NULL);
+    CHECK(find_text_at("RACING", 162) != NULL);
     CHECK(count_prefix("RACING") == 2 && !has_text("DID NOT FINISH"));
     /* A watcher has their seat where a time would be. */
-    item = find_text_at("WATCHING", 162);
+    item = find_text_at("WATCHING", 172);
     CHECK(item != NULL && item->x == 152 && item->colour == GDX_NET_ROOM_COLOUR_DIM);
     /* The series' points at the right margin, and nothing for the race until it is over. */
-    item = find_text_at("30", 122);
+    item = find_text_at("30", 132);
     CHECK(item != NULL && item->x == 300 && item->align == GDX_NET_ROOM_ALIGN_RIGHT);
-    CHECK(find_text_at("0", 132) != NULL && find_text_at("7", 142) != NULL && find_text_at("12", 152) != NULL);
-    CHECK(find_text_at("0", 162) != NULL);
+    CHECK(find_text_at("0", 142) != NULL && find_text_at("7", 152) != NULL && find_text_at("12", 162) != NULL);
+    CHECK(find_text_at("0", 172) != NULL);
     CHECK(count_prefix("+") == 0);
     CHECK(draw_count() <= GDX_NET_ROOM_DRAW_MAX);
 
     /* The cursor goes through the table as it does through the roster, and another player's line opens
      * their page. */
-    press_times(GDX_NET_ROOM_IN_DOWN, 2);
-    CHECK(gdx_net_room_screen_row() == 2);
+    press_times(GDX_NET_ROOM_IN_DOWN, 3);
+    CHECK(gdx_net_room_screen_row() == 3);
     CHECK(find_text("P01")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
     CHECK(count_rects(288) == 1);
     press(GDX_NET_ROOM_IN_CONFIRM);
     CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_PLAYER);
     CHECK(has_text("MUTE THIS PLAYER"));
     press(GDX_NET_ROOM_IN_BACK);
-    CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_ROOM && gdx_net_room_screen_row() == 2);
+    CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_ROOM && gdx_net_room_screen_row() == 3);
     /* The player's own line does nothing. */
     press_times(GDX_NET_ROOM_IN_DOWN, 3);
     CHECK(find_text("P02")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
@@ -2703,39 +2991,39 @@ static void test_room_table(void) {
     press(0);
     CHECK(find_text_at("THE RACE AT TRACK 3 IS OVER.", 58) != NULL);
     CHECK(find_text("P02")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
-    item = find_text_at("PTS", 112);
+    item = find_text_at("PTS", 122);
     CHECK(item != NULL && item->x == 262 && item->align == GDX_NET_ROOM_ALIGN_RIGHT);
     CHECK(item != NULL && item->colour == GDX_NET_ROOM_COLOUR_DIM);
-    CHECK(find_text("P01")->y == 122 && find_text("P02")->y == 132 && find_text("P00")->y == 142);
-    CHECK(find_text("P03")->y == 152 && find_text("P04")->y == 162);
-    CHECK(find_text_at("1", 122) != NULL && find_text_at("2", 132) != NULL && find_text_at("3", 142) != NULL);
-    CHECK(find_text_at("4", 152) != NULL && find_text_at("5", 162) == NULL);
-    CHECK(find_text_at("1'23\"456", 122) != NULL && find_text_at("2'05\"007", 132) != NULL);
-    item = find_text_at("DID NOT FINISH", 142);
+    CHECK(find_text("P01")->y == 132 && find_text("P02")->y == 142 && find_text("P00")->y == 152);
+    CHECK(find_text("P03")->y == 162 && find_text("P04")->y == 172);
+    CHECK(find_text_at("1", 132) != NULL && find_text_at("2", 142) != NULL && find_text_at("3", 152) != NULL);
+    CHECK(find_text_at("4", 162) != NULL && find_text_at("5", 172) == NULL);
+    CHECK(find_text_at("1'23\"456", 132) != NULL && find_text_at("2'05\"007", 142) != NULL);
+    item = find_text_at("DID NOT FINISH", 152);
     CHECK(item != NULL && item->x == 152 && item->colour == GDX_NET_ROOM_COLOUR_DIM);
-    CHECK(find_text_at("RETIRED", 152) != NULL && !has_text("RACING"));
-    CHECK(find_text_at("WATCHING", 162) != NULL);
-    item = find_text_at("+25", 122);
+    CHECK(find_text_at("RETIRED", 162) != NULL && !has_text("RACING"));
+    CHECK(find_text_at("WATCHING", 172) != NULL);
+    item = find_text_at("+25", 132);
     CHECK(item != NULL && item->x == 262 && item->align == GDX_NET_ROOM_ALIGN_RIGHT);
-    CHECK(find_text_at("+18", 132) != NULL && find_text_at("+4", 142) != NULL && find_text_at("+0", 152) != NULL);
+    CHECK(find_text_at("+18", 142) != NULL && find_text_at("+4", 152) != NULL && find_text_at("+0", 162) != NULL);
     CHECK(count_prefix("+") == 4);
-    CHECK(find_text_at("55", 122) != NULL && find_text_at("30", 132) != NULL && find_text_at("11", 142) != NULL);
+    CHECK(find_text_at("55", 132) != NULL && find_text_at("30", 142) != NULL && find_text_at("11", 152) != NULL);
     CHECK(draw_count() <= GDX_NET_ROOM_DRAW_MAX);
 
     /* A racer who left keeps their line. It has no name and no total, and the cursor passes it by. */
     remove_player(0);
     press(0);
-    item = find_text_at("LEFT THE ROOM", 142);
+    item = find_text_at("LEFT THE ROOM", 152);
     CHECK(item != NULL && item->x == 34 && item->colour == GDX_NET_ROOM_COLOUR_DIM);
     CHECK(!has_text("P00"));
-    CHECK(find_text_at("3", 142) != NULL && find_text_at("DID NOT FINISH", 142) != NULL);
-    CHECK(find_text_at("+4", 142) != NULL && find_text_at("11", 142) == NULL);
-    CHECK(gdx_net_room_screen_row() == 3);
+    CHECK(find_text_at("3", 152) != NULL && find_text_at("DID NOT FINISH", 152) != NULL);
+    CHECK(find_text_at("+4", 152) != NULL && find_text_at("11", 152) == NULL);
+    CHECK(gdx_net_room_screen_row() == 4);
     press(GDX_NET_ROOM_IN_DOWN);
-    CHECK(gdx_net_room_screen_row() == 5);
+    CHECK(gdx_net_room_screen_row() == 6);
     CHECK(find_text("P03")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
     press(GDX_NET_ROOM_IN_UP);
-    CHECK(gdx_net_room_screen_row() == 3);
+    CHECK(gdx_net_room_screen_row() == 4);
     CHECK(sStopCalls == 0 && sMuteCalls == 0);
 
     /* The next track choice starts: the roster is back, also while the room still counts the same race. */
@@ -2743,7 +3031,7 @@ static void test_room_table(void) {
     press(0);
     CHECK(!has_text("TIME") && !has_text("TOTAL") && !has_text("LEFT THE ROOM"));
     CHECK(has_text("ROOM AT 192.168.1.20 PORT 24302"));
-    CHECK(find_text("SEND A MESSAGE")->y == 108);
+    CHECK(find_text("SEND A MESSAGE")->y == 118);
 
     /* The host's results: "BACK TO THE LOBBY" is the row above the table's. */
     reset();
@@ -2752,11 +3040,11 @@ static void test_room_table(void) {
     fake_table(1, 4, kEndIds, kEndKinds, kEndTimes, kEndPoints);
     gdx_net_room_screen_open();
     CHECK(!has_text("YOUR ROOM ON PORT 24302"));
-    CHECK(find_text("BACK TO THE LOBBY")->y == 84 && find_text("SEND A MESSAGE")->y == 94);
-    CHECK(find_text("CLOSE THE ROOM")->y == 104);
-    CHECK(find_text_at("TIME", 122) != NULL && find_text("P01")->y == 132 && find_text("P04")->y == 172);
+    CHECK(find_text("BACK TO THE LOBBY")->y == 84 && find_text("RACE RULES")->y == 94 && find_text("SEND A MESSAGE")->y == 104);
+    CHECK(find_text("CLOSE THE ROOM")->y == 114);
+    CHECK(find_text_at("TIME", 132) != NULL && find_text("P01")->y == 142 && find_text("P04")->y == 182);
 
-    /* A full grid and both watch seats: nine lines at a time, none below the log's. */
+    /* A full grid and both watch seats: eight lines at a time, none below the log's. */
     reset();
     fake_room(GDX_NET_ROOM_MODE_JOINED, GDX_NET_ROOM_PHASE_RESULTS, 5, GDX_NET_ROOM_PLAYERS, 2);
     for (i = 0; i < GDX_NET_ROOM_RACERS; i++) {
@@ -2770,16 +3058,16 @@ static void test_room_table(void) {
     fake_line(5, "Good race!");
     fake_line(6, "Good race!");
     gdx_net_room_screen_open();
-    CHECK(count_prefix("9'59\"999") == 9);
-    CHECK(find_text("P11")->y == 122 && find_text("P03")->y == 202 && !has_text("P02"));
+    CHECK(count_prefix("9'59\"999") == 8);
+    CHECK(find_text("P11")->y == 132 && find_text("P04")->y == 202 && !has_text("P03"));
     CHECK(count_rects(2) == 2);
     CHECK(draw_count() <= GDX_NET_ROOM_DRAW_MAX);
-    press_times(GDX_NET_ROOM_IN_DOWN, 15);
-    CHECK(gdx_net_room_screen_row() == 15);
+    press_times(GDX_NET_ROOM_IN_DOWN, 16);
+    CHECK(gdx_net_room_screen_row() == 16);
     press(GDX_NET_ROOM_IN_DOWN);
-    CHECK(gdx_net_room_screen_row() == 15);
+    CHECK(gdx_net_room_screen_row() == 16);
     CHECK(find_text("P13")->y == 202 && find_text("P13")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
-    CHECK(find_text("P06")->y == 122 && !has_text("P07"));
+    CHECK(find_text("P05")->y == 132 && !has_text("P06"));
     CHECK(find_text_at("NEXT RACE", 202) == NULL && find_text_at("WATCHING", 202) != NULL);
     CHECK(find_text_at("P05 - GOOD RACE ", 222) != NULL && find_text_at("P06 - GOOD RACE ", 232) != NULL);
     CHECK(draw_count() <= GDX_NET_ROOM_DRAW_MAX);
@@ -2826,7 +3114,7 @@ static void test_room_save_track(void) {
     }
     CHECK(sSavePollCalls >= 1);
 
-    /* Each state's words, in the row above "SEND A MESSAGE"; dim when pressing it does nothing. */
+    /* Each state's words, in the row above "RACE RULES"; dim when pressing it does nothing. */
     for (i = 0; i < (int) (sizeof(kRows) / sizeof(kRows[0])); i++) {
         const GdxNetRoomDrawItem* row;
         const GdxNetRoomDrawItem* message;
@@ -2838,7 +3126,7 @@ static void test_room_save_track(void) {
         gdx_net_room_screen_open();
         press_times(GDX_NET_ROOM_IN_DOWN, 4);
         row = find_text(kRows[i].text);
-        message = find_text("SEND A MESSAGE");
+        message = find_text("RACE RULES");
         CHECK(row != NULL && message != NULL);
         if (row != NULL && message != NULL) {
             CHECK(row->y + 10 == message->y);
@@ -2863,7 +3151,7 @@ static void test_room_save_track(void) {
     CHECK(gdx_net_room_screen_take_sound() != GDX_NET_ROOM_SOUND_REFUSE);
     CHECK(has_text("SAVING THE TRACK") && !has_text("SAVE TO MY TRACKS"));
     CHECK(find_text("SAVING THE TRACK")->colour == GDX_NET_ROOM_COLOUR_DIM);
-    CHECK(find_text("SEND A MESSAGE")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
+    CHECK(find_text("RACE RULES")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
     /* The disk finishes: the words follow, and pressing a done row asks nothing more of the module. */
     sSaveState = GDX_NET_TRACK_SAVE_SAVED;
     press(0);
@@ -2901,7 +3189,7 @@ static void fake_open_answer(int count) {
     sFake.dirSerial++;
     sFake.listedCount = count;
     for (i = 0; i < count; i++) {
-        snprintf(sFake.listed[i].code, sizeof(sFake.listed[i].code), "AAA-00%d", i);
+        snprintf(sFake.listed[i].code, sizeof(sFake.listed[i].code), "AAA-00%u", (unsigned) i % 10u); /* at most GDX_NET_ROOM_LISTED, 10 */
         sFake.listed[i].type = GDX_NET_ROOM_TYPE_OPEN;
         sFake.listed[i].humans = 2;
         sFake.listed[i].freeSeats = (unsigned char) (i == count - 1 ? 0 : 6);
@@ -2931,9 +3219,10 @@ static void test_notice(void) {
     CHECK(has_text("MESSAGES. ITS HOST CAN BAN YOUR FRIEND"));
     CHECK(has_text("CODE. THE HOST AND PLAYERS ON YOUR"));
     CHECK(has_text("HAVE DIRECT LINKS ON IN ONLINE SETTINGS."));
-    CHECK(has_text("CLOUDFLARE RELAY AND ARE LISTED IN THE"));
-    CHECK(has_text("CODE IS THE PUBLIC HALF OF YOUR PROFILE"));
-    last = find_text("SEARCH OR JOIN.");
+    CHECK(has_text("ONLINE ROOMS USE A CLOUDFLARE RELAY AND"));
+    CHECK(has_text("HOST. YOUR FRIEND CODE IS YOUR PUBLIC"));
+    CHECK(has_text("KEY. A FRIEND YOU ADD GETS IT AND YOUR"));
+    last = find_text("HOST OR JOIN OR SEARCH OR ADD A FRIEND.");
     CHECK(last != NULL && last->y <= 58 + 13 * 10); /* fourteen lines at most */
     CHECK(find_text("I UNDERSTAND")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
     CHECK(last != NULL && find_text("I UNDERSTAND")->y > last->y);
@@ -3365,9 +3654,9 @@ static void test_friends(void) {
     /* Seven groups a line: 34 columns, inside the margins. */
     CHECK(find_text_at("ABCD EFGH JKMN PQRS TVWX YZ01 2345", 68) != NULL);
     CHECK(find_text_at("6789 ABCD EFGH JKMN PQRS TVWX YZ01", 78) != NULL);
-    CHECK(find_text("COPY MY CODE")->colour == GDX_NET_ROOM_COLOUR_CURSOR && find_text("COPY MY CODE")->y == 96);
-    CHECK(find_text("ADD BY CODE")->y == 108 && find_text("ADD FROM THE LAST ROOM")->y == 120);
-    CHECK(find_text("BACK")->y == 132);
+    CHECK(find_text("COPY MY CODE")->colour == GDX_NET_ROOM_COLOUR_CURSOR && find_text("COPY MY CODE")->y == 92);
+    CHECK(find_text("ADD BY CODE")->y == 104 && find_text("ADD FROM THE LAST ROOM")->y == 116);
+    CHECK(find_text("FRIEND REQUESTS")->y == 128 && find_text("BACK")->y == 140);
     CHECK(has_text("NO FRIEND YET. ADD ONE BY CODE OR FROM"));
     CHECK(draw_count() <= GDX_NET_ROOM_DRAW_MAX);
 
@@ -3443,11 +3732,11 @@ static void test_friends(void) {
     CHECK(sFakeFriendCount == 1);
     CHECK(find_text_at("FRIEND 1 IS ON YOUR LIST.", 212) != NULL);
     CHECK(has_text("1 FRIEND"));
-    CHECK(gdx_net_room_screen_row() == 4);
-    CHECK(find_text("FRIEND 1")->colour == GDX_NET_ROOM_COLOUR_CURSOR && find_text("FRIEND 1")->y == 156);
+    CHECK(gdx_net_room_screen_row() == 5);
+    CHECK(find_text("FRIEND 1")->colour == GDX_NET_ROOM_COLOUR_CURSOR && find_text("FRIEND 1")->y == 166);
 
     /* The field by hand: the 32 letters of a code, and B gives a change up. */
-    press_times(GDX_NET_ROOM_IN_UP, 3);
+    press_times(GDX_NET_ROOM_IN_UP, 4);
     press(GDX_NET_ROOM_IN_CONFIRM);
     CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_FRIEND_ADD);
     friend_field(field, (int) sizeof(field));
@@ -3517,16 +3806,16 @@ static void test_friends_long_list(void) {
     }
     open_friends();
     CHECK(has_text("200 FRIENDS"));
-    CHECK(has_text("F000") && has_text("F005") && !has_text("F006")); /* six lines, 156 to 206 */
-    press_times(GDX_NET_ROOM_IN_DOWN, 3 + GDX_NET_ROOM_FRIENDS_MAX + 5);
-    CHECK(gdx_net_room_screen_row() == 4 + GDX_NET_ROOM_FRIENDS_MAX - 1);
-    CHECK(find_text("F199") != NULL && find_text("F199")->y == 206 && !has_text("F193"));
+    CHECK(has_text("F000") && has_text("F004") && !has_text("F005")); /* five lines, 166 to 206 */
+    press_times(GDX_NET_ROOM_IN_DOWN, 4 + GDX_NET_ROOM_FRIENDS_MAX + 5);
+    CHECK(gdx_net_room_screen_row() == 5 + GDX_NET_ROOM_FRIENDS_MAX - 1);
+    CHECK(find_text("F199") != NULL && find_text("F199")->y == 206 && find_text("F195") != NULL && !has_text("F194"));
     CHECK(draw_count() <= GDX_NET_ROOM_DRAW_MAX);
     press(GDX_NET_ROOM_IN_CONFIRM);
     CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_FRIEND);
     CHECK(find_text("F199") != NULL && find_text("F199")->font == GDX_NET_ROOM_FONT_TITLE);
     press(GDX_NET_ROOM_IN_BACK);
-    CHECK(gdx_net_room_screen_row() == 4 + GDX_NET_ROOM_FRIENDS_MAX - 1);
+    CHECK(gdx_net_room_screen_row() == 5 + GDX_NET_ROOM_FRIENDS_MAX - 1);
 }
 
 /* The rooms the directory says this friend hosts (decision 43). */
@@ -3553,8 +3842,8 @@ static void test_friend_page(void) {
     fake_friend("Ana", 'A');
     fake_friend("Bo", 'B');
     open_friends();
-    CHECK(has_text("2 FRIENDS") && find_text("ANA")->y == 156 && find_text("BO")->y == 166);
-    press_times(GDX_NET_ROOM_IN_DOWN, 4);
+    CHECK(has_text("2 FRIENDS") && find_text("ANA")->y == 166 && find_text("BO")->y == 176);
+    press_times(GDX_NET_ROOM_IN_DOWN, 5);
     CHECK(find_text("ANA")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
     press(GDX_NET_ROOM_IN_CONFIRM);
     CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_FRIEND);
@@ -3592,7 +3881,7 @@ static void test_friend_page(void) {
     /* Ana's answer is not Bo's. */
     press_times(GDX_NET_ROOM_IN_DOWN, 7);
     press(GDX_NET_ROOM_IN_CONFIRM);
-    press_times(GDX_NET_ROOM_IN_DOWN, 5);
+    press_times(GDX_NET_ROOM_IN_DOWN, 6);
     CHECK(find_text("BO")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
     press(GDX_NET_ROOM_IN_CONFIRM);
     CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_FRIEND);
@@ -3631,10 +3920,10 @@ static void test_friend_page(void) {
     CHECK(sRemoveCalls == 1 && sRemoveIndex == 1 && sFakeFriendCount == 1);
     CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_FRIENDS);
     CHECK(find_text_at("BO IS OFF YOUR LIST.", 212) != NULL);
-    CHECK(gdx_net_room_screen_row() == 4 && find_text("ANA")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
+    CHECK(gdx_net_room_screen_row() == 5 && find_text("ANA")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
     press(GDX_NET_ROOM_IN_CONFIRM);
     press(GDX_NET_ROOM_IN_BACK);
-    CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_FRIENDS && gdx_net_room_screen_row() == 4);
+    CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_FRIENDS && gdx_net_room_screen_row() == 5);
 
     /* The last friend goes: the cursor goes to ADD BY CODE. */
     press(GDX_NET_ROOM_IN_CONFIRM);
@@ -3702,6 +3991,179 @@ static void test_met(void) {
     CHECK(has_text("YOUR LIST NOW CALLS THIS FRIEND CY."));
 }
 
+/* The friend requests (CONTRACT.md 5.10, 5.11): collected on the way in, then added or declined one at a time. */
+static void test_friend_requests(void) {
+    char name[16];
+    int i;
+
+    reset();
+    sFakeDirectory = 1;
+    snprintf(sFakeMyCode, sizeof(sFakeMyCode), "%s", kMyCode);
+    open_friends();
+    CHECK(!has_text("0 WAITING")); /* nothing collected yet: nothing said beside the row */
+    press_times(GDX_NET_ROOM_IN_DOWN, 3);
+    CHECK(find_text("FRIEND REQUESTS")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
+    press(GDX_NET_ROOM_IN_CONFIRM);
+    CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_REQUESTS);
+    CHECK(sCollectCalls == 1);
+    CHECK(find_text("FRIEND REQUESTS") != NULL && find_text("FRIEND REQUESTS")->font == GDX_NET_ROOM_FONT_TITLE);
+    CHECK(find_text("CHECK AGAIN")->colour == GDX_NET_ROOM_COLOUR_CURSOR && find_text("CHECK AGAIN")->y == 60);
+    CHECK(find_text("BACK")->y == 72);
+    CHECK(find_text_at("ASKING THE ROOM DIRECTORY.", 90) != NULL);
+    CHECK(draw_count() <= GDX_NET_ROOM_DRAW_MAX);
+
+    /* One collect at a time: a press while it is out sends nothing, and the cursor stays. */
+    gdx_net_room_screen_take_sound();
+    press(GDX_NET_ROOM_IN_CONFIRM);
+    CHECK(sCollectCalls == 1);
+    CHECK(gdx_net_room_screen_take_sound() == GDX_NET_ROOM_SOUND_REFUSE);
+    CHECK(gdx_net_room_screen_row() == 0);
+
+    /* The answer: the senders under the line, oldest first. */
+    fake_request("Eve", 'E');
+    fake_request("Fay", 'F');
+    sFakeMailState = GDX_NET_ROOM_MAIL_READY;
+    press(0);
+    CHECK(find_text_at("2 REQUESTS. PICK ONE TO ANSWER.", 90) != NULL);
+    CHECK(find_text("EVE")->y == 104 && find_text("FAY")->y == 114);
+    CHECK(gdx_net_room_screen_row() == 0);
+
+    /* A request cannot be opened while another collect is out: its answer may move the list. */
+    press(GDX_NET_ROOM_IN_CONFIRM);
+    CHECK(sCollectCalls == 2);
+    press_times(GDX_NET_ROOM_IN_DOWN, 2);
+    CHECK(find_text("EVE")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
+    gdx_net_room_screen_take_sound();
+    press(GDX_NET_ROOM_IN_CONFIRM);
+    CHECK(gdx_net_room_screen_take_sound() == GDX_NET_ROOM_SOUND_REFUSE);
+    CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_REQUESTS);
+    sFakeMailState = GDX_NET_ROOM_MAIL_READY;
+    press(0);
+
+    /* A request's page: the sender's name and code, and what each row does. */
+    press(GDX_NET_ROOM_IN_CONFIRM);
+    CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_REQUEST);
+    CHECK(find_text("EVE") != NULL && find_text("EVE")->font == GDX_NET_ROOM_FONT_TITLE);
+    CHECK(find_text_at("EEEE EEEE EEEE EEEE EEEE EEEE EEEE", 60) != NULL);
+    CHECK(find_text_at("EEEE EEEE EEEE EEEE EEEE EEEE EEEE", 70) != NULL);
+    CHECK(find_text("ADD TO FRIENDS")->colour == GDX_NET_ROOM_COLOUR_CURSOR && find_text("ADD TO FRIENDS")->y == 90);
+    CHECK(find_text("DECLINE")->y == 102 && find_text("BACK")->y == 114);
+    CHECK(find_text_at("THIS PLAYER ADDED YOU AS A FRIEND. ADD", 134) != NULL);
+    CHECK(draw_count() <= GDX_NET_ROOM_DRAW_MAX);
+
+    /* B goes back to its row, and asks the directory nothing. */
+    press(GDX_NET_ROOM_IN_BACK);
+    CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_REQUESTS && gdx_net_room_screen_row() == 2);
+    CHECK(sCollectCalls == 2);
+
+    /* Decline asks twice, and moving off the row takes the question back. */
+    press(GDX_NET_ROOM_IN_DOWN);
+    press(GDX_NET_ROOM_IN_CONFIRM);
+    CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_REQUEST && find_text("FAY") != NULL);
+    press(GDX_NET_ROOM_IN_DOWN);
+    press(GDX_NET_ROOM_IN_CONFIRM);
+    CHECK(has_text("PRESS A AGAIN TO DECLINE") && sDeclineCalls == 0);
+    press(GDX_NET_ROOM_IN_UP);
+    CHECK(has_text("DECLINE") && !has_text("PRESS A AGAIN TO DECLINE"));
+    press(GDX_NET_ROOM_IN_DOWN);
+    press(GDX_NET_ROOM_IN_CONFIRM);
+    gdx_net_room_screen_take_sound();
+    press(GDX_NET_ROOM_IN_CONFIRM);
+    CHECK(sDeclineCalls == 1 && sDeclineIndex == 1 && sFakeRequestCount == 1);
+    CHECK(gdx_net_room_screen_take_sound() == GDX_NET_ROOM_SOUND_BACK);
+    CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_REQUESTS);
+    CHECK(find_text_at("THE REQUEST FROM FAY IS DECLINED.", 212) != NULL);
+    CHECK(gdx_net_room_screen_row() == 2 && find_text("EVE")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
+    CHECK(sAcceptCalls == 0 && sFakeFriendCount == 0);
+
+    /* Add: the sender on the friend list under the name they sent, and the cursor on BACK as none is left. */
+    press(GDX_NET_ROOM_IN_CONFIRM);
+    press(GDX_NET_ROOM_IN_CONFIRM);
+    CHECK(sAcceptCalls == 1 && sAcceptIndex == 0);
+    CHECK(sFakeFriendCount == 1 && strcmp(sFakeFriendNames[0], "Eve") == 0 && sFakeRequestCount == 0);
+    CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_REQUESTS);
+    CHECK(find_text_at("EVE IS ON YOUR LIST.", 212) != NULL);
+    CHECK(find_text_at("NO FRIEND REQUEST RIGHT NOW.", 90) != NULL);
+    CHECK(gdx_net_room_screen_row() == 1);
+
+    /* Refused: the page stays and says why, and the request is kept. */
+    fake_request("Gus", 'G');
+    press(0);
+    press(GDX_NET_ROOM_IN_DOWN);
+    press(GDX_NET_ROOM_IN_CONFIRM);
+    CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_REQUEST && find_text("GUS") != NULL);
+    sFakeAcceptAnswer = GDX_NET_ROOM_FRIEND_FULL;
+    gdx_net_room_screen_take_sound();
+    press(GDX_NET_ROOM_IN_CONFIRM);
+    CHECK(gdx_net_room_screen_take_sound() == GDX_NET_ROOM_SOUND_REFUSE);
+    CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_REQUEST && sFakeRequestCount == 1);
+    CHECK(find_text("THE LIST IS FULL. REMOVE A FRIEND FIRST.")->colour == GDX_NET_ROOM_COLOUR_RED);
+    /* Listed already: the request goes, and the note says so. */
+    sFakeAcceptAnswer = GDX_NET_ROOM_FRIEND_LISTED;
+    press(GDX_NET_ROOM_IN_CONFIRM);
+    CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_REQUESTS && sFakeRequestCount == 0);
+    CHECK(has_text("THIS FRIEND IS ON YOUR LIST ALREADY."));
+    sFakeAcceptAnswer = -1;
+
+    /* A request that leaves the list takes its page back to the list. */
+    fake_request("Hal", 'H');
+    press(0);
+    press(GDX_NET_ROOM_IN_DOWN);
+    press(GDX_NET_ROOM_IN_CONFIRM);
+    CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_REQUEST);
+    sFakeRequestCount = 0;
+    press(0);
+    CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_REQUESTS);
+
+    /* B goes back to the friends page's row, which says how many wait. */
+    fake_request("Ivy", 'J');
+    press(GDX_NET_ROOM_IN_BACK);
+    CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_FRIENDS && gdx_net_room_screen_row() == 3);
+    CHECK(find_text_at("1 WAITING", 128) != NULL && find_text("1 WAITING")->x == 300);
+    CHECK(find_text("1 WAITING")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
+
+    /* A failed collect is said in red, and a collect that cannot be sent is refused. */
+    press(GDX_NET_ROOM_IN_CONFIRM);
+    CHECK(sCollectCalls == 3);
+    sFakeMailState = GDX_NET_ROOM_MAIL_FAILED;
+    snprintf(sFakeMailText, sizeof(sFakeMailText), "The directory has no mailbox");
+    press(0);
+    CHECK(find_text_at("THE DIRECTORY HAS NO MAILBOX", 90) != NULL);
+    CHECK(find_text("THE DIRECTORY HAS NO MAILBOX")->colour == GDX_NET_ROOM_COLOUR_RED);
+    CHECK(has_text("IVY")); /* the list stays as it was */
+    sCollectAnswer = 0;
+    gdx_net_room_screen_take_sound();
+    press(GDX_NET_ROOM_IN_CONFIRM);
+    CHECK(sCollectCalls == 4 && gdx_net_room_screen_take_sound() == GDX_NET_ROOM_SOUND_REFUSE);
+
+    /* A long list scrolls, and the screen never draws more than it can hold. */
+    sCollectAnswer = 1;
+    sFakeMailState = GDX_NET_ROOM_MAIL_READY;
+    sFakeRequestCount = 0;
+    for (i = 0; i < GDX_NET_ROOM_REQUESTS_MAX; i++) {
+        snprintf(name, sizeof(name), "R%02d", i);
+        fake_request(name, 'K');
+    }
+    press(0);
+    CHECK(has_text("R00") && has_text("R10") && !has_text("R11")); /* eleven lines, 104 to 204 */
+    press_times(GDX_NET_ROOM_IN_DOWN, 2 + GDX_NET_ROOM_REQUESTS_MAX + 3);
+    CHECK(gdx_net_room_screen_row() == 2 + GDX_NET_ROOM_REQUESTS_MAX - 1);
+    CHECK(find_text("R39") != NULL && !has_text("R28"));
+    CHECK(draw_count() <= GDX_NET_ROOM_DRAW_MAX);
+
+    /* No directory: the row is there, and cannot be chosen. */
+    reset();
+    snprintf(sFakeMyCode, sizeof(sFakeMyCode), "%s", kMyCode);
+    gdx_net_room_screen_open();
+    press_times(GDX_NET_ROOM_IN_DOWN, 4);
+    press(GDX_NET_ROOM_IN_CONFIRM);
+    CHECK(gdx_net_room_screen_page() == GDX_NET_ROOM_PAGE_FRIENDS);
+    CHECK(find_text("FRIEND REQUESTS")->colour == GDX_NET_ROOM_COLOUR_DIM);
+    press_times(GDX_NET_ROOM_IN_DOWN, 3);
+    CHECK(find_text("BACK")->colour == GDX_NET_ROOM_COLOUR_CURSOR);
+    CHECK(sCollectCalls == 0);
+}
+
 /* The host's ban: asked twice, then the room (O7.3). */
 static void test_room_ban(void) {
     reset();
@@ -3767,6 +4229,7 @@ int main(void) {
     test_cursor_follows();
     test_room_before_roster();
     test_room_host_controls();
+    test_room_rules();
     test_room_messages();
     test_room_log();
     test_room_mute();
@@ -3782,6 +4245,7 @@ int main(void) {
     test_friends_long_list();
     test_friend_page();
     test_met();
+    test_friend_requests();
     test_room_ban();
 
     if (sFailures != 0) {

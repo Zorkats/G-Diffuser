@@ -425,10 +425,12 @@ constexpr ErrorRow kErrorRows[] = {
     {Error::TooLarge, "too_large", 413},
     {Error::BadSecret, "bad_secret", 403},
     {Error::BadSignature, "bad_signature", 403},
+    {Error::StaleTicket, "stale_ticket", 403},
     {Error::NotFound, "not_found", 404},
     {Error::NoRoute, "no_route", 404},
     {Error::MethodNotAllowed, "method_not_allowed", 405},
     {Error::CodeTaken, "code_taken", 409},
+    {Error::InboxFull, "inbox_full", 409},
     {Error::RateLimited, "rate_limited", 429},
     {Error::Internal, "internal", 500},
     {Error::TurnUpstream, "turn_upstream", 502},
@@ -670,15 +672,89 @@ bool EncodeDelist(const DelistRequest& request, std::string& out) {
     return true;
 }
 
-std::string SigningMessage(std::string_view path, std::string_view unsignedBody) {
+namespace {
+
+std::string LabeledMessage(std::string_view label, std::string_view path, std::string_view unsignedBody) {
     std::string message;
-    message.reserve(kSignLabel.size() + path.size() + unsignedBody.size() + 7);
-    message += kSignLabel;
+    message.reserve(label.size() + path.size() + unsignedBody.size() + 7);
+    message += label;
     message += "\nPOST ";
     message += path;
     message += '\n';
     message += unsignedBody;
     return message;
+}
+
+}  // namespace
+
+std::string SigningMessage(std::string_view path, std::string_view unsignedBody) {
+    return LabeledMessage(kSignLabel, path, unsignedBody);
+}
+
+bool EncodeRelayTicket(std::string_view code, uint64_t expires, std::string& out) {
+    if (!IsCode(code) || expires > kJsonIntegerMax) {
+        return false;
+    }
+    out = "{\"code\":\"" + std::string(code) + "\",\"expires\":" + std::to_string(expires) + "}";
+    return true;
+}
+
+std::string RelaySigningMessage(std::string_view unsignedBody) {
+    return LabeledMessage(kRelayLabel, "/v1/turn", unsignedBody);
+}
+
+bool SignRelayTicket(std::string_view code, uint64_t expires, const Signer& signer, RelayTicket& out) {
+    std::string body;
+    Signature sig{};
+    if (!signer || !EncodeRelayTicket(code, expires, body) || !signer(RelaySigningMessage(body), sig)) {
+        return false;
+    }
+    out.code = std::string(code);
+    out.expires = expires;
+    out.sig = sig;
+    return true;
+}
+
+bool IsFriendName(std::string_view text) {
+    if (text.empty() || text.size() > kFriendNameMax || text.front() == ' ' || text.back() == ' ') {
+        return false;
+    }
+    for (char c : text) {
+        const auto byte = static_cast<unsigned char>(c);
+        if (byte < 0x20 || byte > 0x7E) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool EncodeFriendRequest(std::string_view fromKey, std::string_view name, std::string& out) {
+    if (!IsHostKey(fromKey) || !IsFriendName(name)) {
+        return false;
+    }
+    // A name is the only string a body carries that may need an escape: §2 allows \" and \\ and nothing else.
+    std::string body = "{\"fromKey\":\"" + std::string(fromKey) + "\",\"name\":\"";
+    for (char c : name) {
+        if (c == '"' || c == '\\') {
+            body += '\\';
+        }
+        body += c;
+    }
+    body += "\"}";
+    out = std::move(body);
+    return true;
+}
+
+bool EncodeFriendCollect(uint64_t expires, std::string& out) {
+    if (expires > kJsonIntegerMax) {
+        return false;
+    }
+    out = "{\"expires\":" + std::to_string(expires) + "}";
+    return true;
+}
+
+std::string FriendSigningMessage(std::string_view path, std::string_view unsignedBody) {
+    return LabeledMessage(kFriendLabel, path, unsignedBody);
 }
 
 bool AppendSignature(std::string& body, const Signature& signature) {
@@ -957,6 +1033,38 @@ bool ReadTurnGrant(const JsonValue& body, TurnGrant& out) {
     return true;
 }
 
+// {"ttl":1209600} on a friend request (CONTRACT.md §5.10).
+bool ReadFriendTtl(const JsonValue& body, uint32_t& out) {
+    uint64_t ttl = 0;
+    if (!HasExactKeys(body, {"ttl"}) || !NumberField(body, "ttl", kFriendTtlSeconds, kFriendTtlSeconds, ttl)) {
+        return false;
+    }
+    out = static_cast<uint32_t>(ttl);
+    return true;
+}
+
+// {"requests":[{"fromKey":...,"name":...},...]} with at most kFriendInboxMax entries (CONTRACT.md §5.11).
+bool ReadFriendRequests(const JsonValue& body, std::vector<FriendRequestEntry>& out) {
+    if (!HasExactKeys(body, {"requests"})) {
+        return false;
+    }
+    const JsonValue* requests = body.Find("requests");
+    if (requests == nullptr || requests->kind != JsonValue::Kind::Array || requests->items.size() > kFriendInboxMax) {
+        return false;
+    }
+    std::vector<FriendRequestEntry> entries;
+    for (const JsonValue& item : requests->items) {
+        FriendRequestEntry entry;
+        if (!HasExactKeys(item, {"fromKey", "name"}) || !TextField(item, "fromKey", entry.fromKey) ||
+            !IsHostKey(entry.fromKey) || !TextField(item, "name", entry.name) || !IsFriendName(entry.name)) {
+            return false;
+        }
+        entries.push_back(std::move(entry));
+    }
+    out = std::move(entries);
+    return true;
+}
+
 // Retry-After is whole seconds (CONTRACT.md §6). Anything else is not a value the directory sends.
 constexpr uint32_t kRetryAfterMaxSeconds = 3600;
 bool ParseRetryAfter(const std::string& text, uint32_t& out) {
@@ -1105,12 +1213,13 @@ void Client::SetSigner(Signer signer) {
     signer_ = std::move(signer);
 }
 
-Answer<uint32_t> Client::Write(const std::string& path, std::string body, int expected,
-                               bool (*read)(const JsonValue&, uint32_t&)) const {
+template <typename T>
+Answer<T> Client::Write(std::string_view label, const std::string& path, std::string body, int expected,
+                        bool (*read)(const JsonValue&, T&)) const {
     Signature signature{};
-    if (!signer_ || !signer_(SigningMessage(path, body), signature) || !AppendSignature(body, signature) ||
+    if (!signer_ || !signer_(LabeledMessage(label, path, body), signature) || !AppendSignature(body, signature) ||
         body.size() > kBodyMax) {
-        return Refused<uint32_t>();
+        return Refused<T>();
     }
     return Finish(Exchange(transport_, bases_, true, "POST", path, body, expected), read);
 }
@@ -1120,7 +1229,7 @@ Answer<uint32_t> Client::Register(const RegisterRequest& request) const {
     if (!EncodeRegister(request, body)) {
         return Refused<uint32_t>();
     }
-    return Write("/v1/rooms", std::move(body), 201, ReadTtl);
+    return Write(kSignLabel, "/v1/rooms", std::move(body), 201, ReadTtl);
 }
 
 Answer<uint32_t> Client::Heartbeat(const HeartbeatRequest& request) const {
@@ -1128,7 +1237,7 @@ Answer<uint32_t> Client::Heartbeat(const HeartbeatRequest& request) const {
     if (!EncodeHeartbeat(request, body)) {
         return Refused<uint32_t>();
     }
-    return Write("/v1/rooms/" + request.code + "/heartbeat", std::move(body), 200, ReadTtl);
+    return Write(kSignLabel, "/v1/rooms/" + request.code + "/heartbeat", std::move(body), 200, ReadTtl);
 }
 
 Answer<uint32_t> Client::Takeover(const TakeoverRequest& request) const {
@@ -1136,7 +1245,7 @@ Answer<uint32_t> Client::Takeover(const TakeoverRequest& request) const {
     if (!EncodeTakeover(request, body)) {
         return Refused<uint32_t>();
     }
-    return Write("/v1/rooms/" + request.code + "/takeover", std::move(body), 200, ReadTtl);
+    return Write(kSignLabel, "/v1/rooms/" + request.code + "/takeover", std::move(body), 200, ReadTtl);
 }
 
 Answer<uint32_t> Client::Delist(const DelistRequest& request) const {
@@ -1144,7 +1253,27 @@ Answer<uint32_t> Client::Delist(const DelistRequest& request) const {
     if (!EncodeDelist(request, body)) {
         return Refused<uint32_t>();
     }
-    return Write("/v1/rooms/" + request.code + "/delist", std::move(body), 200, ReadTtlZero);
+    return Write(kSignLabel, "/v1/rooms/" + request.code + "/delist", std::move(body), 200, ReadTtlZero);
+}
+
+Answer<uint32_t> Client::SendFriendRequest(std::string_view toKey, std::string_view fromKey,
+                                           std::string_view name) const {
+    std::string body;
+    // Nobody befriends their own key: the directory would answer bad_field (CONTRACT.md §5.10).
+    if (!IsHostKey(toKey) || toKey == fromKey || !EncodeFriendRequest(fromKey, name, body)) {
+        return Refused<uint32_t>();
+    }
+    return Write(kFriendLabel, "/v1/friends/" + std::string(toKey) + "/requests", std::move(body), 201,
+                 ReadFriendTtl);
+}
+
+Answer<std::vector<FriendRequestEntry>> Client::CollectFriendRequests(std::string_view key, uint64_t expires) const {
+    std::string body;
+    if (!IsHostKey(key) || !EncodeFriendCollect(expires, body)) {
+        return Refused<std::vector<FriendRequestEntry>>();
+    }
+    return Write(kFriendLabel, "/v1/friends/" + std::string(key) + "/inbox", std::move(body), 200,
+                 ReadFriendRequests);
 }
 
 Answer<std::optional<Record>> Client::Lookup(std::string_view code) const {
@@ -1178,9 +1307,14 @@ Answer<std::vector<Record>> Client::HostRooms(std::string_view hostKey, uint16_t
     return Finish(Exchange(transport_, bases_, false, "GET", ProtocolQuery(path, protocol), "", 200), ReadRoomList);
 }
 
-Answer<TurnGrant> Client::TurnCredentials() const {
-    // Nothing is written, so nothing is signed, and a 5xx moves on to the next base as a read's does (§5.9).
-    return Finish(Exchange(transport_, bases_, false, "POST", "/v1/turn", "{}", 200), ReadTurnGrant);
+Answer<TurnGrant> Client::TurnCredentials(const RelayTicket& ticket) const {
+    // The host signed the ticket, so this client's own signer plays no part. No room changes, so a 5xx moves on to
+    // the next base as a read's does (§5.9).
+    std::string body;
+    if (!EncodeRelayTicket(ticket.code, ticket.expires, body) || !AppendSignature(body, ticket.sig)) {
+        return Refused<TurnGrant>();
+    }
+    return Finish(Exchange(transport_, bases_, false, "POST", "/v1/turn", body, 200), ReadTurnGrant);
 }
 
 }  // namespace gdx::net::directory

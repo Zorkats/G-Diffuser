@@ -118,6 +118,8 @@ void SetCustomTracks(bool on);
 void SetLastPlacePicks(bool on);
 // CPUs fill the grid slots the humans leave free (D2).
 void SetCpuFill(bool on);
+// The room's race rules, from its RULES page. The room refuses them from the lock-in to the end of the race.
+void SetRules(const gdx::net::lobby::RaceRules& rules);
 void Kick(uint8_t id);
 // Removes the player and refuses their friend key for the rest of the room (O7.3). A player who joined without a
 // key is only removed.

@@ -37,6 +37,35 @@ extern "C" {
 #define GDX_NET_ROOM_TRACK_CUSTOM 0xFD /* a racer's own track: its identity and title stand beside it */
 #define GDX_NET_ROOM_TRACK_ID_BYTES 32 /* a custom track's identity, the SHA-256 of its content bytes */
 #define GDX_NET_ROOM_TITLE_BYTES 21    /* a custom track's title, 1 to 20 printable bytes, and its NUL */
+/* The 64DD courses a room races beside the 24 stock ones, numbered as the game numbers them. */
+#define GDX_NET_ROOM_DISK_TRACK_FIRST 30
+#define GDX_NET_ROOM_DISK_TRACK_END 42
+
+/* GdxNetRoomRules.contactDamage */
+#define GDX_NET_ROOM_CONTACT_NORMAL 0
+#define GDX_NET_ROOM_CONTACT_HALF 1
+#define GDX_NET_ROOM_CONTACT_OFF 2 /* attacks still push */
+/* The limits of the rules (net::lobby, gdx_net_lobby.h). */
+#define GDX_NET_ROOM_LAPS_MAX 99
+#define GDX_NET_ROOM_BOOST_FRAMES_MAX 100000
+#define GDX_NET_ROOM_MAGNET_RANGE_MIN 10.0f
+#define GDX_NET_ROOM_MAGNET_RANGE_MAX 200.0f
+#define GDX_NET_ROOM_MAGNET_STRENGTH_MIN 0.25f
+#define GDX_NET_ROOM_MAGNET_STRENGTH_MAX 3.0f
+#define GDX_NET_ROOM_ENGINE_FIXED 50 /* the engine setting of a room that fixes it, in percent */
+
+/* What a room's races run on: the rows of its RULES page. */
+typedef struct GdxNetRoomRules {
+    int laps;          /* 1 to GDX_NET_ROOM_LAPS_MAX */
+    int contactDamage; /* GDX_NET_ROOM_CONTACT_* */
+    int shield;
+    int engineFixed;   /* every racer locks in GDX_NET_ROOM_ENGINE_FIXED */
+    int boostFrames;   /* 0 for the stock boost */
+    int lavaNoKill;
+    float magnetRange;
+    float magnetStrength;
+    int ignoreTrackSettings;
+} GdxNetRoomRules;
 
 #define GDX_NET_ROOM_CODE_CHARS 6   /* a room code, "ABC-DEF" on screen */
 #define GDX_NET_ROOM_CODE_BYTES 8   /* "ABC-DEF" and its NUL */
@@ -110,7 +139,7 @@ typedef struct GdxNetRoomPlayer {
 
 typedef struct GdxNetRoomBallot {
     unsigned char id;
-    unsigned char track; /* 0 to 23, GDX_NET_ROOM_TRACK_RANDOM or GDX_NET_ROOM_TRACK_CUSTOM */
+    unsigned char track; /* a course, GDX_NET_ROOM_TRACK_RANDOM or GDX_NET_ROOM_TRACK_CUSTOM */
     /* When track is GDX_NET_ROOM_TRACK_CUSTOM: the voter's track. Zero and empty otherwise. */
     unsigned char custom[GDX_NET_ROOM_TRACK_ID_BYTES];
     char title[GDX_NET_ROOM_TITLE_BYTES];
@@ -186,8 +215,9 @@ typedef struct GdxNetRoomView {
     int customTracks; /* the host's switch: racers may vote for and pick custom tracks */
     int lastPlacePicks; /* the host's course choice: 0 the racers vote, 1 last place picks */
     int cpuFill;      /* the host's switch: CPUs take the grid slots the humans leave free */
+    GdxNetRoomRules rules; /* what the next race runs on */
     int successor;    /* the next host's id, or GDX_NET_ROOM_NOBODY */
-    unsigned pool;    /* bit n set: track n can be voted, picked or drawn */
+    unsigned long long pool; /* bit n set: course n can be voted, picked or drawn */
     int track;     /* the track of the race being set up or run, or GDX_NET_ROOM_TRACK_NONE */
     /* When track is GDX_NET_ROOM_TRACK_CUSTOM: its identity and title, and this copy's download of it. */
     unsigned char trackId[GDX_NET_ROOM_TRACK_ID_BYTES];
@@ -281,8 +311,9 @@ int gdx_lan_room_handing_over(char* next, int size);
 /* The player's own actions. The room decides; the answer shows in a later view. */
 void gdx_lan_room_ready(int ready);
 void gdx_lan_room_race_next(int raceNext);
-/* A ballot in the vote, or the pick of the racer who picks. track is 0 to 23 or GDX_NET_ROOM_TRACK_RANDOM;
- * anything else is ignored. */
+/* A ballot in the vote, or the pick of the racer who picks. track is a stock course, 0 to 23, a 64DD one,
+ * GDX_NET_ROOM_DISK_TRACK_FIRST to GDX_NET_ROOM_DISK_TRACK_END - 1, or GDX_NET_ROOM_TRACK_RANDOM; anything
+ * else is ignored. */
 void gdx_lan_room_vote(int track);
 void gdx_lan_room_pick(int track);
 /* The same for a track of this copy's own, when the room takes custom tracks. id is its identity,
@@ -309,6 +340,8 @@ void gdx_lan_room_racer_cap(int cap);
 void gdx_lan_room_custom_tracks(int on);
 void gdx_lan_room_last_place_picks(int on);
 void gdx_lan_room_cpu_fill(int on);
+/* The RULES page. Values outside their limits are clamped; the room refuses a change from the lock-in on. */
+void gdx_lan_room_set_rules(const GdxNetRoomRules* rules);
 void gdx_lan_room_kick(int id);
 /* Removes the player and refuses their friend key for the rest of the room (O7.3). */
 void gdx_lan_room_ban(int id);
@@ -318,7 +351,7 @@ void gdx_lan_room_skip_lottery(void);
  * the results' timer ends. */
 void gdx_lan_room_end_series(void);
 
-/* A track's name as the room screens show it, "Mute City". track is 0 to 23 or one of the two special values. */
+/* A track's name as the room screens show it, "Mute City". track is a course or one of the two special values. */
 void gdx_lan_room_track_name(int track, char* out, int size);
 
 /* ---- Friends (O7.4) ----
@@ -366,6 +399,32 @@ int gdx_lan_room_met_name(int index, char* out, int size);
 /* 1 when that player is on the friend list under that name. */
 int gdx_lan_room_met_listed(int index);
 int gdx_lan_room_met_add(int index);
+
+/* ---- Friend requests (gnet-directory CONTRACT.md 5.10, 5.11) ----
+ *
+ * Adding a friend by code or from the last room asks them to add this copy back: the request waits in their
+ * mailbox on the directory for up to 14 days. Collecting empties this profile's own mailbox into a list kept for
+ * the session. Requests from players already on the friend list are not shown. Indexes count from the oldest. */
+
+#define GDX_NET_ROOM_MAIL_IDLE 0   /* nothing asked yet this session */
+#define GDX_NET_ROOM_MAIL_ASKING 1 /* a collect is under way: the list does not change until it answers */
+#define GDX_NET_ROOM_MAIL_READY 2
+#define GDX_NET_ROOM_MAIL_FAILED 3 /* text says why */
+#define GDX_NET_ROOM_REQUESTS_MAX 40
+
+/* 1 when a collect was sent. 0 when one is under way, or no directory or profile is set; the state says which. */
+int gdx_lan_room_requests_collect(void);
+/* One of GDX_NET_ROOM_MAIL_*. text gets the failure, or "" (it may be NULL). */
+int gdx_lan_room_requests_state(char* text, int size);
+int gdx_lan_room_request_count(void);
+/* 0 for an index outside the list. */
+int gdx_lan_room_request_name(int index, char* out, int size);
+int gdx_lan_room_request_code(int index, char* out, int size);
+/* Adds the sender as a friend under the name they sent, and takes the request off the list. One of
+ * GDX_NET_ROOM_FRIEND_*: GONE for an index outside the list. */
+int gdx_lan_room_request_accept(int index);
+/* Takes the request off the list; the sender is not told. 1 when there was one. */
+int gdx_lan_room_request_decline(int index);
 
 /* The system clipboard, for a friend code. 0 when it could not be set, or holds no text. */
 int gdx_lan_room_clipboard_set(const char* text);

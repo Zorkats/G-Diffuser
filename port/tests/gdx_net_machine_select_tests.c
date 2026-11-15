@@ -56,7 +56,7 @@ void gdx_menu_request_close(void) {
     sCloseRequests++;
 }
 
-void gdx_lan_race_capture_rules(void) {
+void gdx_lan_race_capture_cpu(void) {
     sRuleCaptures++;
 }
 
@@ -179,6 +179,57 @@ static void test_custom_track(void) {
     CHECK(gdx_net_machine_select_poll_open() == 1);
     CHECK(gdx_net_machine_select_track() == 3);
     CHECK(gdx_net_machine_select_track_title() == NULL);
+}
+
+/* The twelve 64DD courses race in every room; the numbers around them are not courses. */
+static void test_disk_courses(void) {
+    static const int kTracks[] = { 30, 35, 36, 41 };
+    static const int kRefused[] = { 24, 29, 42, 47, -1 };
+    size_t i;
+
+    for (i = 0; i < sizeof(kTracks) / sizeof(kTracks[0]); i++) {
+        reset_counts();
+        room_lock_in(120u + (unsigned) i);
+        sFakeRoom.track = kTracks[i];
+        CHECK(gdx_net_lock_in_course_ok(kTracks[i]) == 1);
+        CHECK(gdx_net_machine_select_poll_open() == 1);
+        CHECK(gdx_net_machine_select_track() == kTracks[i]);
+        CHECK(gdx_net_machine_select_track_title() == NULL);
+    }
+    for (i = 0; i < sizeof(kRefused) / sizeof(kRefused[0]); i++) {
+        reset_counts();
+        room_lock_in(130u + (unsigned) i);
+        sFakeRoom.track = kRefused[i];
+        CHECK(gdx_net_lock_in_course_ok(kRefused[i]) == 0);
+        CHECK(gdx_net_machine_select_poll_open() == 0);
+    }
+}
+
+/* A room whose rules fix the engine setting: the screen says so, and the lock carries 50 whatever the
+ * slider read. */
+static void test_engine_rule(void) {
+    reset_counts();
+    room_lock_in(140u);
+    CHECK(gdx_net_machine_select_engine_fixed() == 0); /* no screen yet */
+    sFakeRoom.engineFixed = 1;
+    CHECK(gdx_net_machine_select_poll_open() == 1);
+    CHECK(gdx_net_machine_select_engine_fixed() == 1);
+    gdx_net_machine_select_confirm(7, 2, 0.9f);
+    CHECK(sSends == 1 && sSentMachine == 7 && sSentSkin == 2 && sSentEngine == 50);
+
+    /* The free setting sends the slider's own. */
+    reset_counts();
+    room_lock_in(141u);
+    CHECK(gdx_net_machine_select_poll_open() == 1);
+    CHECK(gdx_net_machine_select_engine_fixed() == 0);
+    gdx_net_machine_select_confirm(7, 2, 0.9f);
+    CHECK(sSends == 1 && sSentEngine == 90);
+
+    /* Out of the room the race's own setting is free again. */
+    memset(&sFakeRoom, 0, sizeof(sFakeRoom));
+    sFakeRoom.engineFixed = 1;
+    CHECK(gdx_net_machine_select_should_leave() == 1);
+    CHECK(gdx_net_machine_select_engine_fixed() == 0);
 }
 
 /* The main menu only runs when the screen is not up, so its poll records that. */
@@ -464,7 +515,8 @@ static void test_status_text_of_a_lock_the_room_holds(void) {
     CHECK(strcmp(gdx_net_machine_select_status_text(), "0:30  3 OF 5") == 0);
 }
 
-/* The host's driving options become the rules of the race when its lock-in screen opens, and only then. */
+/* The host's CPU tuning is read for the race when its lock-in screen opens, and only then. The rules come
+ * from the room's RULES page instead. */
 static void test_rules_are_read_when_the_screen_opens(void) {
     reset_counts();
     memset(&sFakeRoom, 0, sizeof(sFakeRoom));
@@ -538,6 +590,8 @@ int main(void) {
     test_screen_text_follows_the_room();
     test_status_text_of_a_lock_the_room_holds();
     test_rules_are_read_when_the_screen_opens();
+    test_disk_courses();
+    test_engine_rule();
     test_goes_on_to_the_race();
     test_waits_for_the_grid();
     if (sFailures != 0) {

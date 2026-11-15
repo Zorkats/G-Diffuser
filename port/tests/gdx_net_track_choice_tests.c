@@ -601,11 +601,13 @@ static void test_allowed_and_confirm(void) {
     gdx_net_track_choice_update();
     CHECK(gdx_net_track_choice_allowed(23) == 1 && gdx_net_track_choice_allowed(22) == 0);
     CHECK(gdx_net_track_choice_allowed(0) == 0);
-    /* The pool's bits past the last stock track name no track. */
+    /* The pool's bits of the Edit Cup's courses name no track; 30 and 31 are 64DD courses. */
     sFake.pool = 0xFFFFFFFFu;
     gdx_net_track_choice_update();
     CHECK(gdx_net_track_choice_allowed(23) == 1);
-    CHECK(gdx_net_track_choice_allowed(24) == 0 && gdx_net_track_choice_allowed(31) == 0);
+    CHECK(gdx_net_track_choice_allowed(24) == 0 && gdx_net_track_choice_allowed(29) == 0);
+    CHECK(gdx_net_track_choice_allowed(30) == 1 && gdx_net_track_choice_allowed(31) == 1 &&
+          gdx_net_track_choice_allowed(32) == 0);
     sFake.pool = 1u << 23;
     gdx_net_track_choice_update();
 
@@ -1102,6 +1104,20 @@ static void test_custom_tracks(void) {
     CHECK(counts_are(kEditCup, 0));
     at(0, -1);
     CHECK(counts_are(kStockCup, -1));
+    /* The other copy's track counts in no cup, so the line of the votes so far names it, on every cup. */
+    CHECK(small_text_is(160, 232, "4 OF 4 VOTED. 1 FOR A TRACK YOU LACK", GDX_NET_ROOM_COLOUR_WHITE,
+                        GDX_NET_ROOM_ALIGN_CENTRE));
+    at(GDX_NET_TRACK_CHOICE_EDIT_CUP, -1);
+    CHECK(has_text("4 OF 4 VOTED. 1 FOR A TRACK YOU LACK"));
+    set_custom(&sFake.ballots[1], 2, 0xB1, "Another One");
+    gdx_net_track_choice_update();
+    CHECK(has_text("4 OF 4 VOTED. 2 FOR TRACKS YOU LACK"));
+    set_custom(&sFake.ballots[1], 2, 0xA1, "My Loop");
+    set_custom(&sFake.ballots[2], 3, 0xA1, "My Loop");
+    gdx_net_track_choice_update();
+    CHECK(has_text("4 OF 4 VOTED") && !has_text("4 OF 4 VOTED. 1 FOR A TRACK YOU LACK"));
+    set_custom(&sFake.ballots[2], 3, 0xB0, "Their Track");
+    at(0, -1);
 
     /* The lottery drew this copy's track: the screen turns to its Edit Cup slot and marks it. */
     sFake.phase = GDX_NET_ROOM_PHASE_LOTTERY;
@@ -1202,6 +1218,75 @@ static void test_texts_fit(void) {
     }
 }
 
+/* The two 64DD cups (protocol 13): their tracks can be chosen when the pool has them, each place counts its
+ * own six tracks, and a 64DD track the lottery draws shows the votes of its own cup. */
+static void test_disk_cups(void) {
+    static const unsigned long long kAll = 0xFFFFFFull | (0xFFFull << GDX_NET_ROOM_DISK_TRACK_FIRST);
+    static const char* const kFirstDisk[6] = { "0", "0", "1", "0", "0", "0" };
+    static const char* const kSecondDisk[6] = { "0", "0", "0", "0", "0", "2" };
+    static const char* const kNone[6] = { "0", "0", "0", "0", "0", "0" };
+
+    CHECK(GDX_NET_TRACK_CHOICE_DD_1_TRACK == GDX_NET_ROOM_DISK_TRACK_FIRST &&
+          GDX_NET_TRACK_CHOICE_DD_2_TRACK + 6 == GDX_NET_ROOM_DISK_TRACK_END);
+    open_vote();
+    sFake.pool = kAll;
+    gdx_net_track_choice_update();
+    CHECK(gdx_net_track_choice_allowed(30) == 1 && gdx_net_track_choice_allowed(41) == 1);
+    CHECK(gdx_net_track_choice_allowed(29) == 0 && gdx_net_track_choice_allowed(42) == 0 &&
+          gdx_net_track_choice_allowed(48) == 0);
+    at(GDX_NET_TRACK_CHOICE_DD_1_CUP, 0);
+    CHECK(!has_text("THE ROOM DOES NOT RACE THIS TRACK"));
+    at(GDX_NET_TRACK_CHOICE_DD_2_CUP, 5);
+    CHECK(!has_text("THE ROOM DOES NOT RACE THIS TRACK"));
+
+    /* A pool of stock courses alone: the 64DD tracks are there but refused. */
+    sFake.pool = 0xFFFFFFull;
+    gdx_net_track_choice_update();
+    CHECK(gdx_net_track_choice_allowed(30) == 0 && gdx_net_track_choice_confirm(30) == 0);
+    at(GDX_NET_TRACK_CHOICE_DD_1_CUP, 0);
+    CHECK(small_text_is(160, 221, "THE ROOM DOES NOT RACE THIS TRACK", GDX_NET_ROOM_COLOUR_RED,
+                        GDX_NET_ROOM_ALIGN_CENTRE));
+    CHECK(sVoteCalls == 0);
+
+    /* A ballot for the third track of the first 64DD cup, and two for the last of the second. */
+    sFake.pool = kAll;
+    gdx_net_track_choice_update();
+    CHECK(gdx_net_track_choice_confirm(32) == 1 && sVoteCalls == 1);
+    sFake.players[1].voted = 1;
+    sFake.players[2].voted = 1;
+    sFake.players[3].voted = 1;
+    sFake.ballotCount = 3;
+    set_ballot(0, 1, 41);
+    set_ballot(1, 2, 32);
+    set_ballot(2, 3, 41);
+    gdx_net_track_choice_update();
+    at(GDX_NET_TRACK_CHOICE_DD_1_CUP, -1);
+    CHECK(has_text("3 OF 4 VOTED") && counts_are(kFirstDisk, 2));
+    at(GDX_NET_TRACK_CHOICE_DD_2_CUP, -1);
+    CHECK(counts_are(kSecondDisk, -1));
+    /* The first stock cup holds none of them. */
+    at(0, -1);
+    CHECK(counts_are(kNone, -1));
+
+    /* The lottery draws track 41: the votes shown are those of the second 64DD cup, the track marked. */
+    sFake.phase = GDX_NET_ROOM_PHASE_LOTTERY;
+    sFake.track = 41;
+    sFake.lotteryTrack = 41;
+    sFake.lotteryCount = 3;
+    set_lottery(0, 1, 41);
+    set_lottery(1, 2, 32);
+    set_lottery(2, 3, 41);
+    sFake.lotteryWinner = 0;
+    CHECK(gdx_net_track_choice_update() == GDX_NET_TRACK_CHOICE_SHOW);
+    CHECK(gdx_net_track_choice_shown_track() == 41);
+    at(0, 3);
+    {
+        static const char* const kDrawn[6] = { "0", "0", "0", "0", "0", "2" };
+
+        CHECK(has_text("THE BALLOT OF P01 WON") && counts_are(kDrawn, 5));
+    }
+}
+
 int main(void) {
     test_available();
     test_poll();
@@ -1213,6 +1298,7 @@ int main(void) {
     test_draw_wait();
     test_draw_show();
     test_custom_tracks();
+    test_disk_cups();
     test_texts_fit();
 
     if (sFailures != 0) {

@@ -11,6 +11,7 @@
 #include "../net/gdx_net_race.h"
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -1211,6 +1212,46 @@ void TestIntroClock() {
     CHECK(gdx_net_race_intro_catch_up(101, 99999) == 100 && gdx_net_race_intro_catch_up(99, 99999) == 40);
 }
 
+void TestEndHold() {
+    std::printf("end: the race stays on screen before the fade\n");
+    CHECK(GDX_NET_RACE_END_HOLD_FRAMES == 180); // 3 s at 60 frames a second
+    CHECK(gdx_net_race_end_holds(1, 1, 1, 0) == 1 && gdx_net_race_end_holds(1, 1, 1, 179) == 1);
+    CHECK(gdx_net_race_end_holds(1, 1, 1, 180) == 0 && gdx_net_race_end_holds(1, 1, 1, 100000) == 0);
+    CHECK(gdx_net_race_end_holds(1, 1, 1, -1) == 0);
+    CHECK(gdx_net_race_end_holds(0, 1, 1, 0) == 0); // the room closed
+    CHECK(gdx_net_race_end_holds(1, 0, 1, 0) == 0); // the room is on another race
+    CHECK(gdx_net_race_end_holds(1, 1, 0, 0) == 0); // off the grid: the host found our track different
+    int frames = 0;
+    while (gdx_net_race_end_holds(1, 1, 1, frames) && frames < 1000) {
+        frames++;
+    }
+    CHECK(frames == GDX_NET_RACE_END_HOLD_FRAMES);
+}
+
+void TestSpeedCap() {
+    std::printf("puppet: a pose faster than any machine is shown at the cap, same direction\n");
+    float fast[3] = { 600.0f, 0.0f, 800.0f }; // 1000 units a frame
+    CHECK(gdx_net_race_speed_cap(fast) == 1);
+    CHECK(std::fabs(fast[0] - 168.0f) < 0.01f && fast[1] == 0.0f && std::fabs(fast[2] - 224.0f) < 0.01f);
+    const float capped = std::sqrt(fast[0] * fast[0] + fast[1] * fast[1] + fast[2] * fast[2]);
+    CHECK(std::fabs(capped - GDX_NET_RACE_PUPPET_SPEED_MAX) < 0.01f);
+
+    float drive[3] = { 90.0f, -3.0f, 12.0f }; // about 1950 km/h: left as it is
+    CHECK(gdx_net_race_speed_cap(drive) == 0);
+    CHECK(drive[0] == 90.0f && drive[1] == -3.0f && drive[2] == 12.0f);
+    float edge[3] = { 0.0f, 0.0f, GDX_NET_RACE_PUPPET_SPEED_MAX };
+    CHECK(gdx_net_race_speed_cap(edge) == 0 && edge[2] == GDX_NET_RACE_PUPPET_SPEED_MAX);
+
+    float huge[3] = { FLT_MAX, FLT_MAX, -FLT_MAX }; // squares past a float
+    CHECK(gdx_net_race_speed_cap(huge) == 1);
+    CHECK(std::isfinite(huge[0]) && std::fabs(huge[0] - 161.66f) < 0.05f && huge[2] < 0.0f);
+    float nan[3] = { 1.0f, std::nanf(""), 1.0f };
+    CHECK(gdx_net_race_speed_cap(nan) == 1 && nan[0] == 0.0f && nan[1] == 0.0f && nan[2] == 0.0f);
+    float inf[3] = { INFINITY, 0.0f, 0.0f };
+    CHECK(gdx_net_race_speed_cap(inf) == 1 && inf[0] == 0.0f);
+    CHECK(gdx_net_race_speed_cap(nullptr) == 0);
+}
+
 // One copy of the game running the race intro the way Racer_Update does, on the host clock in
 // microseconds since the room's start time. It ticks every periodUs from firstUs on, believes the host
 // clock reads errorMs more than it does, and can stall once, when its timer holds stallAt.
@@ -1512,6 +1553,8 @@ int main() {
     TestGridBuilder();
     TestSlots();
     TestIntroClock();
+    TestEndHold();
+    TestSpeedCap();
     TestIntroTogether();
     TestRules();
     TestDigest();

@@ -43,8 +43,12 @@
 #define FRONT_ROWS_Y 58
 #define FRONT_TEXT_Y 182 /* under the tenth row of the front page */
 #define NOTE_Y 212       /* what the last press on a friend page did, two lines */
-#define FRIENDS_ROWS_Y 96
-#define FRIENDS_LIST_Y 156
+#define FRIENDS_ROWS_Y 92
+#define FRIENDS_LIST_Y 166
+#define FRIENDS_ROWS 5   /* COPY MY CODE, ADD BY CODE, ADD FROM THE LAST ROOM, FRIEND REQUESTS, BACK */
+#define REQUESTS_ROWS_Y 60
+#define REQUESTS_STATUS_Y 90
+#define REQUESTS_LIST_Y 104
 #define FRIEND_ROWS_Y 90
 #define FRIEND_STATUS_Y 132
 #define FRIEND_LIST_Y 146
@@ -114,11 +118,30 @@ enum {
     ROW_FIND_FRIEND,
     ROW_REMOVE_FRIEND,
     ROW_BAN,
+    ROW_RULES,
+    /* The rows of the RULES page, in their order. */
+    ROW_RULE_LAPS,
+    ROW_RULE_CONTACT,
+    ROW_RULE_SHIELD,
+    ROW_RULE_ENGINE,
+    ROW_RULE_BOOST,
+    ROW_RULE_LAVA,
+    ROW_RULE_MAGNET_RANGE,
+    ROW_RULE_MAGNET_STRENGTH,
+    ROW_RULE_TRACK_SETTINGS,
+    ROW_REQUESTS,
+    ROW_CHECK_MAIL,
+    ROW_ACCEPT,
+    ROW_DECLINE,
+    ROW_FIXED_END, /* one past the last row above: the presets start at ROW_MSG */
     /* A message to send: ROW_MSG plus its place among the presets. */
     ROW_MSG = 60,
     /* A row of a list: ROW_LIST plus the room's place in the search, the player's id or the friend's place. */
     ROW_LIST = 100
 };
+
+/* The fixed rows must stay under the presets' ids, or a press on one would send a message. */
+typedef char RowIdsFit[ROW_FIXED_END <= ROW_MSG ? 1 : -1];
 
 typedef struct Row {
     int id;
@@ -145,6 +168,7 @@ static int sFriendCode[GDX_NET_ROOM_FRIEND_CODE_CHARS]; /* the friend code being
 static char sMyCode[GDX_NET_ROOM_FRIEND_CODE_BYTES];    /* the player's own, read when the friend list opens */
 static int sFriendIndex;       /* the friend of the friend page */
 static int sFriendRoomsOf = -1; /* the friend the directory was last asked about, or -1 */
+static int sRequestIndex;      /* the request of the request page */
 static char sNote[GDX_NET_ROOM_STATUS_BYTES]; /* what the last press on a friend page did */
 static int sNoteColour;
 static int sHostType = GDX_NET_ROOM_TYPE_LAN; /* the type HOST A ROOM hosts, left and right change it */
@@ -276,7 +300,13 @@ static int friend_rooms_shown(void) {
 
 static int friend_page(int page) {
     return page == GDX_NET_ROOM_PAGE_FRIENDS || page == GDX_NET_ROOM_PAGE_FRIEND_ADD ||
-           page == GDX_NET_ROOM_PAGE_FRIEND || page == GDX_NET_ROOM_PAGE_MET;
+           page == GDX_NET_ROOM_PAGE_FRIEND || page == GDX_NET_ROOM_PAGE_MET ||
+           page == GDX_NET_ROOM_PAGE_REQUESTS || page == GDX_NET_ROOM_PAGE_REQUEST;
+}
+
+/* 1 while a collect of the friend requests is out: the list does not change until it answers. */
+static int mail_asking(void) {
+    return gdx_lan_room_requests_state(NULL, 0) == GDX_NET_ROOM_MAIL_ASKING;
 }
 
 static void set_note(int colour, const char* text) {
@@ -291,6 +321,24 @@ static void add_row(int id, int enabled) {
         sRows[sRowCount].id = id;
         sRows[sRowCount].enabled = enabled;
         sRowCount++;
+    }
+}
+
+/* The host changes the rules up to the lock-in; from there to the end of the race the room refuses a change
+ * (net/gdx_net_room.h, SetRules). */
+static int rules_editable(void) {
+    if (sView.mode != GDX_NET_ROOM_MODE_HOSTING) {
+        return 0;
+    }
+    switch (sView.phase) {
+        case GDX_NET_ROOM_PHASE_LOBBY:
+        case GDX_NET_ROOM_PHASE_VOTING:
+        case GDX_NET_ROOM_PHASE_LOTTERY:
+        case GDX_NET_ROOM_PHASE_PICK:
+        case GDX_NET_ROOM_PHASE_RESULTS:
+            return 1;
+        default:
+            return 0;
     }
 }
 
@@ -393,7 +441,6 @@ static void build_rows(void) {
                         add_row(ROW_SEATS, 1);
                         add_row(ROW_COURSE, 1);
                         add_row(ROW_CUSTOM, 1);
-                        add_row(ROW_CPU_FILL, 1);
                         break;
                     case GDX_NET_ROOM_PHASE_LOTTERY:
                         add_row(ROW_SKIP, 1);
@@ -405,6 +452,7 @@ static void build_rows(void) {
                         break;
                 }
             }
+            add_row(ROW_RULES, 1);
             add_row(ROW_MESSAGE, 1);
             add_row(ROW_LEAVE, 1);
             /* The table's order first, then whoever is not in it. A line of a player who left stays, and the
@@ -432,6 +480,7 @@ static void build_rows(void) {
             add_row(ROW_COPY_CODE, sMyCode[0] != '\0');
             add_row(ROW_ADD_CODE, 1);
             add_row(ROW_ADD_MET, 1);
+            add_row(ROW_REQUESTS, sDirectoryOk);
             add_row(ROW_BACK, 1);
             place = gdx_lan_room_friend_count();
             for (i = 0; i < place && i < GDX_NET_ROOM_FRIENDS_MAX; i++) {
@@ -464,10 +513,36 @@ static void build_rows(void) {
             }
             add_row(ROW_BACK, 1);
             break;
+        case GDX_NET_ROOM_PAGE_REQUESTS:
+            /* A press while a collect is out is refused, and the rows stay where they are, as on the friend
+               page. */
+            add_row(ROW_CHECK_MAIL, sDirectoryOk);
+            add_row(ROW_BACK, 1);
+            place = gdx_lan_room_request_count();
+            for (i = 0; i < place && i < GDX_NET_ROOM_REQUESTS_MAX; i++) {
+                add_row(ROW_LIST + i, 1);
+            }
+            break;
+        case GDX_NET_ROOM_PAGE_REQUEST:
+            add_row(ROW_ACCEPT, 1);
+            add_row(ROW_DECLINE, 1);
+            add_row(ROW_BACK, 1);
+            break;
         case GDX_NET_ROOM_PAGE_MESSAGES:
             for (i = 0; i < GDX_NET_ROOM_MESSAGES; i++) {
                 add_row(ROW_MSG + i, 1);
             }
+            add_row(ROW_BACK, 1);
+            break;
+        case GDX_NET_ROOM_PAGE_RULES:
+            /* Everyone reads the rules; only the host's cursor stops on them, and only while they can change.
+               The CPU racers sit here too, so the host's room page keeps its rows for the player list; the
+               room takes that switch in the lobby only. */
+            for (i = ROW_RULE_LAPS; i <= ROW_RULE_TRACK_SETTINGS; i++) {
+                add_row(i, rules_editable());
+            }
+            add_row(ROW_CPU_FILL,
+                    sView.mode == GDX_NET_ROOM_MODE_HOSTING && sView.phase == GDX_NET_ROOM_PHASE_LOBBY);
             add_row(ROW_BACK, 1);
             break;
         default:
@@ -503,9 +578,14 @@ static void list_geometry(int* first, int* count, int* y, int* visible) {
         *visible = (LIST_BOTTOM - *y) / LIST_STEP + 1;
     } else if (sPage == GDX_NET_ROOM_PAGE_FRIENDS || sPage == GDX_NET_ROOM_PAGE_FRIEND) {
         /* The page's rows, then the list under them. */
-        *first = sPage == GDX_NET_ROOM_PAGE_FRIENDS ? 4 : 3;
+        *first = sPage == GDX_NET_ROOM_PAGE_FRIENDS ? FRIENDS_ROWS : 3;
         *count = sRowCount - *first;
         *y = sPage == GDX_NET_ROOM_PAGE_FRIENDS ? FRIENDS_LIST_Y : FRIEND_LIST_Y;
+        *visible = (LIST_BOTTOM - *y) / LIST_STEP + 1;
+    } else if (sPage == GDX_NET_ROOM_PAGE_REQUESTS) {
+        *first = 2; /* "CHECK AGAIN" and "BACK" come first */
+        *count = sRowCount - *first;
+        *y = REQUESTS_LIST_Y;
         *visible = (LIST_BOTTOM - *y) / LIST_STEP + 1;
     } else if (sPage == GDX_NET_ROOM_PAGE_MET) {
         *count = sRowCount - 1; /* "BACK" follows the list */
@@ -610,6 +690,9 @@ static void sync(void) {
             if (page == GDX_NET_ROOM_PAGE_FRIEND && sFriendIndex >= gdx_lan_room_friend_count()) {
                 page = GDX_NET_ROOM_PAGE_FRIENDS;
             }
+            if (page == GDX_NET_ROOM_PAGE_REQUEST && sRequestIndex >= gdx_lan_room_request_count()) {
+                page = GDX_NET_ROOM_PAGE_REQUESTS;
+            }
             /* Nothing leaves this copy before the player has read what will (ODD 10). */
             if (page == GDX_NET_ROOM_PAGE_FRONT && sProfileOk && !gdx_lan_room_notice_seen()) {
                 page = GDX_NET_ROOM_PAGE_NOTICE;
@@ -630,7 +713,7 @@ static void sync(void) {
                 if (player_by_id(sPlayerId) == NULL || sPlayerId == sView.localId) {
                     page = GDX_NET_ROOM_PAGE_ROOM;
                 }
-            } else if (page != GDX_NET_ROOM_PAGE_MESSAGES) {
+            } else if (page != GDX_NET_ROOM_PAGE_MESSAGES && page != GDX_NET_ROOM_PAGE_RULES) {
                 page = GDX_NET_ROOM_PAGE_ROOM;
             }
             break;
@@ -1019,6 +1102,198 @@ static void remove_friend(void) {
     sSound = GDX_NET_ROOM_SOUND_BACK;
 }
 
+/* FRIEND REQUESTS and CHECK AGAIN: empty this profile's mailbox into the page's list. */
+static void collect_requests(void) {
+    if (!gdx_lan_room_requests_collect()) {
+        sSound = GDX_NET_ROOM_SOUND_REFUSE;
+    }
+}
+
+/* After an answer to a request: back on the list, on the request that took its place, or the one before. */
+static void requests_after_answer(void) {
+    const int count = gdx_lan_room_request_count();
+
+    go(GDX_NET_ROOM_PAGE_REQUESTS,
+       count == 0 ? ROW_BACK : ROW_LIST + (sRequestIndex < count ? sRequestIndex : count - 1));
+}
+
+/* ADD TO FRIENDS: the sender onto the list under the name they sent. */
+static void accept_request(void) {
+    char name[GDX_NET_ROOM_NAME_BYTES];
+    int result;
+
+    gdx_lan_room_request_name(sRequestIndex, name, (int) sizeof(name));
+    result = gdx_lan_room_request_accept(sRequestIndex);
+    if (result != GDX_NET_ROOM_FRIEND_ADDED && result != GDX_NET_ROOM_FRIEND_RENAMED &&
+        result != GDX_NET_ROOM_FRIEND_LISTED) {
+        friend_add_note(result, name);
+        return;
+    }
+    requests_after_answer();
+    friend_add_note(result, name);
+}
+
+/* DECLINE, the second press: the request is off the list, and the sender is not told. */
+static void decline_request(void) {
+    char name[GDX_NET_ROOM_NAME_BYTES];
+    char text[GDX_NET_ROOM_STATUS_BYTES];
+
+    gdx_lan_room_request_name(sRequestIndex, name, (int) sizeof(name));
+    if (!gdx_lan_room_request_decline(sRequestIndex)) {
+        sSound = GDX_NET_ROOM_SOUND_REFUSE;
+        return;
+    }
+    requests_after_answer();
+    snprintf(text, sizeof(text), "THE REQUEST FROM %s IS DECLINED.", name);
+    set_note(GDX_NET_ROOM_COLOUR_WHITE, text);
+    sSound = GDX_NET_ROOM_SOUND_BACK;
+}
+
+/* The rules page's limits and steps (net::lobby). Boost is stock or a length the menu offers. */
+#define RULE_BOOST_STEP 10
+#define RULE_BOOST_MAX 600
+#define RULE_MAGNET_RANGE_STEP 5
+#define RULE_MAGNET_STRENGTH_STEP 5 /* hundredths */
+
+static int clamp_int(int value, int low, int high) {
+    return value < low ? low : value > high ? high : value;
+}
+
+/* A rule row moved one step: direction 1 or -1. A choice wraps when wrap is set; a number stops at its ends.
+ * Returns 1 when the room was asked for the change. */
+static int rule_step(int row, int direction, int wrap) {
+    GdxNetRoomRules rules = sView.rules;
+    int value;
+
+    if (!rules_editable()) {
+        return 0;
+    }
+    switch (row) {
+        case ROW_RULE_LAPS:
+            if (wrap) {
+                return 0; /* a number: left and right */
+            }
+            rules.laps = clamp_int(rules.laps + direction, 1, GDX_NET_ROOM_LAPS_MAX);
+            break;
+        case ROW_RULE_CONTACT:
+            value = rules.contactDamage + direction;
+            if (value < GDX_NET_ROOM_CONTACT_NORMAL || value > GDX_NET_ROOM_CONTACT_OFF) {
+                if (!wrap) {
+                    return 0;
+                }
+                value = value < GDX_NET_ROOM_CONTACT_NORMAL ? GDX_NET_ROOM_CONTACT_OFF : GDX_NET_ROOM_CONTACT_NORMAL;
+            }
+            rules.contactDamage = value;
+            break;
+        case ROW_RULE_SHIELD:
+            rules.shield = wrap ? !rules.shield : direction > 0;
+            break;
+        case ROW_RULE_ENGINE:
+            rules.engineFixed = wrap ? !rules.engineFixed : direction > 0;
+            break;
+        case ROW_RULE_LAVA:
+            rules.lavaNoKill = wrap ? !rules.lavaNoKill : direction > 0;
+            break;
+        case ROW_RULE_TRACK_SETTINGS:
+            rules.ignoreTrackSettings = wrap ? !rules.ignoreTrackSettings : direction > 0;
+            break;
+        case ROW_RULE_BOOST:
+            if (wrap) {
+                return 0;
+            }
+            /* STOCK, then 10 to 600 frames in steps of 10. A length off the steps, from the host's own menu,
+               moves to the step next to it. */
+            value = rules.boostFrames <= 0 ? 0 : rules.boostFrames;
+            if (direction > 0) {
+                value = (value / RULE_BOOST_STEP + 1) * RULE_BOOST_STEP;
+            } else {
+                value = ((value + RULE_BOOST_STEP - 1) / RULE_BOOST_STEP - 1) * RULE_BOOST_STEP;
+            }
+            if (value > RULE_BOOST_MAX && direction > 0) {
+                value = rules.boostFrames > RULE_BOOST_MAX ? rules.boostFrames : RULE_BOOST_MAX;
+            }
+            rules.boostFrames = value < 0 ? 0 : value;
+            break;
+        case ROW_RULE_MAGNET_RANGE:
+            if (wrap) {
+                return 0;
+            }
+            value = (int) (rules.magnetRange + 0.5f) + direction * RULE_MAGNET_RANGE_STEP;
+            value = clamp_int(value, (int) GDX_NET_ROOM_MAGNET_RANGE_MIN, (int) GDX_NET_ROOM_MAGNET_RANGE_MAX);
+            rules.magnetRange = (float) value;
+            break;
+        case ROW_RULE_MAGNET_STRENGTH:
+            if (wrap) {
+                return 0;
+            }
+            value = (int) (rules.magnetStrength * 100.0f + 0.5f) + direction * RULE_MAGNET_STRENGTH_STEP;
+            value = clamp_int(value, (int) (GDX_NET_ROOM_MAGNET_STRENGTH_MIN * 100.0f + 0.5f),
+                              (int) (GDX_NET_ROOM_MAGNET_STRENGTH_MAX * 100.0f + 0.5f));
+            rules.magnetStrength = (float) value / 100.0f;
+            break;
+        default:
+            return 0;
+    }
+    if (memcmp(&rules, &sView.rules, sizeof(rules)) == 0) {
+        return 0;
+    }
+    gdx_lan_room_set_rules(&rules);
+    return 1;
+}
+
+/* What a rule row shows after its label. */
+static void rule_value(int row, char* out, int bytes) {
+    const GdxNetRoomRules* rules = &sView.rules;
+    const int strength = (int) (rules->magnetStrength * 100.0f + 0.5f);
+
+    switch (row) {
+        case ROW_RULE_LAPS:
+            snprintf(out, (size_t) bytes, "%d", rules->laps);
+            break;
+        case ROW_RULE_CONTACT:
+            snprintf(out, (size_t) bytes, "%s",
+                     rules->contactDamage == GDX_NET_ROOM_CONTACT_HALF  ? "HALF"
+                     : rules->contactDamage == GDX_NET_ROOM_CONTACT_OFF ? "OFF"
+                                                                       : "NORMAL");
+            break;
+        case ROW_RULE_SHIELD:
+            snprintf(out, (size_t) bytes, "%s", rules->shield ? "ON" : "OFF");
+            break;
+        case ROW_RULE_ENGINE:
+            if (rules->engineFixed) {
+                snprintf(out, (size_t) bytes, "FIXED %d", GDX_NET_ROOM_ENGINE_FIXED);
+            } else {
+                snprintf(out, (size_t) bytes, "FREE");
+            }
+            break;
+        case ROW_RULE_BOOST:
+            if (rules->boostFrames <= 0) {
+                snprintf(out, (size_t) bytes, "STOCK");
+            } else {
+                snprintf(out, (size_t) bytes, "%d FRAMES", rules->boostFrames);
+            }
+            break;
+        case ROW_RULE_LAVA:
+            snprintf(out, (size_t) bytes, "%s", rules->lavaNoKill ? "NO KILL" : "STOCK");
+            break;
+        case ROW_RULE_MAGNET_RANGE:
+            snprintf(out, (size_t) bytes, "%d", (int) (rules->magnetRange + 0.5f));
+            break;
+        case ROW_RULE_MAGNET_STRENGTH:
+            snprintf(out, (size_t) bytes, "%d.%02d", strength / 100, strength % 100);
+            break;
+        case ROW_RULE_TRACK_SETTINGS:
+            snprintf(out, (size_t) bytes, "%s", rules->ignoreTrackSettings ? "ON" : "OFF");
+            break;
+        case ROW_CPU_FILL:
+            snprintf(out, (size_t) bytes, "%s", sView.cpuFill ? "ON" : "OFF");
+            break;
+        default:
+            out[0] = '\0';
+            break;
+    }
+}
+
 static int back(void);
 
 static int confirm(void) {
@@ -1048,6 +1323,14 @@ static int confirm(void) {
         } else if (sPage == GDX_NET_ROOM_PAGE_FRIEND && friend_rooms_shown() && key < sView.listedCount) {
             if (!gdx_lan_room_join_listed(key, sView.listed[key].freeSeats == 0)) {
                 sSound = GDX_NET_ROOM_SOUND_REFUSE;
+            }
+        } else if (sPage == GDX_NET_ROOM_PAGE_REQUESTS && key < gdx_lan_room_request_count()) {
+            /* Not while a collect is out: its answer may move the request this row stands for. */
+            if (mail_asking()) {
+                sSound = GDX_NET_ROOM_SOUND_REFUSE;
+            } else {
+                sRequestIndex = key;
+                go(GDX_NET_ROOM_PAGE_REQUEST, ROW_ACCEPT);
             }
         } else if (sPage == GDX_NET_ROOM_PAGE_MET && key < gdx_lan_room_met_count()) {
             char name[GDX_NET_ROOM_NAME_BYTES];
@@ -1119,6 +1402,25 @@ static int confirm(void) {
             break;
         case ROW_ADD_MET:
             go(GDX_NET_ROOM_PAGE_MET, ROW_NONE);
+            break;
+        case ROW_REQUESTS:
+            go(GDX_NET_ROOM_PAGE_REQUESTS, ROW_NONE);
+            collect_requests();
+            break;
+        case ROW_CHECK_MAIL:
+            if (mail_asking()) {
+                sSound = GDX_NET_ROOM_SOUND_REFUSE;
+            } else {
+                collect_requests();
+            }
+            break;
+        case ROW_ACCEPT:
+            accept_request();
+            break;
+        case ROW_DECLINE:
+            if (second_press(ROW_DECLINE)) {
+                decline_request();
+            }
             break;
         case ROW_PASTE:
             paste_code();
@@ -1196,6 +1498,23 @@ static int confirm(void) {
             break;
         case ROW_CPU_FILL:
             gdx_lan_room_cpu_fill(!sView.cpuFill);
+            break;
+        case ROW_RULES:
+            go(GDX_NET_ROOM_PAGE_RULES, ROW_NONE);
+            break;
+        case ROW_RULE_LAPS:
+        case ROW_RULE_CONTACT:
+        case ROW_RULE_SHIELD:
+        case ROW_RULE_ENGINE:
+        case ROW_RULE_BOOST:
+        case ROW_RULE_LAVA:
+        case ROW_RULE_MAGNET_RANGE:
+        case ROW_RULE_MAGNET_STRENGTH:
+        case ROW_RULE_TRACK_SETTINGS:
+            /* A turns a choice to the next one; left and right change a number. */
+            if (!rule_step(sCursorId, 1, 1)) {
+                sSound = GDX_NET_ROOM_SOUND_NONE;
+            }
             break;
         case ROW_LEAVE:
             if (second_press(ROW_LEAVE)) {
@@ -1315,8 +1634,17 @@ static int back(void) {
         case GDX_NET_ROOM_PAGE_MET:
             go(GDX_NET_ROOM_PAGE_FRIENDS, ROW_ADD_MET);
             break;
+        case GDX_NET_ROOM_PAGE_REQUESTS:
+            go(GDX_NET_ROOM_PAGE_FRIENDS, ROW_REQUESTS);
+            break;
+        case GDX_NET_ROOM_PAGE_REQUEST:
+            go(GDX_NET_ROOM_PAGE_REQUESTS, ROW_LIST + sRequestIndex);
+            break;
         case GDX_NET_ROOM_PAGE_MESSAGES:
             go(GDX_NET_ROOM_PAGE_ROOM, ROW_MESSAGE);
+            break;
+        case GDX_NET_ROOM_PAGE_RULES:
+            go(GDX_NET_ROOM_PAGE_ROOM, ROW_RULES);
             break;
         default:
             gdx_lan_room_dismiss();
@@ -1395,6 +1723,12 @@ int gdx_net_room_screen_update(unsigned input) {
 
         if (on != sView.customTracks) {
             gdx_lan_room_custom_tracks(on);
+            sSound = GDX_NET_ROOM_SOUND_MOVE;
+        }
+    }
+    if ((input & (GDX_NET_ROOM_IN_LEFT | GDX_NET_ROOM_IN_RIGHT)) && sCursorId >= ROW_RULE_LAPS &&
+        sCursorId <= ROW_RULE_TRACK_SETTINGS) {
+        if (rule_step(sCursorId, (input & GDX_NET_ROOM_IN_RIGHT) ? 1 : -1, 0)) {
             sSound = GDX_NET_ROOM_SOUND_MOVE;
         }
     }
@@ -1583,6 +1917,26 @@ static const char* row_label(int id) {
             return "CUSTOM TRACKS";
         case ROW_CPU_FILL:
             return "CPU RACERS";
+        case ROW_RULES:
+            return "RACE RULES";
+        case ROW_RULE_LAPS:
+            return "LAPS";
+        case ROW_RULE_CONTACT:
+            return "CONTACT DAMAGE";
+        case ROW_RULE_SHIELD:
+            return "SHIELD";
+        case ROW_RULE_ENGINE:
+            return "ENGINE SETTING";
+        case ROW_RULE_BOOST:
+            return "BOOST LENGTH";
+        case ROW_RULE_LAVA:
+            return "LAVA";
+        case ROW_RULE_MAGNET_RANGE:
+            return "MAGNET RANGE";
+        case ROW_RULE_MAGNET_STRENGTH:
+            return "MAGNET STRENGTH";
+        case ROW_RULE_TRACK_SETTINGS:
+            return "IGNORE TRACK SETTINGS";
         case ROW_LEAVE:
             if (sArmed == ROW_LEAVE) {
                 return host ? "PRESS A AGAIN TO CLOSE THE ROOM" : "PRESS A AGAIN TO LEAVE THE ROOM";
@@ -1618,6 +1972,14 @@ static const char* row_label(int id) {
             return "FIND THEIR ROOMS";
         case ROW_REMOVE_FRIEND:
             return sArmed == ROW_REMOVE_FRIEND ? "PRESS A AGAIN TO REMOVE" : "REMOVE FROM FRIENDS";
+        case ROW_REQUESTS:
+            return "FRIEND REQUESTS";
+        case ROW_CHECK_MAIL:
+            return "CHECK AGAIN";
+        case ROW_ACCEPT:
+            return "ADD TO FRIENDS";
+        case ROW_DECLINE:
+            return sArmed == ROW_DECLINE ? "PRESS A AGAIN TO DECLINE" : "DECLINE";
         case ROW_SAVE_TRACK:
             switch (gdx_net_track_save_state(&sView)) {
                 case GDX_NET_TRACK_SAVE_SAVING:
@@ -1877,9 +2239,9 @@ static void format_address(unsigned ip, unsigned port, char* out, int size) {
 static const char kNotice[] =
     "A ROOM GETS YOUR PROFILE NAME AND COLOUR AND MACHINE AND FRIEND CODE AND YOUR MESSAGES. ITS HOST CAN BAN "
     "YOUR FRIEND CODE. THE HOST AND PLAYERS ON YOUR NETWORK SEE YOUR IP ADDRESS. THE WHOLE ROOM DOES IF YOU ARE "
-    "NEXT TO HOST OR HAVE DIRECT LINKS ON IN ONLINE SETTINGS. OPEN AND CODE AND FRIENDS ROOMS USE A CLOUDFLARE "
-    "RELAY AND ARE LISTED IN THE ROOM DIRECTORY WITH THE ADDRESS AND FRIEND CODE OF THEIR HOST. YOUR FRIEND CODE "
-    "IS THE PUBLIC HALF OF YOUR PROFILE KEY. NOTHING IS SENT BEFORE YOU HOST OR SEARCH OR JOIN.";
+    "NEXT TO HOST OR HAVE DIRECT LINKS ON IN ONLINE SETTINGS. ONLINE ROOMS USE A CLOUDFLARE RELAY AND ARE LISTED "
+    "IN THE ROOM DIRECTORY WITH THE ADDRESS AND FRIEND CODE OF THEIR HOST. YOUR FRIEND CODE IS YOUR PUBLIC KEY. A "
+    "FRIEND YOU ADD GETS IT AND YOUR NAME THERE. NOTHING IS SENT UNTIL YOU HOST OR JOIN OR SEARCH OR ADD A FRIEND.";
 
 #define NOTICE_Y 58
 #define NOTICE_LINES 14
@@ -2080,7 +2442,8 @@ static void draw_found(void) {
     }
     put_title(room->hostName);
     format_address(room->ip, room->port, address, (int) sizeof(address));
-    snprintf(text, sizeof(text), "ADDRESS %s", address);
+    /* The line has 39 places after "ADDRESS ": a longer IPv6 address loses its end. */
+    snprintf(text, sizeof(text), "ADDRESS %.*s", (int) sizeof(text) - 9, address);
     put_line(60, GDX_NET_ROOM_COLOUR_DIM, text);
     snprintf(text, sizeof(text), "%u OF %u RACERS - %u OF %u WATCHING", (unsigned) room->racers,
              (unsigned) room->racerCap, (unsigned) room->watchers, (unsigned) GDX_NET_ROOM_WATCH_SEATS);
@@ -2215,6 +2578,7 @@ static void put_listed_rows(int first, int count, int y0, int visible) {
 
 static void draw_friends(void) {
     char text[GDX_NET_ROOM_TEXT_BYTES];
+    int place;
     int first;
     int count;
     int y0;
@@ -2228,8 +2592,15 @@ static void draw_friends(void) {
     } else {
         put_line(68, GDX_NET_ROOM_COLOUR_RED, "YOUR PROFILE HAS NO FRIEND CODE.");
     }
-    for (i = 0; i < 4 && i < sRowCount; i++) {
+    for (i = 0; i < FRIENDS_ROWS && i < sRowCount; i++) {
         put_row(i, FRIENDS_ROWS_Y + i * MENU_STEP);
+    }
+    /* The requests the last collect brought, beside their row. */
+    place = gdx_lan_room_request_count();
+    if (place > 0) {
+        snprintf(text, sizeof(text), "%d WAITING", place);
+        put_text(MARGIN_RIGHT, FRIENDS_ROWS_Y + 3 * MENU_STEP, GDX_NET_ROOM_FONT_SMALL, GDX_NET_ROOM_ALIGN_RIGHT,
+                 row_colour(3), text);
     }
     list_geometry(&first, &count, &y0, &visible);
     if (count == 0) {
@@ -2312,6 +2683,73 @@ static void draw_friend(void) {
     list_geometry(&first, &count, &y0, &visible);
     put_friend_status(count);
     put_listed_rows(first, count, y0, visible);
+    put_note();
+}
+
+/* The line over the requests: what the last collect said, or why none was sent. */
+static void put_requests_status(int count) {
+    char text[GDX_NET_ROOM_TEXT_BYTES];
+    char failure[GDX_NET_ROOM_TEXT_BYTES];
+    const int state = gdx_lan_room_requests_state(failure, (int) sizeof(failure));
+
+    if (!sDirectoryOk) {
+        put_line(REQUESTS_STATUS_Y, GDX_NET_ROOM_COLOUR_DIM, "FRIEND REQUESTS NEED A ROOM DIRECTORY.");
+    } else if (state == GDX_NET_ROOM_MAIL_ASKING) {
+        put_line(REQUESTS_STATUS_Y, GDX_NET_ROOM_COLOUR_DIM, "ASKING THE ROOM DIRECTORY.");
+    } else if (state == GDX_NET_ROOM_MAIL_FAILED) {
+        put_line(REQUESTS_STATUS_Y, GDX_NET_ROOM_COLOUR_RED,
+                 failure[0] != '\0' ? failure : "THE DIRECTORY FAILED.");
+    } else if (count == 0) {
+        put_line(REQUESTS_STATUS_Y, GDX_NET_ROOM_COLOUR_DIM, "NO FRIEND REQUEST RIGHT NOW.");
+    } else {
+        snprintf(text, sizeof(text), "%d %s. PICK ONE TO ANSWER.", count, count == 1 ? "REQUEST" : "REQUESTS");
+        put_line(REQUESTS_STATUS_Y, GDX_NET_ROOM_COLOUR_DIM, text);
+    }
+}
+
+static void draw_requests(void) {
+    char name[GDX_NET_ROOM_NAME_BYTES];
+    int first;
+    int count;
+    int y0;
+    int visible;
+    int i;
+
+    put_title("FRIEND REQUESTS");
+    for (i = 0; i < 2 && i < sRowCount; i++) {
+        put_row(i, REQUESTS_ROWS_Y + i * MENU_STEP);
+    }
+    list_geometry(&first, &count, &y0, &visible);
+    put_requests_status(count);
+    for (i = sTop; i < count && i < sTop + visible; i++) {
+        const int y = y0 + (i - sTop) * LIST_STEP;
+
+        if (first + i == sCursor) {
+            put_bar(y);
+        }
+        gdx_lan_room_request_name(i, name, (int) sizeof(name));
+        put_line(y, row_colour(first + i), name);
+    }
+    put_scroll(y0, count, visible);
+    put_note();
+}
+
+static void draw_request(void) {
+    char name[GDX_NET_ROOM_NAME_BYTES];
+    char code[GDX_NET_ROOM_FRIEND_CODE_BYTES];
+    int i;
+
+    gdx_lan_room_request_name(sRequestIndex, name, (int) sizeof(name));
+    gdx_lan_room_request_code(sRequestIndex, code, (int) sizeof(code));
+    put_title(name);
+    put_code_lines(60, GDX_NET_ROOM_COLOUR_DIM, code);
+    for (i = 0; i < sRowCount; i++) {
+        put_row(i, FRIEND_ROWS_Y + i * MENU_STEP);
+    }
+    put_paragraph(FRIEND_ROWS_Y + 3 * MENU_STEP + 8, GDX_NET_ROOM_COLOUR_DIM,
+                  "THIS PLAYER ADDED YOU AS A FRIEND. ADD THEM BACK TO FIND THEIR ROOMS AND TO LET THEM INTO YOUR "
+                  "FRIENDS ROOMS.",
+                  4);
     put_note();
 }
 
@@ -2584,9 +3022,6 @@ static void draw_room(void) {
         } else if (sRows[i].id == ROW_CUSTOM) {
             put_text(FIELD_LEFT, y, GDX_NET_ROOM_FONT_SMALL, GDX_NET_ROOM_ALIGN_LEFT, row_colour(i),
                      sView.customTracks ? "ON" : "OFF");
-        } else if (sRows[i].id == ROW_CPU_FILL) {
-            put_text(FIELD_LEFT, y, GDX_NET_ROOM_FONT_SMALL, GDX_NET_ROOM_ALIGN_LEFT, row_colour(i),
-                     sView.cpuFill ? "ON" : "OFF");
         }
     }
 
@@ -2645,6 +3080,35 @@ static void draw_room(void) {
     put_log(FOOT_Y, FOOT_LINES);
 }
 
+/* The RULES page: a row for each rule with its value, then a line on who may change them. */
+#define RULES_ROWS_Y 66
+#define RULES_VALUE_LEFT 196
+static void draw_rules(void) {
+    char text[GDX_NET_ROOM_TEXT_BYTES];
+    int y = RULES_ROWS_Y;
+    int i;
+
+    put_title("RACE RULES");
+    for (i = 0; i < sRowCount; i++) {
+        y = RULES_ROWS_Y + i * MENU_STEP + (sRows[i].id == ROW_BACK ? 4 : 0);
+        put_row(i, y);
+        if (sRows[i].id != ROW_BACK) {
+            rule_value(sRows[i].id, text, (int) sizeof(text));
+            put_text(RULES_VALUE_LEFT, y, GDX_NET_ROOM_FONT_SMALL, GDX_NET_ROOM_ALIGN_LEFT,
+                     i == sCursor ? GDX_NET_ROOM_COLOUR_CURSOR : GDX_NET_ROOM_COLOUR_WHITE, text);
+        }
+    }
+    if (sCursorId == ROW_RULE_CONTACT && sView.rules.contactDamage == GDX_NET_ROOM_CONTACT_OFF) {
+        put_paragraph(y + MENU_STEP + 4, GDX_NET_ROOM_COLOUR_DIM,
+                      "MACHINES TAKE NO DAMAGE FROM EACH OTHER. ATTACKS STILL PUSH.", 2);
+    } else if (sView.mode != GDX_NET_ROOM_MODE_HOSTING) {
+        put_paragraph(y + MENU_STEP + 4, GDX_NET_ROOM_COLOUR_DIM, "THE HOST SETS THE RULES OF THE ROOM.", 2);
+    } else if (!rules_editable()) {
+        put_paragraph(y + MENU_STEP + 4, GDX_NET_ROOM_COLOUR_DIM, "THE RULES CHANGE AGAIN ONCE THIS RACE IS OVER.",
+                      2);
+    }
+}
+
 const GdxNetRoomDrawItem* gdx_net_room_screen_draw(int* count) {
     sync();
     sItemCount = 0;
@@ -2696,6 +3160,15 @@ const GdxNetRoomDrawItem* gdx_net_room_screen_draw(int* count) {
             break;
         case GDX_NET_ROOM_PAGE_MET:
             draw_met();
+            break;
+        case GDX_NET_ROOM_PAGE_REQUESTS:
+            draw_requests();
+            break;
+        case GDX_NET_ROOM_PAGE_REQUEST:
+            draw_request();
+            break;
+        case GDX_NET_ROOM_PAGE_RULES:
+            draw_rules();
             break;
         default:
             draw_closed();

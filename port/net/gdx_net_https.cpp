@@ -777,8 +777,9 @@ HopResult RunHop(Transport& transport, Method method, const std::string& url, co
 
 #endif
 
-// Follows redirects by hand. A POST becomes a GET on 303, and on 301 and 302, as browsers do. 307 and 308 keep the
-// method and the body. Every hop after the first must be https, loopback included.
+// Follows redirects by hand. A POST becomes a GET on 303, and on 301 and 302, as browsers do. A 307 or 308 would
+// send the POST's body on to the new address, so it ends the request instead: a signed directory write or relay
+// ticket is meant for the server it was sent to. Every hop after the first must be https, loopback included.
 Response Send(Method method, const Request& request) {
     Response response;
     if (!IsAllowedRequestUrl(request.url.c_str())) {
@@ -801,6 +802,11 @@ Response Send(Method method, const Request& request) {
         HopResult result = RunHop(transport, current, url, request);
         response.status = result.status;
         if (result.haveLocation) {
+            if (current == Method::Post && (result.status == 307 || result.status == 308)) {
+                response.error = Error::Redirect;
+                response.detail = "redirect would resend the request body";
+                return response;
+            }
             if (!IsHttpsUrl(result.location.c_str())) {
                 response.error = Error::Redirect;
                 response.detail = "redirect was not https";

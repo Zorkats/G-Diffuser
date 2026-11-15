@@ -3,6 +3,7 @@
 #include "gdx_net_room.h"
 
 #include <algorithm>
+#include <cmath>
 
 #include "gdx_net_lottery.h"
 #include "gdx_net_succession.h"
@@ -47,29 +48,29 @@ uint32_t RoomHash(uint32_t roomId, uint16_t raceIndex, const std::vector<Ballot>
     return Mix(h);
 }
 
-uint8_t DrawTrack(uint32_t hash, uint32_t pool, uint8_t avoid) {
-    std::array<uint8_t, kStockTracks> tracks{};
+uint8_t DrawTrack(uint32_t hash, uint64_t pool, uint8_t avoid) {
+    std::array<uint8_t, kStockTracks + kDiskTracks> tracks{};
     size_t count = 0;
-    for (uint8_t t = 0; t < kStockTracks; t++) {
-        if (((pool >> t) & 1u) != 0 && t != avoid) {
+    for (uint8_t t = 0; t < 64; t++) {
+        if (RaceTrackOk(t) && ((pool >> t) & 1u) != 0 && t != avoid) {
             tracks[count++] = t;
         }
     }
     if (count == 0) {
         // The pool holds only the track to avoid, or nothing at all.
-        return (avoid < kStockTracks && ((pool >> avoid) & 1u) != 0) ? avoid : static_cast<uint8_t>(0);
+        return (RaceTrackOk(avoid) && ((pool >> avoid) & 1u) != 0) ? avoid : static_cast<uint8_t>(0);
     }
     return tracks[hash % count];
 }
 
-uint8_t DrawnTrack(uint32_t roomId, uint16_t raceIndex, uint32_t pool, uint8_t lastTrack) {
+uint8_t DrawnTrack(uint32_t roomId, uint16_t raceIndex, uint64_t pool, uint8_t lastTrack) {
     return DrawTrack(RoomHash(roomId, raceIndex, std::vector<Ballot>()), pool, lastTrack);
 }
 
 namespace {
 
 // The lottery rule on a given seed word. The ballots are sorted by player id.
-LotteryResult LotteryOn(uint32_t hash, std::vector<Ballot> ballots, uint32_t pool, uint8_t lastTrack) {
+LotteryResult LotteryOn(uint32_t hash, std::vector<Ballot> ballots, uint64_t pool, uint8_t lastTrack) {
     LotteryResult result;
     if (ballots.empty()) {
         result.track = DrawTrack(hash, pool, lastTrack);
@@ -92,7 +93,7 @@ void SortBallots(std::vector<Ballot>& ballots) {
 
 } // namespace
 
-LotteryResult RunLottery(uint32_t roomId, uint16_t raceIndex, std::vector<Ballot> ballots, uint32_t pool,
+LotteryResult RunLottery(uint32_t roomId, uint16_t raceIndex, std::vector<Ballot> ballots, uint64_t pool,
                          uint8_t lastTrack) {
     SortBallots(ballots);
     const uint32_t hash = RoomHash(roomId, raceIndex, ballots);
@@ -100,7 +101,7 @@ LotteryResult RunLottery(uint32_t roomId, uint16_t raceIndex, std::vector<Ballot
 }
 
 LotteryResult RunCommittedLottery(const Bytes32& salt, uint32_t roomId, uint16_t raceIndex, std::vector<Ballot> ballots,
-                                  uint32_t pool, uint8_t lastTrack) {
+                                  uint64_t pool, uint8_t lastTrack) {
     SortBallots(ballots);
     const uint32_t hash = lottery::SeedHash(lottery::DrawSeed(salt, roomId, raceIndex, ballots));
     LotteryResult result = LotteryOn(hash, std::move(ballots), pool, lastTrack);
@@ -934,6 +935,10 @@ bool RoomMachine::Lock(uint8_t id, const LockRequest& lock, uint32_t nowMs, std:
         lock.skin >= kMachineSkins || lock.engine > kEngineMax || (lock.hasRecord && !MachineRecordOk(lock.record))) {
         return false;
     }
+    // A room on a fixed engine setting races no other one.
+    if (rules_.engineFixed && lock.engine != kEngineFixed) {
+        return false;
+    }
     p->machine = lock.machine;
     p->skin = lock.skin;
     p->locked = true;
@@ -950,10 +955,11 @@ bool RoomMachine::Lock(uint8_t id, const LockRequest& lock, uint32_t nowMs, std:
 }
 
 bool RoomMachine::SetRules(const RaceRules& rules) {
-    // ASSETS may send a fresh grid at any moment, so the rules are fixed once MACHINE ends.
-    const bool gridSent = phase_ == Phase::Assets || phase_ == Phase::GridSync || phase_ == Phase::Countdown ||
-                          phase_ == Phase::Racing;
-    if (gridSent || !RulesOk(rules)) {
+    // From MACHINE on: racers lock in under the rules (the engine rule), and ASSETS may send a fresh grid at
+    // any moment.
+    const bool fixed = phase_ == Phase::Machine || phase_ == Phase::Assets || phase_ == Phase::GridSync ||
+                       phase_ == Phase::Countdown || phase_ == Phase::Racing;
+    if (fixed || !RulesOk(rules)) {
         return false;
     }
     if (!(rules == rules_)) {
@@ -996,7 +1002,7 @@ void RoomMachine::CloseAssets(uint32_t nowMs, std::vector<Outgoing>& out) {
     SendGrid(nowMs, out);
 }
 
-// Decision 11: a stock track from the pool, never the one just raced, and a second hash so it does not
+// Decision 11: a course from the pool, never the one just raced, and a second hash so it does not
 // follow from the draw a pick would have made. In ASSETS a fresh grid goes out at once; in MACHINE the grid
 // sent when the screen closes names it. The machines locked so far stand.
 void RoomMachine::FallBack(uint32_t nowMs, std::vector<Outgoing>& out) {
@@ -1137,6 +1143,38 @@ void RoomMachine::NoteLap(uint8_t id, int16_t lap) {
     }
 }
 
+void RoomMachine::NoteMemberLap(uint8_t id, int16_t lap, uint32_t nowMs) {
+    const uint32_t minLap = MinLapMs();
+    if (minLap == 0) {
+        NoteLap(id, lap);
+        return;
+    }
+    if (id >= kMaxPlayers) {
+        return;
+    }
+    // The first lap starts at GO. Before it, and after the race, no lap past the first is taken.
+    const uint32_t raced = phase_ == Phase::Racing ? Elapsed(nowMs, phaseStartMs_) : 0;
+    const uint32_t most = raced / minLap + 1;
+    const int16_t allowed = most > 0x7FFFu ? static_cast<int16_t>(0x7FFF) : static_cast<int16_t>(most);
+    const int16_t taken = std::min(lap, allowed);
+    if (taken > seats_[id].lap) {
+        seats_[id].lap = taken;
+    }
+}
+
+void RoomMachine::SetCourseLength(uint16_t raceIndex, float length) {
+    courseRace_ = raceIndex;
+    courseLength_ = std::isfinite(length) && length > 0.0f ? length : 0.0f;
+}
+
+uint32_t RoomMachine::MinLapMs() const {
+    if (courseLength_ <= 0.0f || courseRace_ != grid_.raceIndex) {
+        return 0;
+    }
+    const double ms = static_cast<double>(courseLength_) * 1000.0 / (kLapSpeedMax * kLapFramesPerSecond);
+    return ms >= kRaceTimeMaxMs ? kRaceTimeMaxMs : static_cast<uint32_t>(ms);
+}
+
 void RoomMachine::SetStanding(const std::vector<uint8_t>& order) {
     if (phase_ == Phase::Racing) {
         standing_ = order;
@@ -1166,6 +1204,10 @@ bool RoomMachine::ReportFinish(uint8_t id, const FinishReport& report, uint32_t 
     if (report.kind == ResultKind::Finished) {
         if (report.timeMs == 0 || seats_[id].lap < static_cast<int16_t>(grid_.rules.laps) ||
             report.timeMs > raced + kFinishAheadMs) {
+            return false;
+        }
+        // Every lap takes at least MinLapMs of the host's own count of the race.
+        if (static_cast<uint64_t>(raced) < static_cast<uint64_t>(MinLapMs()) * grid_.rules.laps) {
             return false;
         }
         const uint32_t earliest = raced > kFinishBehindMs ? raced - kFinishBehindMs : 1;

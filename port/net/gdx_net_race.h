@@ -193,6 +193,22 @@ int gdx_net_race_intro_run(int timer, int elapsedMs);
 // It never passes over a tick the game does something on (the three beeps and GO).
 int gdx_net_race_intro_catch_up(int timer, int elapsedMs);
 
+// The end of the race. When the room calls it, the race stays on screen this many frames (3 s) before it
+// fades out to the room page, so every racer sees where the field stood.
+#define GDX_NET_RACE_END_HOLD_FRAMES 180
+// 1 while the race stays on screen: the room called it the normal way (this copy is still in the room, on
+// this race's grid) and it has stood heldFrames, fewer than the hold. 0 leaves at once: the room closed,
+// moved on to another race, or took this copy off the grid.
+int gdx_net_race_end_holds(int inRoom, int sameRace, int onGrid, int heldFrames);
+
+// The fastest a machine of another copy is shown to move, in units a frame: about 6000 km/h, far past
+// anything a machine drives. The game's contact code takes the damage of a hit from how fast two machines
+// close, so a pose that says more would let one copy wreck the others.
+#define GDX_NET_RACE_PUPPET_SPEED_MAX 280.0f
+// Brings a puppet's velocity down to GDX_NET_RACE_PUPPET_SPEED_MAX, keeping its direction. A velocity
+// that is not a number on every axis becomes 0. Returns 1 when it changed the velocity.
+int gdx_net_race_speed_cap(float vel[3]);
+
 // The rules of an online race: the host's values of the options that change how a machine drives.
 typedef struct GdxNetRules {
     int laps;
@@ -201,7 +217,14 @@ typedef struct GdxNetRules {
     float magnetRange;
     float magnetStrength;
     int boostFrames; // 0 is the stock boost length
+    int contactDamage; // GDX_NET_RULE_CONTACT_*
+    int shield;
 } GdxNetRules;
+
+// GdxNetRules.contactDamage, as net::lobby numbers it.
+#define GDX_NET_RULE_CONTACT_NORMAL 0
+#define GDX_NET_RULE_CONTACT_HALF 1
+#define GDX_NET_RULE_CONTACT_OFF 2
 
 // NULL gives the player their own values back.
 void gdx_net_race_set_rules(const GdxNetRules* rules);
@@ -211,6 +234,11 @@ int gdx_net_race_rule_lava_no_kill(int own);
 float gdx_net_race_rule_magnet_range(float own);
 float gdx_net_race_rule_magnet_strength(float own);
 int gdx_net_race_rule_boost_frames(int own);
+// What machine on machine contact damage is multiplied by: 1 outside a room's race, else 1, 0.5 or 0 by the
+// contact damage rule. Attacks still push at 0.
+float gdx_net_race_rule_contact_scale(void);
+// 1 while a room's race runs with the shield rule.
+int gdx_net_race_rule_shield(void);
 
 // The Create Machine records of an online race, by character (G-NET O4.5, decision 10). A record is the 32
 // bytes of the game's CustomMachine. A character races a record only when every human on it brought the same

@@ -22,9 +22,20 @@ constexpr char kJoinLabel[] = "G-NET join proof v1";
 constexpr size_t kJoinLabelBytes = sizeof(kJoinLabel) - 1;
 constexpr size_t kJoinMessageBytes = kJoinLabelBytes + 4 + kKeyBytes + kNonceBytes;
 
-// The first line of every directory write, line feed included (CONTRACT.md §8a).
-constexpr char kDirectoryLabel[] = "G-NET directory v1\n";
-constexpr size_t kDirectoryLabelBytes = sizeof(kDirectoryLabel) - 1;
+// The first line of every message the directory checks, line feed included: a room write (CONTRACT.md §8a), a
+// relay ticket (§5.9) and a friend request or collect (§5.10, §5.11). Each label is the whole first line, so no
+// label is the start of another, and none is the start of a join proof or an identity hash.
+constexpr const char* kDirectoryLabels[] = { "G-NET directory v1\n", "G-NET relay v1\n", "G-NET friends v1\n" };
+
+bool HasDirectoryLabel(const unsigned char* message, size_t length) {
+    for (const char* label : kDirectoryLabels) {
+        const size_t bytes = std::strlen(label);
+        if (length >= bytes && std::memcmp(message, label, bytes) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
 
 constexpr size_t kDigestBytes = 16;
 constexpr size_t kHeaderBytes = 7;
@@ -119,8 +130,7 @@ void JoinProofSign(const unsigned char profileSeed[kSeedBytes], uint32_t roomId,
 
 bool DirectorySign(const unsigned char profileSeed[kSeedBytes], const unsigned char* message, size_t length,
                    Signature& signature) {
-    if (message == nullptr || length < kDirectoryLabelBytes ||
-        std::memcmp(message, kDirectoryLabel, kDirectoryLabelBytes) != 0) {
+    if (message == nullptr || !HasDirectoryLabel(message, length)) {
         return false;
     }
     unsigned char secretKey[kSecretBytes];

@@ -27,6 +27,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <deque>
 #include <future>
 #include <memory>
@@ -205,6 +206,10 @@ std::string FailureText(directory::Error error) {
             return "The room directory is busy";
         case directory::Error::Invalid:
             return "The room cannot be listed as it is";
+        case directory::Error::InboxFull:
+            return "Their friend requests are full";
+        case directory::Error::NoRoute:
+            return "The directory has no mailbox";
         default:
             return std::string("The room directory refused: ") + directory::ErrorName(error);
     }
@@ -718,6 +723,33 @@ void MemberReach::Release(uint32_t now) {
     }
 }
 
+// ---- Relay tickets (CONTRACT.md §5.9) ----
+
+bool MintRelayTicket(uint32_t code, uint64_t nowUnix, const net::directory::Signer& signer,
+                     net::lobby::RelayTicket& out) {
+    const std::string text = net::listing::DirectoryCode(code);
+    net::directory::RelayTicket ticket;
+    if (text.empty() ||
+        !net::directory::SignRelayTicket(text, nowUnix + net::directory::kTicketLifetimeSeconds, signer, ticket)) {
+        return false;
+    }
+    out.code = code;
+    out.expires = ticket.expires;
+    out.sig = ticket.sig;
+    return true;
+}
+
+bool DirectoryTicket(const net::lobby::RelayTicket& ticket, net::directory::RelayTicket& out) {
+    const std::string text = net::listing::DirectoryCode(ticket.code);
+    if (text.empty()) {
+        return false;
+    }
+    out.code = text;
+    out.expires = ticket.expires;
+    out.sig = ticket.sig;
+    return true;
+}
+
 // ---- MemberRelay (decisions 69, 70, 72) ----
 
 namespace {
@@ -732,9 +764,10 @@ struct GrantSlot {
     std::optional<net::NetAddress> server; // the first IPv4 address of the grant's servers, in its order
 };
 
-void FetchGrant(const std::shared_ptr<GrantSlot>& slot, std::vector<std::string> bases) {
-    Spawn([slot, bases = std::move(bases)]() {
-        const directory::Answer<directory::TurnGrant> answer = MakeClient(bases).TurnCredentials();
+void FetchGrant(const std::shared_ptr<GrantSlot>& slot, std::vector<std::string> bases,
+                directory::RelayTicket ticket) {
+    Spawn([slot, bases = std::move(bases), ticket = std::move(ticket)]() {
+        const directory::Answer<directory::TurnGrant> answer = MakeClient(bases).TurnCredentials(ticket);
         std::optional<net::NetAddress> server;
         for (const std::string& text : answer.value.servers) {
             for (const net::NetAddress& a : net::host_info::Resolve(text, kStunPort)) {
@@ -760,12 +793,16 @@ void FetchGrant(const std::shared_ptr<GrantSlot>& slot, std::vector<std::string>
 } // namespace
 
 struct MemberRelay::Impl {
-    enum class Stage : uint8_t { Fetch, Allocate, Wait, Off };
+    // Ticket: waiting for a relay ticket from the host before the next fetch.
+    enum class Stage : uint8_t { Ticket, Fetch, Allocate, Wait, Off };
 
     RelayOptions options;
     net::gather::Send send;
     Deliver deliver;
-    Stage stage = Stage::Fetch;
+    Stage stage = Stage::Ticket;
+    std::optional<directory::RelayTicket> ticket; // the newest the host sent; none after the directory refused it
+    uint32_t ticketSerial = 0;                     // tickets taken so far
+    uint32_t fetchedSerial = 0;                    // the serial of the ticket the last fetch used
     std::shared_ptr<GrantSlot> grant;
     std::optional<net::turn::Client> turn;
     net::NetAddress server;
@@ -791,8 +828,13 @@ struct MemberRelay::Impl {
     }
 
     void Fetch() {
+        if (!ticket) {
+            stage = Stage::Ticket;
+            return;
+        }
         grant = std::make_shared<GrantSlot>();
-        FetchGrant(grant, options.bases);
+        fetchedSerial = ticketSerial;
+        FetchGrant(grant, options.bases, *ticket);
         stage = Stage::Fetch;
     }
 
@@ -824,6 +866,19 @@ struct MemberRelay::Impl {
             gdx_port_logf("[online] relay: the room directory has none (%s); playing on without one\n",
                           directory::ErrorName(error));
             stage = Stage::Off;
+            return;
+        }
+        if (error == directory::Error::StaleTicket || error == directory::Error::BadSignature ||
+            error == directory::Error::NotFound) {
+            // Another base would refuse the same ticket. One that came while the fetch ran is tried at once.
+            if (ticketSerial != fetchedSerial) {
+                Fetch();
+                return;
+            }
+            gdx_port_logf("[online] relay: the room directory refused the host's ticket (%s); waiting for a new one\n",
+                          directory::ErrorName(error));
+            ticket.reset();
+            stage = Stage::Ticket;
             return;
         }
         if (error == directory::Error::RateLimited) {
@@ -880,10 +935,22 @@ MemberRelay::MemberRelay(RelayOptions options, net::gather::Send send, Deliver d
                             m->deliver(peer, data, len, m->deliverNow);
                         }
                     });
-    m->Fetch();
+    // No fetch yet: the directory grants nothing without the host's ticket.
 }
 
 MemberRelay::~MemberRelay() = default;
+
+void MemberRelay::SetTicket(const net::directory::RelayTicket& ticket) {
+    Impl& m = *impl_;
+    if (m.released) {
+        return;
+    }
+    m.ticket = ticket;
+    m.ticketSerial++;
+    if (m.stage == Impl::Stage::Ticket) {
+        m.Fetch();
+    }
+}
 
 void MemberRelay::Update(uint32_t now) {
     Impl& m = *impl_;
@@ -892,6 +959,8 @@ void MemberRelay::Update(uint32_t now) {
     }
     m.Tick(now);
     switch (m.stage) {
+        case Impl::Stage::Ticket:
+            break;
         case Impl::Stage::Fetch:
             m.TakeGrant();
             break;
@@ -1237,6 +1306,201 @@ std::string NewFriendName() {
 
 std::string FriendCodeOf(const lobby::Bytes32& key) {
     return net::codes::FormatFriendCode(key.data());
+}
+
+// ---- Friend requests (CONTRACT.md §5.10, §5.11) ----
+
+namespace {
+
+// The profile seed a request is signed with, read on the game thread, wiped when the last helper holding it ends.
+struct MailSeed {
+    unsigned char bytes[GDX_PROFILE_KEYS_SEED_BYTES] = {};
+    MailSeed() = default;
+    MailSeed(const MailSeed&) = delete;
+    MailSeed& operator=(const MailSeed&) = delete;
+    ~MailSeed() {
+        gdx_profile_keys_wipe(bytes, sizeof(bytes));
+    }
+};
+
+// The active profile's seed and key, or false with neither.
+bool MailIdentity(std::shared_ptr<const MailSeed>& seed, lobby::Bytes32& key) {
+    auto made = std::make_shared<MailSeed>();
+    if (ActiveSeed(made->bytes) != GDX_PROFILE_OK || !HostKeyBytes(key)) {
+        return false;
+    }
+    seed = std::move(made);
+    return true;
+}
+
+directory::Signer MailSigner(std::shared_ptr<const MailSeed> seed) {
+    return [seed = std::move(seed)](std::string_view message, directory::Signature& out) {
+        net::friends::Signature signature{};
+        if (!net::friends::DirectorySign(seed->bytes, reinterpret_cast<const unsigned char*>(message.data()),
+                                         message.size(), signature)) {
+            return false;
+        }
+        std::copy(signature.begin(), signature.end(), out.begin());
+        return true;
+    };
+}
+
+// A key the directory gave: 64 lower-case hex characters, already checked by the client (CONTRACT.md §3).
+bool KeyOfHex(const std::string& hex, lobby::Bytes32& out) {
+    if (!directory::IsHostKey(hex)) {
+        return false;
+    }
+    auto nibble = [](char c) { return c <= '9' ? c - '0' : c - 'a' + 10; };
+    for (size_t i = 0; i < out.size(); ++i) {
+        out[i] = static_cast<uint8_t>(nibble(hex[2 * i]) << 4 | nibble(hex[2 * i + 1]));
+    }
+    return true;
+}
+
+struct MailState {
+    std::mutex lock;
+    Mailbox mailbox;
+    lobby::Bytes32 owner{}; // the profile key the list was collected for
+};
+
+MailState& Mail() {
+    static MailState* state = new MailState(); // never destroyed: a helper may answer during exit
+    return *state;
+}
+
+} // namespace
+
+bool SendFriendRequest(const lobby::Bytes32& to) {
+    const std::vector<std::string> bases = DirectoryBases();
+    const char* profileName = gdx_profile_state_active_name();
+    const std::string name = profileName != nullptr ? profileName : "";
+    std::shared_ptr<const MailSeed> seed;
+    lobby::Bytes32 own{};
+    if (bases.empty() || !MailIdentity(seed, own) || own == to) {
+        return false;
+    }
+    if (!directory::IsFriendName(name)) {
+        gdx_port_logf("[online] no friend request sent: the profile name is not one the directory takes\n");
+        return false;
+    }
+    directory::Client client = MakeClient(bases);
+    client.SetSigner(MailSigner(std::move(seed)));
+    Spawn([client, to = HexOf(to.data(), to.size()), from = HexOf(own.data(), own.size()), name]() {
+        const directory::Answer<uint32_t> answer = client.SendFriendRequest(to, from, name);
+        if (answer.error == directory::Error::None) {
+            gdx_port_logf("[online] friend request sent; it waits %u days\n",
+                          static_cast<unsigned>(answer.value / 86400));
+        } else {
+            gdx_port_logf("[online] friend request not sent: %s\n", FailureText(answer.error).c_str());
+        }
+    });
+    return true;
+}
+
+bool CollectFriendRequests() {
+    const std::vector<std::string> bases = DirectoryBases();
+    MailState& state = Mail();
+    {
+        std::lock_guard<std::mutex> guard(state.lock);
+        if (state.mailbox.status == Mailbox::Status::Asking) {
+            return false; // one collect at a time: a second would race the first for the same requests
+        }
+    }
+    std::shared_ptr<const MailSeed> seed;
+    lobby::Bytes32 own{};
+    const bool identity = !bases.empty() && MailIdentity(seed, own);
+    std::lock_guard<std::mutex> guard(state.lock);
+    if (state.mailbox.status == Mailbox::Status::Asking) {
+        return false;
+    }
+    if (!identity) {
+        state.mailbox.status = Mailbox::Status::Failed;
+        state.mailbox.text = bases.empty() ? FailureText(directory::Error::BadConfig) : "No player profile is active";
+        ++state.mailbox.serial;
+        return false;
+    }
+    if (state.owner != own) {
+        state.mailbox.requests.clear(); // another profile's requests are not this one's to answer
+        state.owner = own;
+    }
+    state.mailbox.status = Mailbox::Status::Asking;
+    state.mailbox.text.clear();
+    directory::Client client = MakeClient(bases);
+    client.SetSigner(MailSigner(std::move(seed)));
+    const uint64_t expires = static_cast<uint64_t>(std::time(nullptr)) + directory::kCollectLifetimeSeconds;
+    Spawn([client, own, expires]() {
+        const directory::Answer<std::vector<directory::FriendRequestEntry>> answer =
+            client.CollectFriendRequests(HexOf(own.data(), own.size()), expires);
+        // Who is a friend already is read before the lock: the book has its own, never taken the other way round.
+        std::vector<FriendRequest> fresh;
+        for (const directory::FriendRequestEntry& entry : answer.value) {
+            FriendRequest request;
+            request.name = entry.name;
+            if (KeyOfHex(entry.fromKey, request.key) && request.key != own && !IsFriend(request.key)) {
+                fresh.push_back(std::move(request));
+            }
+        }
+        MailState& s = Mail();
+        std::lock_guard<std::mutex> g(s.lock);
+        Mailbox& mailbox = s.mailbox;
+        if (answer.error != directory::Error::None) {
+            mailbox.status = Mailbox::Status::Failed;
+            mailbox.text = FailureText(answer.error);
+            gdx_port_logf("[online] friend requests not collected: %s\n", mailbox.text.c_str());
+        } else {
+            mailbox.status = Mailbox::Status::Ready;
+            if (s.owner == own) {
+                // A sender who asked again moves to the end, under the name they sent last.
+                for (FriendRequest& request : fresh) {
+                    mailbox.requests.erase(std::remove_if(mailbox.requests.begin(), mailbox.requests.end(),
+                                                          [&](const FriendRequest& r) { return r.key == request.key; }),
+                                           mailbox.requests.end());
+                    mailbox.requests.push_back(std::move(request));
+                }
+                if (mailbox.requests.size() > kMailboxKeepMax) {
+                    mailbox.requests.erase(mailbox.requests.begin(),
+                                           mailbox.requests.end() - static_cast<std::ptrdiff_t>(kMailboxKeepMax));
+                }
+            }
+            gdx_port_logf("[online] friend requests collected: %u new, %u waiting\n",
+                          static_cast<unsigned>(answer.value.size()), static_cast<unsigned>(mailbox.requests.size()));
+        }
+        ++mailbox.serial;
+    });
+    return true;
+}
+
+Mailbox MailboxSnapshot() {
+    MailState& state = Mail();
+    std::lock_guard<std::mutex> guard(state.lock);
+    return state.mailbox;
+}
+
+FriendAdd AcceptFriendRequest(const lobby::Bytes32& key) {
+    std::string name;
+    {
+        MailState& state = Mail();
+        std::lock_guard<std::mutex> guard(state.lock);
+        const auto found = std::find_if(state.mailbox.requests.begin(), state.mailbox.requests.end(),
+                                        [&](const FriendRequest& r) { return r.key == key; });
+        if (found == state.mailbox.requests.end()) {
+            return FriendAdd::NotSaved;
+        }
+        name = found->name;
+    }
+    const FriendAdd added = AddFriend(key, name);
+    if (added == FriendAdd::Added || added == FriendAdd::Updated || added == FriendAdd::Same) {
+        DeclineFriendRequest(key);
+    }
+    return added;
+}
+
+void DeclineFriendRequest(const lobby::Bytes32& key) {
+    MailState& state = Mail();
+    std::lock_guard<std::mutex> guard(state.lock);
+    std::vector<FriendRequest>& requests = state.mailbox.requests;
+    requests.erase(std::remove_if(requests.begin(), requests.end(), [&](const FriendRequest& r) { return r.key == key; }),
+                   requests.end());
 }
 
 } // namespace gdx::online

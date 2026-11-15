@@ -9,7 +9,8 @@
 // Room messages ride the reliable channel as Message{type, payload}. All integers are little-endian.
 // A string is u8 length + bytes.
 //
-// A track is a u8: a stock course index below kStockTracks, or kTrackCustom. kTrackCustom is followed at
+// A track is a u8: a course a room races (RaceTrackOk: the 24 stock courses and the 12 of the 64DD, numbered as
+// the game numbers them), or kTrackCustom. kTrackCustom is followed at
 // once by the custom track's identity, 32 bytes (the SHA-256 of its content bytes, G-NET decision 4), and
 // its title, a string of 1 to kTrackTitleMax printable bytes. "track" below means that form. A stock track
 // keeps the single byte of version 2.
@@ -30,7 +31,7 @@
 //    5 Ready        client to host  u8 0 or 1
 //    6, 7           retired: the typed Chat and ChatLine of version 1. Never reuse these numbers.
 //    8 Room         host to all     RoomState: u32 room id, u16 race index, u8 Phase, u32 phase ms left,
-//                                   u32 phase total ms, u8 racer cap, u32 pool, track, u8 last track, u8 picker,
+//                                   u32 phase total ms, u8 racer cap, u64 pool, track, u8 last track, u8 picker,
 //                                   u8 locked, u8 racers, u8 CPUs out, u8 custom tracks, u8 CPU flags (1 CPU
 //                                   fill, 2 CPU track hazards), u16 AI aggression, the rules as in Grid, u8
 //                                   successor (or kSystemId), 16 bytes successor address (IPv4
@@ -50,7 +51,7 @@
 //   17 SeatNext     client to host  u8 0 or 1: a watcher asks for a race seat at the next grid, or takes it back
 //   18 ReadyToRace  client to host  u16 race index, 32 bytes course digest, u16 load time in ms
 //   19 Grid         host to all     the race about to load, see EncodeGrid: u16 race index, u32 seed, u8 laps,
-//                                   u8 rule flags, u32 magnet range, u32 magnet strength (float bits), u32
+//                                   u8 rule flags, u8 contact damage, u32 magnet range, u32 magnet strength (float bits), u32
 //                                   boost frames, track, u8 CPUs, u8 count, count x { u8 id, u8 machine,
 //                                   u8 skin, machine record }, the humans from the front of their rows to
 //                                   the back
@@ -101,6 +102,10 @@
 //   39 Paths          client to host      endpoint relay (the member's TURN relay address, zero for none), u8 LAN
 //                                         count (at most kPeerLanMax), LAN count x endpoint, u8 direct (0 or 1:
 //                                         the member's DirectLinks setting). Sent on join and on every change
+//   40 RelayTicket    host to all         u32 room code (below kRoomCodeValues), u64 expiry in Unix seconds (1 to
+//                                         2^53 - 1), 64 bytes the host key's Ed25519 signature: the ticket a member
+//                                         shows the directory for relay credentials (CONTRACT.md §5.9). Sent when the
+//                                         host signs a new one, and to each member who joins or comes back
 //
 // Discovery datagrams travel outside the channel, on the same socket. They start with "GDXL", which the
 // channel never sends (its packets start with "GD" and a type byte from 0 to 5), so the host tells them
@@ -152,7 +157,12 @@ constexpr uint8_t kHostId = 0;
 
 // The cartridge's 24 courses, Jack Cup first. The X Cup has no fixed course to vote for.
 constexpr size_t kStockTracks = 24;
-constexpr uint32_t kPoolAll = (1u << kStockTracks) - 1u;
+// The 64DD courses, 30 to 41 in fzx_course.h. G-Diffuser requires the disk, so every copy races them.
+constexpr uint8_t kDiskTrackFirst = 30;
+constexpr size_t kDiskTracks = 12;
+constexpr uint64_t kPoolStock = (uint64_t{ 1 } << kStockTracks) - 1u;
+constexpr uint64_t kPoolDisk = ((uint64_t{ 1 } << kDiskTracks) - 1u) << kDiskTrackFirst;
+constexpr uint64_t kPoolAll = kPoolStock | kPoolDisk;
 constexpr uint8_t kTrackRandom = 0xFF; // a ballot or pick that asks for a draw
 constexpr uint8_t kTrackNone = 0xFE;   // no track chosen yet
 constexpr uint8_t kTrackCustom = 0xFD; // a custom track: its identity and title follow on the wire
@@ -280,6 +290,7 @@ enum MessageType : uint8_t {
     kMsgReach = 37,
     kMsgPeers = 38,
     kMsgPaths = 39,
+    kMsgRelayTicket = 40,
 };
 
 // Wire values. Never renumber them.
@@ -383,6 +394,23 @@ struct JoinNonce {
     }
 };
 
+// A relay ticket the host signed for its directory room (CONTRACT.md §5.9). Members pass it on unchanged; only the
+// directory checks the signature.
+constexpr uint64_t kTicketExpiresMax = 9007199254740991ull; // the largest integer CONTRACT.md §2 allows
+
+struct RelayTicket {
+    uint32_t code = kNoRoomCode;
+    uint64_t expires = 0;
+    std::array<uint8_t, 64> sig{};
+
+    bool operator==(const RelayTicket& o) const {
+        return code == o.code && expires == o.expires && sig == o.sig;
+    }
+    bool operator!=(const RelayTicket& o) const {
+        return !(*this == o);
+    }
+};
+
 // One member's friend key, in Keys.
 struct MemberKey {
     uint8_t id = 0;
@@ -410,6 +438,13 @@ constexpr uint32_t kBoostFramesMax = 100000;
 constexpr uint16_t kAiAggressionMin = 100;
 constexpr uint16_t kAiAggressionMax = 400;
 constexpr uint16_t kAiAggressionDefault = 100;
+// RaceRules::contactDamage: what a machine takes when it touches another, whole, half or nothing. Attacks
+// still push either way.
+constexpr uint8_t kContactNormal = 0;
+constexpr uint8_t kContactHalf = 1;
+constexpr uint8_t kContactOff = 2;
+// The engine setting every racer locks in when the rules fix it, as kEngineMax counts it.
+constexpr uint8_t kEngineFixed = 50;
 
 // The host values of the options that change how a player drives their own machine. Every copy races on
 // them and goes back to its own afterwards. The options that only steer CPUs stay with the host, which
@@ -421,10 +456,15 @@ struct RaceRules {
     float magnetRange = 80.0f;
     float magnetStrength = 1.7f;
     uint32_t boostFrames = 0; // 0 for the stock boost
+    // Version 13: the rows of the room's RULES page that have no Gameplay option behind them.
+    uint8_t contactDamage = kContactNormal;
+    bool shield = false;      // the shield rule (gdx_net_shield.h)
+    bool engineFixed = false; // every racer locks in the engine setting kEngineFixed
 
     bool operator==(const RaceRules& o) const {
         return laps == o.laps && ignoreTrackSettings == o.ignoreTrackSettings && lavaNoKill == o.lavaNoKill &&
-               magnetRange == o.magnetRange && magnetStrength == o.magnetStrength && boostFrames == o.boostFrames;
+               magnetRange == o.magnetRange && magnetStrength == o.magnetStrength && boostFrames == o.boostFrames &&
+               contactDamage == o.contactDamage && shield == o.shield && engineFixed == o.engineFixed;
     }
 };
 
@@ -438,7 +478,7 @@ struct RoomState {
     uint32_t phaseLeftMs = 0;   // time left in the phase when the message was sent; 0 with phaseTotalMs 0
     uint32_t phaseTotalMs = 0;  // the phase's whole timer; 0 when the phase has none
     uint8_t racerCap = static_cast<uint8_t>(kDefaultRacers);
-    uint32_t pool = kPoolAll;   // bit n set: track n can be voted, picked or drawn
+    uint64_t pool = kPoolAll;   // bit n set: track n can be voted, picked or drawn
     uint8_t track = kTrackNone; // the track of the race being set up or run
     uint8_t lastTrack = kTrackNone;
     uint8_t picker = kSystemId; // who picks, in Phase::Pick
@@ -629,7 +669,7 @@ struct Grid {
     uint16_t raceIndex = 0;
     uint32_t seed = 0;
     RaceRules rules;
-    TrackChoice track{ 0, {} }; // a stock index or kTrackCustom; never Random or None
+    TrackChoice track{ 0, {} }; // a course (RaceTrackOk) or kTrackCustom; never Random or None
     uint8_t cpus = 0;
     std::vector<GridEntry> humans; // from the front of their rows to the back
 
@@ -827,10 +867,12 @@ struct RoomInfo {
 bool NameOk(const std::string& name);
 bool MachineOk(uint8_t machine);
 bool ColourOk(uint32_t colour);
+// A course a room races: a stock one or a 64DD one. Not kTrackCustom, kTrackRandom or kTrackNone.
+bool RaceTrackOk(uint8_t track);
 // A track a ballot may name: in the pool, or kTrackRandom.
-bool TrackInPool(uint8_t track, uint32_t pool);
-// A pool has at least one track and no bit above the stock courses.
-bool PoolOk(uint32_t pool);
+bool TrackInPool(uint8_t track, uint64_t pool);
+// A pool has at least one track and no bit outside kPoolAll.
+bool PoolOk(uint64_t pool);
 
 // The preset messages (D7). The id is the wire value; the words live here so every copy shows the same
 // ones. "" for an id out of range.
@@ -889,6 +931,7 @@ std::vector<uint8_t> EncodeReach(bool reachable);
 // Writes at most kPeersPerMessage entries and kPeerLanMax LAN endpoints each: a longer list is the caller's to split.
 std::vector<uint8_t> EncodePeers(const std::vector<PeerEntry>& peers);
 std::vector<uint8_t> EncodePaths(const PathsInfo& paths);
+std::vector<uint8_t> EncodeRelayTicket(const RelayTicket& ticket);
 
 bool DecodeJoin(const uint8_t* data, size_t len, JoinRequest& out);
 bool DecodeWelcome(const uint8_t* data, size_t len, uint8_t& out);
@@ -902,7 +945,7 @@ bool DecodeReady(const uint8_t* data, size_t len, bool& out);
 // a member other than the host with a port, or kSystemId with a zero address. A known room type, and a
 // commitment only in an Open room.
 bool DecodeRoomState(const uint8_t* data, size_t len, RoomState& out);
-// A stock track or kTrackRandom. Whether it is in the room's pool is the room's check. The uint8_t form
+// A stock or 64DD course or kTrackRandom. Whether it is in the room's pool is the room's check. The uint8_t form
 // refuses a custom track. The TrackChoice form also takes kTrackCustom with a valid title; whether the
 // room's switch allows it is again the room's check.
 bool DecodeVote(const uint8_t* data, size_t len, uint8_t& out);
@@ -958,6 +1001,8 @@ bool DecodeReach(const uint8_t* data, size_t len, bool& out);
 bool DecodePeers(const uint8_t* data, size_t len, std::vector<PeerEntry>& out);
 // A relay endpoint that is none or dialable, at most kPeerLanMax dialable LAN endpoints, direct 0 or 1.
 bool DecodePaths(const uint8_t* data, size_t len, PathsInfo& out);
+// A room code below kRoomCodeValues, an expiry from 1 to kTicketExpiresMax, any signature, nothing after it.
+bool DecodeRelayTicket(const uint8_t* data, size_t len, RelayTicket& out);
 
 // Discovery.
 bool IsDiscovery(const uint8_t* data, size_t len);

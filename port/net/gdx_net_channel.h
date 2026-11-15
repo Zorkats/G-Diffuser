@@ -46,10 +46,12 @@ constexpr size_t kUnreliableOutCap = 64; // unreliable messages waiting for the 
 // reachability (the reachable flag in Join and the Reach message) and the bans in the handover table (decisions 50
 // to 52); 10 adds direct member links and the relay paths (the Peers and Paths messages and the GDXP datagram,
 // decisions 61 to 73); 11 adds the course choice to the room state and lets a room have 1 to 12 race seats
-// (decisions 75 and 76). A peer on another version is refused
-// with VersionMismatch. Since O5.1 this number alone decides who may join, not the build string (decision 25), so
+// (decisions 75 and 76); 12 adds the relay ticket the host signs for its members (the RelayTicket message, CONTRACT.md
+// §5.9), because the directory now refuses relay credentials without one; 13 adds the 64DD courses to the pool, which
+// grows to 64 bits, and the contact damage, shield and engine rules of the RULES page. A peer on another version
+// is refused with VersionMismatch. Since O5.1 this number alone decides who may join, not the build string (decision 25), so
 // a change to any message or to the track encoding must bump it.
-constexpr uint16_t kProtocolVersion = 11;
+constexpr uint16_t kProtocolVersion = 13;
 
 enum class Role : uint8_t {
     Client,

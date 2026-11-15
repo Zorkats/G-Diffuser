@@ -211,6 +211,9 @@ public:
     bool Emote(uint8_t emote, uint32_t nowMs);
     // The host copy of the game has loaded the track.
     bool GridReady(const ReadyToRace& ready, uint32_t nowMs);
+    // One lap of the course the host copy loaded for race raceIndex, which the members' laps and finishes
+    // are held to (RoomMachine::MinLapMs). Said before GridReady.
+    void SetCourseLength(uint16_t raceIndex, float length);
     // The machines the host copy drives in the race raceIndex: its own and the CPUs. They leave with the
     // next Update. A pose for another race, or for a slot a player drives, is dropped.
     void SendPoses(uint16_t raceIndex, const std::vector<StatePose>& poses);
@@ -393,6 +396,9 @@ public:
     bool SetRoomCode(uint32_t code) {
         return machine_.SetCode(code);
     }
+    // A directory room (CONTRACT.md §5.9): the relay ticket the host signed for its members. It goes to every
+    // member now, and to each member who joins or comes back while it is held. The held ticket is not sent again.
+    void SetRelayTicket(const RelayTicket& ticket);
 
     // Handover tokens (decision 21). Each member gets its own over its link, and a new one whenever a member
     // leaves or is removed, or the successor changes while the old one stays. The successor alone gets the
@@ -438,9 +444,12 @@ private:
     void HandOver(uint32_t nowMs);
     // After Handover: keeps the links up until the message is acknowledged, then goes without a goodbye.
     void LingerAfterHandover(uint32_t nowMs);
-    void HandleState(Peer& peer, const Message& msg);
+    void HandleState(Peer& peer, const Message& msg, uint32_t nowMs);
     // True while a race is being loaded, counted in or run.
     bool RaceOn() const;
+    // True while poses are relayed: the race, and its results, where every copy keeps the race on screen a
+    // moment before it fades out (GDX_NET_RACE_END_HOLD_FRAMES).
+    bool PosesFlow() const;
     // The race slot the player drives in that race, or -1.
     int RaceSlotOf(uint8_t id) const;
     void FlushPoses();
@@ -462,6 +471,8 @@ private:
     // The O7.3 checks of a Join: the proof, the ban list, and a Friends room's list. Ok, or why not.
     bool AdmitKey(const Peer& peer, const JoinRequest& join, uint32_t nowMs, RejectReason& why) const;
     void SendKeys();
+    // Sends the held relay ticket over one member's link, when there is one.
+    void SendTicket(Peer& peer);
     // Direct member links (decisions 63, 67, 68, 71): tells each member, once both have sent Paths, how to reach
     // every other one, and what changed since it was last told.
     void SyncPeers(uint32_t nowMs);
@@ -497,6 +508,8 @@ private:
     bool secretExposed_ = false;                       // the secret's holder is no longer the successor
     uint8_t tableTo_ = kSystemId;                      // who holds the table that was last sent
     Bytes32 takeoverSecret_{};                         // sent with the table (decision 32)
+    RelayTicket ticket_;                               // the held relay ticket (CONTRACT.md §5.9)
+    bool haveTicket_ = false;
     uint8_t promotedFrom_ = kSystemId;
     bool windowStarted_ = false;
     bool windowDone_ = false;
@@ -700,6 +713,14 @@ public:
     const std::vector<MemberKey>& Keys() const {
         return keys_;
     }
+    // The newest relay ticket the host sent (CONTRACT.md §5.9), and how many have come; 0 before the first. A
+    // member's relay asks the directory with it.
+    const RelayTicket& Ticket() const {
+        return ticket_;
+    }
+    uint32_t TicketSerial() const {
+        return ticketSerial_;
+    }
     // Decision 60: in a directory room, a handover sends this client only to a successor address DialableIp
     // allows. allow lets loopback through, for a local test directory. A LAN room's successor is not checked.
     void AllowLoopback(bool allow) {
@@ -800,6 +821,8 @@ private:
     Bytes32 expectKey_{};
     bool expectingKey_ = false;
     std::vector<MemberKey> keys_;
+    RelayTicket ticket_;
+    uint32_t ticketSerial_ = 0;
     std::shared_ptr<RelaySend> relaySend_; // shared with the links' sender, which must not hold this object
     links::PeerLinks links_;
     PathsInfo paths_;

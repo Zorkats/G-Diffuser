@@ -44,6 +44,10 @@ const std::string kRegisterSig =
     "1d41386803afce3fef18587ea7fe65aa1873f5f483d51a920c609e8da61d8bf5be9fdd984b0dea7af90dae7678e673a63a9204ab4984b1ae1930f1de5d6b6e0b";
 const std::string kDelistSig =
     "d99b94937488ff15dc91a27f9c28c84a54ccb9ce06c6ad86a845bf51b2ca3765fc0f3c1715d7333de0e1057e0726e8b1fcaeb087a2f5b66f435107ab558e2e0f";
+// §9 relay ticket for ABC234 that expires at 1700000600, and its signature by the TEST 1 seed.
+const std::string kTicketBytes = "{\"code\":\"ABC234\",\"expires\":1700000600}";
+const std::string kTicketSig =
+    "48fbe24c2cff18f945fd2a05d4e0c7283db49cf5a11c7391e46b832a61100ce49e0c614b582cc107eb92b7d611714b4415eca61808ee569243ac7a990cd91308";
 const std::string kHostKey = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
 const std::string kZeroHex(64, '0');
 const std::string kZeroHash = "66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925";
@@ -433,9 +437,11 @@ void TestErrorNames() {
     CHECK(std::string(dir::ErrorName(dir::Error::None)) == "none");
     CHECK(std::string(dir::ErrorName(dir::Error::BadConfig)) == "bad_config");
     CHECK(std::string(dir::ErrorName(dir::Error::CodeTaken)) == "code_taken");
+    CHECK(std::string(dir::ErrorName(dir::Error::InboxFull)) == "inbox_full");
     CHECK(std::string(dir::ErrorName(dir::Error::RateLimited)) == "rate_limited");
     CHECK(std::string(dir::ErrorName(dir::Error::Internal)) == "internal");
     CHECK(std::string(dir::ErrorName(dir::Error::BadSignature)) == "bad_signature");
+    CHECK(std::string(dir::ErrorName(dir::Error::StaleTicket)) == "stale_ticket");
     CHECK(std::string(dir::ErrorName(dir::Error::TurnUpstream)) == "turn_upstream");
     CHECK(std::string(dir::ErrorName(dir::Error::TurnUnavailable)) == "turn_unavailable");
 }
@@ -1129,10 +1135,12 @@ void TestErrorTokens() {
         {"too_large", 413, dir::Error::TooLarge},
         {"bad_secret", 403, dir::Error::BadSecret},
         {"bad_signature", 403, dir::Error::BadSignature},
+        {"stale_ticket", 403, dir::Error::StaleTicket},
         {"not_found", 404, dir::Error::NotFound},
         {"no_route", 404, dir::Error::NoRoute},
         {"method_not_allowed", 405, dir::Error::MethodNotAllowed},
         {"code_taken", 409, dir::Error::CodeTaken},
+        {"inbox_full", 409, dir::Error::InboxFull},
         {"rate_limited", 429, dir::Error::RateLimited},
         {"internal", 500, dir::Error::Internal},
     };
@@ -1207,11 +1215,63 @@ void TestTurnServers() {
     CHECK(host == "kept" && port == 7);
 }
 
+// The §9 ticket, signed the way a host signs it.
+dir::RelayTicket SampleTicket() {
+    dir::RelayTicket ticket;
+    CHECK(dir::SignRelayTicket("ABC234", 1700000600, SeedSigner(kHostSeed), ticket));
+    return ticket;
+}
+
+// Relay tickets (CONTRACT.md §5.9, §9): the bytes, the label and the signature are the contract's vector.
+void TestRelayTicket() {
+    std::string body;
+    CHECK(dir::EncodeRelayTicket("ABC234", 1700000600, body));
+    CHECK(body == kTicketBytes);
+    const std::string message = dir::RelaySigningMessage(body);
+    CHECK(message == "G-NET relay v1\nPOST /v1/turn\n" + kTicketBytes);
+    // Never the bytes of a directory write over the same path.
+    CHECK(message != dir::SigningMessage("/v1/turn", body));
+
+    const dir::RelayTicket ticket = SampleTicket();
+    CHECK(ticket.code == "ABC234" && ticket.expires == 1700000600);
+    CHECK(HexText(ticket.sig.data(), ticket.sig.size()) == kTicketSig);
+
+    // The integer edges of §2, and codes §3 refuses.
+    CHECK(dir::EncodeRelayTicket("ABC234", 0, body) && body == "{\"code\":\"ABC234\",\"expires\":0}");
+    CHECK(dir::EncodeRelayTicket("ABC234", 9007199254740991ull, body) &&
+          body == "{\"code\":\"ABC234\",\"expires\":9007199254740991}");
+    std::string keep = "keep";
+    CHECK(!dir::EncodeRelayTicket("ABC234", 9007199254740992ull, keep));
+    CHECK(!dir::EncodeRelayTicket("abc234", 1, keep));
+    CHECK(!dir::EncodeRelayTicket("ABC23I", 1, keep));
+    CHECK(!dir::EncodeRelayTicket("", 1, keep));
+    CHECK(keep == "keep");
+
+    // No signer, or one that refuses: no ticket, and out is left alone.
+    dir::RelayTicket kept;
+    kept.code = "kept";
+    CHECK(!dir::SignRelayTicket("ABC234", 1, dir::Signer(), kept));
+    CHECK(!dir::SignRelayTicket("ABC234", 1, [](std::string_view, dir::Signature&) { return false; }, kept));
+    CHECK(!dir::SignRelayTicket("abc234", 1, SeedSigner(kHostSeed), kept));
+    CHECK(kept.code == "kept" && kept.expires == 0);
+
+    // A ticket the client cannot encode is never sent.
+    Stub stub;
+    stub.Script(kBaseA, Json(200, kGrant));
+    dir::RelayTicket bad = SampleTicket();
+    bad.code = "abc234";
+    CHECK(ClientOver(stub, {kBaseA}).TurnCredentials(bad).error == dir::Error::Invalid);
+    bad = SampleTicket();
+    bad.expires = 9007199254740992ull;
+    CHECK(ClientOver(stub, {kBaseA}).TurnCredentials(bad).error == dir::Error::Invalid);
+    CHECK(stub.seen.empty());
+}
+
 void TestTurnCredentials() {
     {
         Stub stub;
         stub.Script(kBaseA, Json(200, kGrant));
-        const auto answer = ClientOver(stub, {kBaseA}).TurnCredentials();
+        const auto answer = ClientOver(stub, {kBaseA}).TurnCredentials(SampleTicket());
         CHECK(answer.error == dir::Error::None);
         CHECK(answer.value.username == "u-0f1e2d3c4b5a");
         CHECK(answer.value.password == "p/9a8b+7c6d=");
@@ -1221,14 +1281,15 @@ void TestTurnCredentials() {
         CHECK(Nth(stub, 0).method == "POST");
         CHECK(Nth(stub, 0).url == kBaseA + "/v1/turn");
         CHECK(Nth(stub, 0).contentType == "application/json");
-        CHECK(Nth(stub, 0).body == "{}"); // nothing is written, so nothing is signed
+        // The host's ticket, as the host signed it: the client adds nothing of its own.
+        CHECK(Nth(stub, 0).body == With(kTicketBytes, "}", ",\"sig\":\"" + kTicketSig + "\"}"));
     }
     {
-        // No signer is needed.
+        // The ticket carries the host's signature, so the asking member needs no signer.
         Stub stub;
         stub.Script(kBaseA, Json(200, kGrant));
         const dir::Client unsigned_(std::vector<std::string>{kBaseA}, stub.MakeTransport());
-        CHECK(unsigned_.TurnCredentials().error == dir::Error::None);
+        CHECK(unsigned_.TurnCredentials(SampleTicket()).error == dir::Error::None);
     }
     struct Case {
         dir::Response a;
@@ -1250,13 +1311,18 @@ void TestTurnCredentials() {
         {Refusal(502, "internal"), Down(), dir::Error::Unreachable, 2},
         {Refusal(429, "rate_limited", "17"), Json(200, kGrant), dir::Error::RateLimited, 1},
         {Refusal(400, "bad_field"), Json(200, kGrant), dir::Error::BadField, 1},
+        // A ticket the directory refuses is final: another base would refuse it too.
+        {Refusal(403, "stale_ticket"), Json(200, kGrant), dir::Error::StaleTicket, 1},
+        {Refusal(403, "bad_signature"), Json(200, kGrant), dir::Error::BadSignature, 1},
+        {Refusal(404, "not_found"), Json(200, kGrant), dir::Error::NotFound, 1},
+        {Refusal(401, "stale_ticket"), Down(), dir::Error::Malformed, 1},
         {Refusal(503, "turn_unavailable"), Refusal(400, "bad_json"), dir::Error::BadJson, 2},
     };
     for (const Case& c : cases) {
         Stub stub;
         stub.Script(kBaseA, c.a);
         stub.Script(kBaseB, c.b);
-        const auto answer = ClientOver(stub, {kBaseA, kBaseB}).TurnCredentials();
+        const auto answer = ClientOver(stub, {kBaseA, kBaseB}).TurnCredentials(SampleTicket());
         CHECK(answer.error == c.want);
         CHECK(stub.seen.size() == c.calls);
         CHECK((answer.error == dir::Error::None) == !answer.value.username.empty());
@@ -1286,7 +1352,7 @@ void TestTurnCredentials() {
     for (const std::string& body : malformed) {
         Stub stub;
         stub.Script(kBaseA, Json(200, body));
-        const auto answer = ClientOver(stub, {kBaseA}).TurnCredentials();
+        const auto answer = ClientOver(stub, {kBaseA}).TurnCredentials(SampleTicket());
         CHECK(answer.error == dir::Error::Malformed);
         CHECK(answer.value.username.empty() && answer.value.servers.empty());
     }
@@ -1300,7 +1366,7 @@ void TestTurnCredentials() {
         Stub stub;
         stub.Script(kBaseA, Json(200, "{\"username\":\"" + std::string(512, 'u') + "\",\"password\":\"p\",\"ttl\":7200," +
                                           eight + "}"));
-        const auto answer = ClientOver(stub, {kBaseA}).TurnCredentials();
+        const auto answer = ClientOver(stub, {kBaseA}).TurnCredentials(SampleTicket());
         CHECK(answer.error == dir::Error::None && answer.value.servers.size() == 8);
     }
     // Reads still go out without a content type, writes with one.
@@ -1314,6 +1380,235 @@ void TestTurnCredentials() {
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Failover (the policy in gdx_net_directory.h).
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Friend requests (CONTRACT.md §5.10, §5.11, §9): the TEST 2 key, named Kai "K", asks the TEST 1 key.
+
+const std::string kFriendSeed = "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb";
+const std::string kFriendKey = "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c";
+const std::string kFriendName = "Kai \"K\"";
+const std::string kFriendBytes =
+    "{\"fromKey\":\"3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c\",\"name\":\"Kai \\\"K\\\"\"}";
+const std::string kFriendSig =
+    "cf18c624593afb03dbd2cfd9767b5908d9358493b2e136a44349a3c3031baba27644ab13be47e9bf24c6af2e5998d38ffbc229a06e5a9997f7132e3f0d1c7202";
+const std::string kCollectBytes = "{\"expires\":1700000600}";
+const std::string kCollectSig =
+    "49fc05ef2601b04b82319cfb1a048fbec87367c848c78b14a054982f13c81f50fcc2f309d5a54c8e254c93684d1fde1d162ce6b74ecea066510b9185865e380c";
+const std::string kSendPath = "/v1/friends/d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a/requests";
+const std::string kInboxPath = "/v1/friends/d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a/inbox";
+const std::string kInboxAnswer =
+    "{\"requests\":[{\"fromKey\":\"3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c\","
+    "\"name\":\"Kai \\\"K\\\"\"}]}";
+
+dir::Client FriendClientOver(Stub& stub, std::vector<std::string> bases) {
+    dir::Client client(std::move(bases), stub.MakeTransport());
+    client.SetSigner(SeedSigner(kFriendSeed));
+    return client;
+}
+
+std::string InboxEntry(const std::string& key, const std::string& name) {
+    return "{\"fromKey\":\"" + key + "\",\"name\":\"" + name + "\"}";
+}
+
+void TestFriendRules() {
+    CHECK(dir::kFriendTtlSeconds == 1209600);
+    CHECK(dir::kFriendInboxMax == 20);
+    CHECK(dir::kFriendNameMax == 16);
+    CHECK(std::string(dir::kFriendLabel) == "G-NET friends v1");
+
+    // A name is 1 to 16 printable ASCII bytes with no space at either end (CONTRACT.md §3, gdx_profile_name_ok).
+    for (const std::string& good : {std::string("a"), kFriendName, std::string("A b"), std::string(16, 'z'),
+                                   std::string("~\\\"!"), std::string("PILOT 1")}) {
+        CHECK(dir::IsFriendName(good));
+    }
+    for (const std::string& bad : {std::string(), std::string(17, 'z'), std::string(" a"), std::string("a "),
+                                  std::string(" "), std::string("a\tb"), std::string("a\x7f"), std::string("a\x1f"),
+                                  std::string("caf\xc3\xa9"), std::string("a\nb"), std::string(1, '\0')}) {
+        CHECK(!dir::IsFriendName(bad));
+    }
+
+    std::string body;
+    CHECK(dir::EncodeFriendRequest(kFriendKey, kFriendName, body));
+    CHECK(body == kFriendBytes);
+    CHECK(dir::EncodeFriendRequest(kFriendKey, "a\\b", body) &&
+          body == "{\"fromKey\":\"" + kFriendKey + "\",\"name\":\"a\\\\b\"}");
+    std::string keep = "keep";
+    CHECK(!dir::EncodeFriendRequest(kFriendKey, "", keep));
+    CHECK(!dir::EncodeFriendRequest(kFriendKey, " Kai", keep));
+    CHECK(!dir::EncodeFriendRequest("3D4017C3E843895A92B70AA74D1B7EBC9C982CCF2EC4968CC0CD55F12AF4660C", "Kai", keep));
+    CHECK(!dir::EncodeFriendRequest(kFriendKey.substr(1), "Kai", keep));
+    CHECK(keep == "keep");
+
+    CHECK(dir::EncodeFriendCollect(1700000600, body) && body == kCollectBytes);
+    CHECK(dir::EncodeFriendCollect(0, body) && body == "{\"expires\":0}");
+    CHECK(dir::EncodeFriendCollect(9007199254740991ull, body) && body == "{\"expires\":9007199254740991}");
+    CHECK(!dir::EncodeFriendCollect(9007199254740992ull, keep) && keep == "keep");
+
+    // The friend label, never the bytes of a room write over the same path.
+    const std::string message = dir::FriendSigningMessage(kSendPath, kFriendBytes);
+    CHECK(message == "G-NET friends v1\nPOST " + kSendPath + "\n" + kFriendBytes);
+    CHECK(message != dir::SigningMessage(kSendPath, kFriendBytes));
+    dir::Signature signature{};
+    CHECK(SeedSigner(kFriendSeed)(message, signature));
+    CHECK(HexText(signature.data(), signature.size()) == kFriendSig);
+    CHECK(SeedSigner(kHostSeed)(dir::FriendSigningMessage(kInboxPath, kCollectBytes), signature));
+    CHECK(HexText(signature.data(), signature.size()) == kCollectSig);
+}
+
+void TestFriendSend() {
+    {
+        Stub stub;
+        stub.Script(kBaseA, Json(201, "{\"ttl\":1209600}"));
+        const auto answer = FriendClientOver(stub, {kBaseA}).SendFriendRequest(kHostKey, kFriendKey, kFriendName);
+        CHECK(answer.error == dir::Error::None && answer.value == 1209600);
+        CHECK(stub.seen.size() == 1);
+        CHECK(Nth(stub, 0).method == "POST");
+        CHECK(Nth(stub, 0).url == kBaseA + kSendPath);
+        // The §9 request, byte for byte.
+        CHECK(Nth(stub, 0).body ==
+              kFriendBytes.substr(0, kFriendBytes.size() - 1) + ",\"sig\":\"" + kFriendSig + "\"}");
+    }
+    // An answer the contract does not carry: another ttl, another status, another key.
+    for (const auto& reply : {Json(201, "{\"ttl\":180}"), Json(200, "{\"ttl\":1209600}"),
+                              Json(201, "{\"ttl\":1209600,\"x\":1}"), Json(201, "{}"), Json(201, "")}) {
+        Stub stub;
+        stub.Script(kBaseA, reply);
+        CHECK(FriendClientOver(stub, {kBaseA}).SendFriendRequest(kHostKey, kFriendKey, kFriendName).error ==
+              dir::Error::Malformed);
+    }
+    struct Row {
+        int status;
+        const char* token;
+        dir::Error error;
+    };
+    for (const Row& row : {Row{409, "inbox_full", dir::Error::InboxFull},
+                           Row{403, "bad_signature", dir::Error::BadSignature},
+                           Row{404, "no_route", dir::Error::NoRoute}, Row{400, "bad_field", dir::Error::BadField}}) {
+        Stub stub;
+        stub.Script(kBaseA, Refusal(row.status, row.token));
+        stub.Script(kBaseB, Json(201, "{\"ttl\":1209600}"));
+        CHECK(FriendClientOver(stub, {kBaseA, kBaseB}).SendFriendRequest(kHostKey, kFriendKey, kFriendName).error ==
+              row.error);
+        CHECK(stub.seen.size() == 1);
+    }
+    {
+        // The directory-wide cap answers 429 with an hour to wait (CONTRACT.md §5.10).
+        Stub stub;
+        stub.Script(kBaseA, Refusal(429, "rate_limited", "3600"));
+        const auto answer = FriendClientOver(stub, {kBaseA}).SendFriendRequest(kHostKey, kFriendKey, kFriendName);
+        CHECK(answer.error == dir::Error::RateLimited && answer.retryAfterSeconds == 3600);
+    }
+    {
+        // A write: a 5xx is final, because the request may already be stored. A dead base moves on.
+        Stub stub;
+        stub.Script(kBaseA, Refusal(500, "internal"));
+        stub.Script(kBaseB, Json(201, "{\"ttl\":1209600}"));
+        CHECK(FriendClientOver(stub, {kBaseA, kBaseB}).SendFriendRequest(kHostKey, kFriendKey, kFriendName).error ==
+              dir::Error::Internal);
+        CHECK(stub.seen.size() == 1);
+        Stub down;
+        down.Script(kBaseA, Down());
+        down.Script(kBaseB, Json(201, "{\"ttl\":1209600}"));
+        CHECK(FriendClientOver(down, {kBaseA, kBaseB}).SendFriendRequest(kHostKey, kFriendKey, kFriendName).error ==
+              dir::Error::None);
+        CHECK(down.seen.size() == 2 && Nth(down, 1).body == Nth(down, 0).body);
+    }
+    {
+        // Input the contract refuses is never sent: a bad recipient, a bad sender or name, a request to oneself,
+        // no signer.
+        Stub stub;
+        stub.Script(kBaseA, Json(201, "{\"ttl\":1209600}"));
+        dir::Client client = FriendClientOver(stub, {kBaseA});
+        CHECK(client.SendFriendRequest(kHostKey.substr(2), kFriendKey, kFriendName).error == dir::Error::Invalid);
+        CHECK(client.SendFriendRequest(kHostKey, "zz" + kFriendKey.substr(2), kFriendName).error ==
+              dir::Error::Invalid);
+        CHECK(client.SendFriendRequest(kHostKey, kFriendKey, std::string(17, 'k')).error == dir::Error::Invalid);
+        CHECK(client.SendFriendRequest(kFriendKey, kFriendKey, kFriendName).error == dir::Error::Invalid);
+        dir::Client noSigner(std::vector<std::string>{kBaseA}, stub.MakeTransport());
+        CHECK(noSigner.SendFriendRequest(kHostKey, kFriendKey, kFriendName).error == dir::Error::Invalid);
+        CHECK(stub.seen.empty());
+    }
+}
+
+void TestFriendCollect() {
+    {
+        Stub stub;
+        stub.Script(kBaseA, Json(200, kInboxAnswer));
+        const auto answer = ClientOver(stub, {kBaseA}).CollectFriendRequests(kHostKey, 1700000600);
+        CHECK(answer.error == dir::Error::None);
+        CHECK(answer.value.size() == 1);
+        CHECK(!answer.value.empty() && answer.value[0].fromKey == kFriendKey && answer.value[0].name == kFriendName);
+        CHECK(stub.seen.size() == 1);
+        CHECK(Nth(stub, 0).method == "POST");
+        CHECK(Nth(stub, 0).url == kBaseA + kInboxPath);
+        CHECK(Nth(stub, 0).body == "{\"expires\":1700000600,\"sig\":\"" + kCollectSig + "\"}");
+    }
+    {
+        Stub stub;
+        stub.Script(kBaseA, Json(200, "{\"requests\":[]}"));
+        const auto answer = ClientOver(stub, {kBaseA}).CollectFriendRequests(kHostKey, 1700000600);
+        CHECK(answer.error == dir::Error::None && answer.value.empty());
+    }
+    {
+        // A full inbox, in the directory's order.
+        std::string list = "{\"requests\":[";
+        for (std::size_t i = 0; i < dir::kFriendInboxMax; ++i) {
+            char suffix[3];
+            std::snprintf(suffix, sizeof suffix, "%02x", static_cast<unsigned>(i));
+            list += (i ? "," : "") + InboxEntry(std::string(62, 'a') + suffix, "P" + std::to_string(i));
+        }
+        Stub stub;
+        stub.Script(kBaseA, Json(200, list + "]}"));
+        const auto answer = ClientOver(stub, {kBaseA}).CollectFriendRequests(kHostKey, 1);
+        CHECK(answer.error == dir::Error::None && answer.value.size() == dir::kFriendInboxMax);
+        CHECK(answer.value.size() == dir::kFriendInboxMax && answer.value[19].name == "P19");
+
+        // One more than an inbox holds breaks the contract.
+        Stub over;
+        over.Script(kBaseA, Json(200, list + "," + InboxEntry(kFriendKey, "P20") + "]}"));
+        CHECK(ClientOver(over, {kBaseA}).CollectFriendRequests(kHostKey, 1).error == dir::Error::Malformed);
+    }
+    for (const std::string& bad :
+         {std::string("{\"requests\":{}}"), std::string("{\"requests\":[],\"more\":1}"), std::string("{}"),
+          std::string("{\"requests\":[{\"fromKey\":\"") + kFriendKey + "\"}]}",
+          "{\"requests\":[" + InboxEntry(kFriendKey, "") + "]}",
+          "{\"requests\":[" + InboxEntry(kFriendKey, " Kai") + "]}",
+          "{\"requests\":[" + InboxEntry(kFriendKey, std::string(17, 'k')) + "]}",
+          "{\"requests\":[" + InboxEntry(kFriendKey.substr(1), "Kai") + "]}",
+          "{\"requests\":[{\"fromKey\":\"" + kFriendKey + "\",\"name\":\"Kai\",\"sentMs\":1}]}",
+          "{\"requests\":[{\"fromKey\":\"" + kFriendKey + "\",\"name\":7}]}"}) {
+        Stub stub;
+        stub.Script(kBaseA, Json(200, bad));
+        CHECK(ClientOver(stub, {kBaseA}).CollectFriendRequests(kHostKey, 1).error == dir::Error::Malformed);
+    }
+    {
+        Stub stub;
+        stub.Script(kBaseA, Refusal(403, "stale_ticket"));
+        CHECK(ClientOver(stub, {kBaseA}).CollectFriendRequests(kHostKey, 1).error == dir::Error::StaleTicket);
+        Stub wrong;
+        wrong.Script(kBaseA, Refusal(403, "bad_signature"));
+        CHECK(ClientOver(wrong, {kBaseA}).CollectFriendRequests(kHostKey, 1).error == dir::Error::BadSignature);
+        Stub old;
+        old.Script(kBaseA, Refusal(404, "no_route"));
+        CHECK(ClientOver(old, {kBaseA}).CollectFriendRequests(kHostKey, 1).error == dir::Error::NoRoute);
+    }
+    {
+        // A collect deletes what it answers, so a 5xx is final too: the next collect asks again.
+        Stub stub;
+        stub.Script(kBaseA, Json(503, "busy"));
+        stub.Script(kBaseB, Json(200, kInboxAnswer));
+        CHECK(ClientOver(stub, {kBaseA, kBaseB}).CollectFriendRequests(kHostKey, 1).error == dir::Error::Unreachable);
+        CHECK(stub.seen.size() == 1);
+    }
+    {
+        Stub stub;
+        stub.Script(kBaseA, Json(200, kInboxAnswer));
+        dir::Client client = ClientOver(stub, {kBaseA});
+        CHECK(client.CollectFriendRequests(kHostKey.substr(1), 1).error == dir::Error::Invalid);
+        CHECK(client.CollectFriendRequests(kHostKey, 9007199254740992ull).error == dir::Error::Invalid);
+        CHECK(stub.seen.empty());
+    }
+}
 
 void TestFailover() {
     const std::string room = "{\"room\":" + kRoomObject + "}";
@@ -1807,7 +2102,11 @@ int main() {
     TestErrorTokens();
     TestRetryAfter();
     TestTurnServers();
+    TestRelayTicket();
     TestTurnCredentials();
+    TestFriendRules();
+    TestFriendSend();
+    TestFriendCollect();
     TestFailover();
     TestJsonFuzz();
     TestJsonRoundTrip();

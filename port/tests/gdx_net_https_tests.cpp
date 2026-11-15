@@ -650,9 +650,9 @@ void RedirectChecks(const LocalServer& server) {
     Request postRedirect = MakeRequest(server.Url("/redirhttps307"), 1024);
     postRedirect.body = "payload";
     Response postToHttps = https::Post(postRedirect);
-    Check(postToHttps.error == Error::Network && !postToHttps.ok,
-          "a 307 to https is followed on POST and refused at connect " + Describe(postToHttps));
-    Check(server.Hits() - before == 1, "the 307 hop is attempted once, not repeated");
+    Check(postToHttps.error == Error::Redirect && !postToHttps.ok && postToHttps.status == 307,
+          "a 307 on POST is refused, so the body goes nowhere else " + Describe(postToHttps));
+    Check(server.Hits() - before == 1, "only the first server saw the POST");
 
     Response noLocation = https::Get(MakeRequest(server.Url("/redirnoloc"), 1024));
     Check(noLocation.error == Error::Redirect && !noLocation.ok && noLocation.status == 302,

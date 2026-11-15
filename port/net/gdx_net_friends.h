@@ -61,8 +61,9 @@ bool JoinProofCheck(const Key& friendKey, uint32_t roomId, const Key& hostKey, c
                     const Signature& signature);
 
 // Signs a room directory write with the friend key (CONTRACT.md §8a in the gnet-directory repository): the friend
-// key is the room's host key there. Only a message that starts with "G-NET directory v1" and a line feed is signed,
-// so this cannot be made to sign a join proof or anything else. false, and signature untouched, otherwise.
+// key is the room's host key there. Only a message whose first line is "G-NET directory v1", "G-NET relay v1" or
+// "G-NET friends v1" is signed (CONTRACT.md §8a, §5.9, §5.10, §5.11), so this cannot be made to sign a join proof
+// or anything else. false, and signature untouched, otherwise.
 bool DirectorySign(const unsigned char profileSeed[kSeedBytes], const unsigned char* message, size_t length,
                    Signature& signature);
 

@@ -6,6 +6,7 @@
 #include "../net/gdx_net_lottery.h"
 #include "../net/gdx_net_room.h"
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <set>
@@ -32,7 +33,7 @@ int gFails = 0;
 
 constexpr uint8_t kHostMachine = 4;
 
-RoomConfig Config(uint32_t roomId, uint32_t pool = kPoolAll) {
+RoomConfig Config(uint32_t roomId, uint64_t pool = kPoolAll) {
     RoomConfig config;
     config.roomId = roomId;
     config.pool = pool;
@@ -349,10 +350,13 @@ void ExpectTimeout(Rig& r, Phase during, uint32_t lengthMs, Phase after) {
 
 void TestDraws() {
     std::printf("draws\n");
+    size_t diskDraws = 0;
     for (uint32_t h = 0; h < 2000; h++) {
         const uint8_t t = DrawTrack(h * 2654435761u, kPoolAll, 5);
-        CHECK(t < kStockTracks && t != 5);
+        CHECK(RaceTrackOk(t) && t != 5);
+        diskDraws += t >= kDiskTrackFirst ? 1 : 0;
     }
+    CHECK(diskDraws > 0 && diskDraws < 2000); // the whole pool draws the 64DD courses as well as the stock ones
     const uint32_t two = (1u << 3) | (1u << 9);
     for (uint32_t h = 0; h < 50; h++) {
         CHECK(DrawTrack(h, two, 3) == 9);
@@ -378,7 +382,7 @@ void TestDraws() {
         const LotteryResult other = RunLottery(0xC0FFEE, race, shuffled, kPoolAll, 4);
         CHECK(one == other);
         CHECK(one.ballots == sorted);
-        CHECK(one.winner < sorted.size() && one.track < kStockTracks);
+        CHECK(one.winner < sorted.size() && RaceTrackOk(one.track));
         const uint8_t voted = sorted[one.winner].track;
         CHECK(voted == kTrackRandom ? one.track != 4 : one.track == voted); // a Random win avoids the last track
         const std::vector<uint8_t> bytes = EncodeLottery(one);
@@ -409,7 +413,16 @@ void TestDraws() {
     for (uint32_t room = 1; room <= 400; room++) {
         drawn.insert(DrawnTrack(room, 0, kPoolAll, kTrackNone));
     }
-    CHECK(drawn.size() == kStockTracks);
+    CHECK(drawn.size() == kStockTracks + kDiskTracks); // the 64DD courses too
+    for (const uint8_t t : drawn) {
+        CHECK(RaceTrackOk(t));
+    }
+    // A pool of 64DD courses alone draws only from them.
+    const uint64_t disk = (uint64_t{ 1 } << 33) | (uint64_t{ 1 } << 40);
+    for (uint32_t h = 0; h < 64; h++) {
+        const uint8_t t = DrawTrack(h * 2654435761u, disk, kTrackNone);
+        CHECK(t == 33 || t == 40);
+    }
 }
 
 void TestSeats() {
@@ -517,7 +530,7 @@ void TestTimeouts() {
     r.Add("Cy");
     CHECK(r.m.Start(r.now, r.out));
     ExpectTimeout(r, Phase::Voting, kVoteMs, Phase::Lottery);
-    CHECK(r.m.Lottery().winner == kNoWinner && r.S().track < kStockTracks);
+    CHECK(r.m.Lottery().winner == kNoWinner && RaceTrackOk(r.S().track));
     ExpectTimeout(r, Phase::Lottery, kLotteryMs, Phase::Machine);
     ExpectTimeout(r, Phase::Machine, kMachineMs, Phase::GridSync);
     r.GridAll();
@@ -816,7 +829,7 @@ void TestPick() {
     CHECK(r.S().picker == bo);
     CHECK(r.m.Pick(bo, kTrackRandom, r.now, r.out));
     CHECK(r.m.LastPicked().drawn && r.m.LastPicked().by == bo);
-    CHECK(r.S().track != 7 && r.S().track < kStockTracks); // never the track just raced
+    CHECK(r.S().track != 7 && RaceTrackOk(r.S().track)); // never the track just raced
 
     // The picker leaves: the room draws at once.
     r.Race({ kHostId, bo, ana });
@@ -846,7 +859,7 @@ void TestPick() {
         t.After(kResultsMs);
         CHECK(t.P() == Phase::Pick && t.S().picker == 1);
         t.After(kPickMs);
-        CHECK(t.P() == Phase::Machine && t.S().track < kStockTracks && t.S().track != raced);
+        CHECK(t.P() == Phase::Machine && RaceTrackOk(t.S().track) && t.S().track != raced);
         CHECK(t.m.LastPicked().drawn && t.m.LastPicked().by == kSystemId);
         drawn.insert(t.S().track);
     }
@@ -1187,16 +1200,23 @@ void TestRules() {
     CHECK(!r.m.SetRules(bad));
     CHECK(r.m.Rules() == RaceRules());
 
+    bad = rules;
+    bad.contactDamage = kContactOff + 1;
+    CHECK(!r.m.SetRules(bad));
+    CHECK(r.m.Rules() == RaceRules());
+
+    rules.contactDamage = kContactHalf;
+    rules.shield = true;
     CHECK(r.m.SetRules(rules)); // in the lobby
     r.Begin();
-    rules.laps = 7;
-    CHECK(r.m.SetRules(rules)); // on the lock-in screen
+    // The lock-in screen holds the racers to the engine rule, so from there on the rules stay (protocol 13).
+    RaceRules late = rules;
+    late.laps = 2;
+    CHECK(r.P() == Phase::Machine && !r.m.SetRules(late));
     r.LockAll();
     CHECK(r.m.LastGrid().rules == rules);
 
     // Once the grid is out the race keeps its rules.
-    RaceRules late = rules;
-    late.laps = 2;
     CHECK(!r.m.SetRules(late));
     r.GridAll();
     CHECK(r.P() == Phase::Countdown && !r.m.SetRules(late));
@@ -1205,6 +1225,25 @@ void TestRules() {
     r.CapRace({});
     CHECK(r.P() == Phase::Results && r.m.SetRules(late));
     CHECK(r.m.LastGrid().rules == rules); // the grid of the race that ran is not rewritten
+    r.Verify();
+}
+
+void TestEngineRule() {
+    std::printf("engine rule\n");
+    Rig r;
+    const uint8_t ana = r.Add("Ana");
+    RaceRules rules;
+    rules.engineFixed = true;
+    CHECK(r.m.SetRules(rules));
+    CHECK(r.m.Start(r.now, r.out));
+    r.SkipVote();
+    CHECK(r.P() == Phase::Machine);
+    // Any other setting is refused; the fixed one is taken.
+    CHECK(!r.m.Lock(ana, LockOf(5, 0, 80), r.now, r.out));
+    CHECK(!r.m.Lock(ana, LockOf(5, 0, 0), r.now, r.out));
+    CHECK(!r.Who(ana)->locked);
+    CHECK(r.m.Lock(ana, LockOf(5, 0, kEngineFixed), r.now, r.out));
+    CHECK(r.Who(ana)->locked && r.m.Engine(ana) == kEngineFixed);
     r.Verify();
 }
 
@@ -1278,6 +1317,75 @@ bool Row(const RaceResults& t, size_t at, uint8_t id, ResultKind kind, uint32_t 
 uint16_t Points(const Rig& r, uint8_t id) {
     const PlayerInfo* p = r.Who(id);
     return p != nullptr ? p->points : static_cast<uint16_t>(0xFFFF);
+}
+
+void TestLapFloor() {
+    std::printf("finish reports: no lap faster than the course allows\n");
+    {
+        // No course length: the laps a member names are taken as they are, as before.
+        Rig r;
+        const uint8_t ana = r.Add("Ana");
+        r.Begin();
+        r.ToRacing();
+        CHECK(r.m.MinLapMs() == 0);
+        r.m.NoteMemberLap(ana, 3, r.now);
+        r.At(r.go + 1000);
+        CHECK(r.m.ReportFinish(ana, r.Report(ResultKind::Finished, 1000), r.now, r.out));
+    }
+    {
+        // A length that is not a number, or one given for another race, holds nobody back.
+        Rig r;
+        r.Add("Ana");
+        r.Begin();
+        r.LockAll();
+        r.m.SetCourseLength(r.S().raceIndex, std::nanf(""));
+        CHECK(r.m.MinLapMs() == 0);
+        r.m.SetCourseLength(static_cast<uint16_t>(r.S().raceIndex + 1), 50400.0f);
+        CHECK(r.m.MinLapMs() == 0);
+        r.m.SetCourseLength(r.S().raceIndex, -5.0f);
+        CHECK(r.m.MinLapMs() == 0);
+    }
+
+    Rig r;
+    const uint8_t ana = r.Add("Ana");
+    const uint8_t bo = r.Add("Bo");
+    r.Begin();
+    r.LockAll();
+    CHECK(r.P() == Phase::GridSync);
+    r.m.SetCourseLength(r.S().raceIndex, 50400.0f); // 3 s a lap at 280 units a frame
+    CHECK(r.m.MinLapMs() == 3000);
+    r.GridAll();
+    CHECK(r.P() == Phase::Countdown && r.m.LastGrid().rules.laps == 3);
+    // Before GO nobody is past the first lap, whatever a pose says.
+    r.m.NoteMemberLap(bo, 4, r.now);
+    r.After(kCountdownMs);
+    CHECK(r.P() == Phase::Racing);
+    const uint32_t go = r.now;
+    const auto report = [&r](uint8_t id, uint32_t timeMs) {
+        return r.m.ReportFinish(id, r.Report(ResultKind::Finished, timeMs), r.now, r.out);
+    };
+
+    // 5 s in, a pose naming the last lap is taken as the second: two laps cannot have been driven yet.
+    r.At(go + 5000);
+    r.m.NoteMemberLap(ana, 3, r.now);
+    CHECK(!report(ana, 5000));
+    r.m.NoteMemberLap(ana, 1, r.now); // an older pose never takes a lap back
+    r.At(go + 6000);
+    r.m.NoteMemberLap(ana, 3, r.now);
+    // Now the lap stands, but three laps at 3 s each are not over before 9 s of the host's count.
+    CHECK(!report(ana, 6000));
+    r.At(go + 8999);
+    CHECK(!report(ana, 8999));
+    r.At(go + 9000);
+    CHECK(report(ana, 9000));
+
+    // Bo's pose from the countdown counted as the first lap only. Silent for a while, its next pose catches up.
+    r.At(go + 20000);
+    CHECK(!report(bo, 20000));
+    r.m.NoteMemberLap(bo, 4, r.now);
+    CHECK(report(bo, 20000));
+    RaceResults t = r.Table();
+    CHECK(Row(t, 0, ana, ResultKind::Finished, 9000, 100) && Row(t, 1, bo, ResultKind::Finished, 20000, 93));
 }
 
 void TestFinishCheck() {
@@ -1986,7 +2094,7 @@ void TestCustomTrack() {
         CHECK(r.m.TrackHeld(r.bo, r.now, r.out));
         r.After(kAssetsMs);
         CHECK(r.P() == Phase::GridSync);
-        CHECK(r.S().track < kStockTracks && r.S().track != r.raced);
+        CHECK(RaceTrackOk(r.S().track) && r.S().track != r.raced);
         CHECK(r.m.LastGrid().track.track == r.S().track && r.m.LastGrid().track.custom == CustomTrack{});
         CHECK(r.m.TrackOwner() == kSystemId && !r.m.HoldsTrack(r.ana));
         CHECK(r.OnGrid().size() == 3);
@@ -2002,8 +2110,8 @@ void TestCustomTrack() {
         r.PickAndLock();
         r.m.Leave(r.ana, r.now, r.out);
         CHECK(r.P() == Phase::GridSync);
-        CHECK(r.S().track < kStockTracks && r.S().track != r.raced);
-        CHECK(Ids(r.m.LastGrid()).size() == 2 && r.m.LastGrid().track.track < kStockTracks);
+        CHECK(RaceTrackOk(r.S().track) && r.S().track != r.raced);
+        CHECK(Ids(r.m.LastGrid()).size() == 2 && RaceTrackOk(r.m.LastGrid().track.track));
     }
 
     // The owner leaves once the host holds it: the transfer goes on from the host, and Bo is the one left.
@@ -2022,7 +2130,7 @@ void TestCustomTrack() {
         CustomRig r;
         CHECK(r.m.Pick(r.ana, CustomChoice(1), r.now, r.out));
         r.m.Leave(r.ana, r.now, r.out);
-        CHECK(r.P() == Phase::Machine && r.S().track < kStockTracks && r.S().track != r.raced);
+        CHECK(r.P() == Phase::Machine && RaceTrackOk(r.S().track) && r.S().track != r.raced);
         r.LockAll();
         CHECK(r.P() == Phase::GridSync && r.m.LastGrid().track.track == r.S().track);
     }
@@ -2033,7 +2141,7 @@ void TestCustomTrack() {
         CHECK(!r.m.TrackFailed(r.now, r.out)); // nothing to fail on a pick screen
         CHECK(r.m.Pick(r.ana, CustomChoice(1), r.now, r.out));
         CHECK(r.m.TrackFailed(r.now, r.out));
-        CHECK(r.P() == Phase::Machine && r.S().track < kStockTracks && r.S().track != r.raced);
+        CHECK(r.P() == Phase::Machine && RaceTrackOk(r.S().track) && r.S().track != r.raced);
         CHECK(!r.m.TrackFailed(r.now, r.out)); // a stock track cannot fail
         CHECK(!r.m.TrackHeld(r.ana, r.now, r.out));
         r.LockAll();
@@ -2046,7 +2154,7 @@ void TestCustomTrack() {
         r.PickAndLock();
         CHECK(r.P() == Phase::Assets);
         CHECK(r.m.TrackFailed(r.now, r.out));
-        CHECK(r.P() == Phase::GridSync && r.m.LastGrid().track.track < kStockTracks);
+        CHECK(r.P() == Phase::GridSync && RaceTrackOk(r.m.LastGrid().track.track));
         CHECK(r.OnGrid().size() == 3);
     }
 
@@ -2055,7 +2163,7 @@ void TestCustomTrack() {
         CustomRig r(Config(room));
         CHECK(r.m.Pick(r.ana, CustomChoice(uint8_t(room)), r.now, r.out));
         CHECK(r.m.TrackFailed(r.now, r.out));
-        CHECK(r.S().track < kStockTracks && r.S().track != r.raced);
+        CHECK(RaceTrackOk(r.S().track) && r.S().track != r.raced);
     }
 
     // A custom ballot: the winner's ballot names the track and its owner.
@@ -2390,9 +2498,11 @@ int main() {
     TestGridOrder();
     TestTrackCheck();
     TestRules();
+    TestEngineRule();
     TestEmotes();
     TestSeries();
     TestFinishCheck();
+    TestLapFloor();
     TestRaceEnd();
     TestResultsOrder();
     TestRaceLeaveAndJoin();

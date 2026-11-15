@@ -151,6 +151,10 @@ static u32 sHeldAtGo; // samples held before GO, while the machines stood on the
 static s32 sRaceTicks;  // ticks since GO: a racer's time is counted in these
 static s32 sFinishSent; // the room has heard how our own race ended
 static s32 sCpusGone;   // the host's game left this race and its CPU machines were taken off this copy's road
+static s32 sEndHeld;    // frames the race stayed on screen after the room called it
+// This copy left the race and the screen fades out to the room page. The race runs on under the fade and
+// stays online, so no stock menu (results, pause, retire) opens in it, until the mode changes.
+static s32 sFading;
 
 // The host's game says where the humans stand this often, in ticks.
 #define GDX_NET_STANDING_EVERY 30
@@ -379,11 +383,20 @@ static void gdx_net_race_leave(void) {
                      (int) sRoom.raceIndex);
     }
     sArmed = sLeave = sRoomRace = sHandOver = 0;
+    sFading = 1; // the rest once the fade is over: gdx_net_race_mode_change
+}
+
+// The fade is over and the mode changes (game.c, GAMEMODE_CHANGE_INIT): the race is put away. The main menu
+// comes up on the room screen, which says what happens next or why the room closed.
+void gdx_net_race_mode_change(void) {
+    if (!sFading) {
+        return;
+    }
+    sFading = 0;
     gdx_net_room_course_end();
     gdx_net_race_machines_restore();
     gdx_net_race_set_online(0);
     gdx_net_race_set_active(0);
-    // The main menu comes up on the room screen, which says what happens next or why the room closed.
 }
 
 // Called by Racer_Init for every race and every scene that builds racers. Returns the number of racers:
@@ -396,6 +409,7 @@ s32 gdx_net_race_begin(s32 stockRacers) {
     s32 local;
     s32 echo;
 
+    gdx_net_race_mode_change(); // a race still fading out is put away before the next one is set up
     gdx_net_race_reset();
     sTick = 0;
     sEchoSide = 0.0f;
@@ -434,6 +448,8 @@ s32 gdx_net_race_begin(s32 stockRacers) {
         rules.magnetRange = sRoom.magnetRange;
         rules.magnetStrength = sRoom.magnetStrength;
         rules.boostFrames = sRoom.boostFrames;
+        rules.contactDamage = sRoom.contactDamage;
+        rules.shield = sRoom.shield;
         gdx_net_race_set_rules(&rules);
         // Every copy builds the field's machines alike: a record where every human on that character
         // brought the same one, the stock machine everywhere else (decision 10).
@@ -444,7 +460,7 @@ s32 gdx_net_race_begin(s32 stockRacers) {
         gdx_net_race_link(sRoom.raceIndex, sRoom.self);
         sRoomRace = 1;
         sReadySent = sUpdates = sGoLogged = 0;
-        sRaceTicks = sFinishSent = sCpusGone = 0;
+        sRaceTicks = sFinishSent = sCpusGone = sEndHeld = 0;
         gdx_net_race_box_reset();
         sHeldAtGo = 0;
         sElapsedMs = -1;
@@ -493,6 +509,7 @@ void gdx_net_race_loaded(void) {
     unsigned char digest[32];
     CourseSegment* segment;
     u32 loadMs;
+    f32 length;
     s32 count;
     s32 i;
 
@@ -519,9 +536,12 @@ void gdx_net_race_loaded(void) {
     gdx_net_race_digest_end(digest);
 
     loadMs = gdx_lan_now_ms() - sArmMs;
-    gdx_lan_race_ready(sRoom.raceIndex, digest, loadMs);
-    gdx_dbg_logf("[net-race] race %d: track loaded %d ms after the lock-in screen, %d racers, our slot %d\n",
-                 (int) sRoom.raceIndex, (int) loadMs, sGrid.racers, sRoom.self);
+    length = (gCurrentCourseInfo != NULL) ? gCurrentCourseInfo->length : 0.0f;
+    gdx_lan_race_ready(sRoom.raceIndex, digest, loadMs, length);
+    // The length sets the shortest lap the host takes from a member: a wrong one would refuse honest finishes.
+    gdx_dbg_logf("[net-race] race %d: track loaded %d ms after the lock-in screen, %d racers, our slot %d, "
+                 "lap length %.0f\n",
+                 (int) sRoom.raceIndex, (int) loadMs, sGrid.racers, sRoom.self, (double) length);
 }
 
 // The first thing Race_Update does. 0: run the frame. 1: the room has not started the race yet, so the
@@ -530,6 +550,9 @@ s32 gdx_net_race_frame(void) {
     GdxNetRaceRoom room;
     int elapsed;
 
+    if (sFading) {
+        return 0; // the mode change is under way, and the race runs on under the fade
+    }
     if (sArmed || sLeave) {
         // Armed and never taken: the track did not load, and Racer_Init never ran.
         gdx_net_race_leave();
@@ -541,7 +564,18 @@ s32 gdx_net_race_frame(void) {
     gdx_lan_race_room(&room);
     if (!room.inRoom || (room.raceIndex != sRoom.raceIndex) || !room.onGrid ||
         !gdx_net_race_room_phase_is_race(&room)) {
-        // The race is over, the room closed, or the host found our track different and we watch.
+        // The race is over, the room closed, or the host found our track different and we watch. A race
+        // the room called stays on screen a moment first.
+        if (gdx_net_race_end_holds(room.inRoom, room.raceIndex == sRoom.raceIndex, room.onGrid, sEndHeld)) {
+            if (sEndHeld == 0) {
+                gdx_dbg_logf("[net-race] race %d: the room called the race, it stays on screen %d frames\n",
+                             (int) sRoom.raceIndex, GDX_NET_RACE_END_HOLD_FRAMES);
+                sFinishSent = 1; // the room has its results: a finish now would come too late
+            }
+            sEndHeld++;
+            sUpdates++;
+            return 0;
+        }
         gdx_net_race_leave();
         return 2;
     }
@@ -876,6 +910,8 @@ void gdx_net_race_puppet_update(Racer* racer) {
     if (gdx_net_race_online()) {
         gdx_net_race_puppet_fate(racer, pose.flags);
     }
+    // Before anything moves it or reads it: the guess ahead, the contact code's closing speed.
+    gdx_net_race_speed_cap(pose.vel);
     // The pair loop reads this, so a remote machine that attacks pushes and damages ours as one here would.
     racer->attackState = (s16) pose.attack;
 

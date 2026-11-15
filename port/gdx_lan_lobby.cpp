@@ -42,6 +42,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -138,6 +139,7 @@ struct Command {
     uint8_t value = 0; // a track, a preset message, a racer cap or a player id
     LockRequest lock;
     ReadyToRace ready;
+    float courseLength = 0.0f; // GridReady: one lap of the course this copy loaded
     RaceRules rules;
     FinishReport finish;
     std::vector<uint8_t> order; // Standing: player ids, first to last
@@ -502,6 +504,7 @@ void RunHostCommand(LobbyHost& host, const Command& cmd, uint32_t now) {
         host.Ban(cmd.value, now);
         break;
     case Command::Type::GridReady:
+        host.SetCourseLength(cmd.ready.raceIndex, cmd.courseLength);
         host.GridReady(cmd.ready, now);
         break;
     case Command::Type::Rules:
@@ -695,8 +698,13 @@ void Run(Kind kind, std::shared_ptr<UdpSocket> socket, uint16_t port, LocalProfi
     std::unique_ptr<online::RoomListing> listing;
     online::ListState loggedListState = online::ListState::Off;
     uint32_t listingCode = kNoRoomCode; // the listing's code; the room carries it only while the room is listed
+    // CONTRACT.md §5.9: the directory grants members relay credentials only with a ticket the host signed for the
+    // listed code. The host signs one when the code it shows changes, and every kTicketRefreshSeconds.
+    uint32_t ticketCode = kNoRoomCode;
+    uint64_t ticketAt = 0; // Unix seconds of the last signing
     const auto startListing = [&](RoomType type, uint32_t takeoverCode, const Bytes32& takeoverSecret) {
         listingCode = kNoRoomCode;
+        ticketCode = kNoRoomCode;
         if (type == RoomType::Lan || online.bases.empty() || online.hostKey.empty()) {
             gdx_port_logf("[lan] this %s room is not listed: %s\n", RoomTypeName(type),
                           type == RoomType::Lan       ? "a LAN room"
@@ -745,12 +753,14 @@ void Run(Kind kind, std::shared_ptr<UdpSocket> socket, uint16_t port, LocalProfi
     // type is known, lasts through a rejoin, and is released when the member hosts or leaves.
     std::unique_ptr<online::MemberRelay> relay;
     std::vector<NetAddress> relayPeers;
+    uint32_t relayTicketSerial = 0; // the client's TicketSerial when the relay last took a ticket
     const auto releaseRelay = [&]() {
         if (relay) {
             relay->Release();
             relay.reset();
         }
         relayPeers.clear();
+        relayTicketSerial = 0;
         livePaths = ownPaths;
     };
     const auto makeClient = [&](const NetAddress& addr) {
@@ -962,6 +972,11 @@ void Run(Kind kind, std::shared_ptr<UdpSocket> socket, uint16_t port, LocalProfi
             if (handOver) {
                 leaving = true;
                 host->Leave(now);
+                // The successor takes the code over: with the record gone it registers the same code at once,
+                // where a takeover under its own key would wait out the directory's quiet window (CONTRACT.md §5.3).
+                if (listing) {
+                    listing->Delist();
+                }
                 gdx_port_logf("[lan] left the room; it goes on until it is handed over\n");
             }
         }
@@ -1035,6 +1050,14 @@ void Run(Kind kind, std::shared_ptr<UdpSocket> socket, uint16_t port, LocalProfi
                         }
                     });
             }
+            if (relay && client->TicketSerial() != relayTicketSerial) {
+                // A rejoined client counts from 0 again, so any change is a ticket the relay has not seen.
+                relayTicketSerial = client->TicketSerial();
+                net::directory::RelayTicket ticket;
+                if (online::DirectoryTicket(client->Ticket(), ticket)) {
+                    relay->SetTicket(ticket);
+                }
+            }
             if (relay) {
                 relay->Update(now);
                 const std::optional<NetAddress> relayed = relay->Relayed();
@@ -1063,10 +1086,26 @@ void Run(Kind kind, std::shared_ptr<UdpSocket> socket, uint16_t port, LocalProfi
                 host->SetTakeoverSecret(secret);
             }
             const online::ListView lv = listing->View();
-            // A code the directory has not accepted yet, or no longer keeps, is not shown to anyone.
+            // A code the directory has not accepted yet, or no longer keeps, is not shown to anyone. A host that is
+            // leaving delisted the room itself and keeps showing the code, which the successor takes over.
             const uint32_t shown = lv.state == online::ListState::Listed ? listingCode : kNoRoomCode;
-            if (host->Room(now).code != shown) {
+            if (!leaving && host->Room(now).code != shown) {
                 host->SetRoomCode(shown);
+            }
+            if (!leaving && shown != kNoRoomCode) {
+                const uint64_t unixNow = static_cast<uint64_t>(std::time(nullptr));
+                if (shown != ticketCode || unixNow < ticketAt ||
+                    unixNow - ticketAt >= net::directory::kTicketRefreshSeconds) {
+                    RelayTicket ticket;
+                    if (online::MintRelayTicket(shown, unixNow, DirectorySignerFor(online), ticket)) {
+                        host->SetRelayTicket(ticket);
+                    } else {
+                        gdx_port_logf("[lan] could not sign a relay ticket; trying again in %u s\n",
+                                      static_cast<unsigned>(net::directory::kTicketRefreshSeconds));
+                    }
+                    ticketCode = shown;
+                    ticketAt = unixNow;
+                }
             }
             if (lv.state != loggedListState) {
                 loggedListState = lv.state;
@@ -1093,9 +1132,7 @@ void Run(Kind kind, std::shared_ptr<UdpSocket> socket, uint16_t port, LocalProfi
             if (host->Closed()) {
                 gdx_port_logf("[lan] %s\n", host->CloseText().c_str());
                 if (listing) {
-                    if (!host->HandedOver()) {
-                        listing->Delist(); // nobody was left to host it
-                    }
+                    listing->Delist(); // already done when the host left; nothing is sent twice
                     listing->Release(now);
                 }
                 socket->Close();
@@ -1502,6 +1539,13 @@ void SetCpuFill(bool on) {
     PushType(Command::Type::CpuFill, 0, on);
 }
 
+void SetRules(const RaceRules& rules) {
+    Command cmd;
+    cmd.type = Command::Type::Rules;
+    cmd.rules = rules;
+    Push(std::move(cmd));
+}
+
 void Kick(uint8_t id) {
     PushType(Command::Type::Kick, id);
 }
@@ -1753,6 +1797,7 @@ extern "C" void gdx_lan_lock_in_room(GdxNetLockInRoom* out) {
     out->leftMs = view.room.phaseLeftMs;
     out->lockedCount = view.room.locked;
     out->racers = view.room.racers;
+    out->engineFixed = view.room.rules.engineFixed ? 1 : 0;
     out->track = view.room.track;
     if (view.room.track == gdx::net::lobby::kTrackCustom) {
         const std::string& title = view.room.custom.title;
@@ -1845,6 +1890,8 @@ extern "C" void gdx_lan_race_room(GdxNetRaceRoom* out) {
     out->magnetRange = grid.rules.magnetRange;
     out->magnetStrength = grid.rules.magnetStrength;
     out->boostFrames = static_cast<int>(grid.rules.boostFrames);
+    out->contactDamage = grid.rules.contactDamage;
+    out->shield = grid.rules.shield ? 1 : 0;
 }
 
 extern "C" int gdx_lan_race_track(unsigned char* id, unsigned char* out, unsigned long capacity, unsigned long* length) {
@@ -1889,13 +1936,15 @@ extern "C" int gdx_lan_race_clock(unsigned* hostMs) {
     return 1;
 }
 
-extern "C" void gdx_lan_race_ready(unsigned raceIndex, const unsigned char* digest, unsigned loadMs) {
+extern "C" void gdx_lan_race_ready(unsigned raceIndex, const unsigned char* digest, unsigned loadMs,
+                                   float courseLength) {
     using namespace gdx::lan;
     Command cmd;
     cmd.type = Command::Type::GridReady;
     cmd.ready.raceIndex = static_cast<uint16_t>(raceIndex);
     std::memcpy(cmd.ready.digest.data(), digest, cmd.ready.digest.size());
     cmd.ready.loadMs = static_cast<uint16_t>(loadMs > 0xFFFFu ? 0xFFFFu : loadMs);
+    cmd.courseLength = courseLength;
     Push(std::move(cmd));
 }
 
@@ -2030,6 +2079,12 @@ extern "C" void gdx_lan_race_capture_rules(void) {
     cmd.rules.boostFrames = boost <= 0 ? 0u : boost > static_cast<int>(kBoostFramesMax) ? kBoostFramesMax
                                                                                         : static_cast<uint32_t>(boost);
     Push(std::move(cmd));
+    gdx_lan_race_capture_cpu();
+}
+
+extern "C" void gdx_lan_race_capture_cpu(void) {
+    using namespace gdx::lan;
+    using namespace gdx::net::lobby;
     // The CPU-only options (decision 24). Only the host's copy runs CPUs: a client's worker drops this
     // command with the other host controls (RunClientCommand).
     Command cpu;

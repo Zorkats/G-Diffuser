@@ -3,7 +3,8 @@
 //
 // The directory is a Cloudflare Worker the owner deploys (CONTRACT.md §1). This module opens no socket. The caller
 // passes a Transport that performs one HTTPS request and reports what came back. Nothing here reads a clock: the
-// directory reads its own, and no call carries a time (CONTRACT.md §5).
+// directory reads its own, and no room call carries a time (CONTRACT.md §5). A relay ticket carries the expiry its
+// host chose, which the caller passes in (CONTRACT.md §5.9).
 //
 // Every rule is cited to its CONTRACT.md section. A rule changes in the contract first. The tests in
 // port/tests/gdx_net_directory_tests.cpp check the vectors of CONTRACT.md §9.
@@ -14,7 +15,7 @@
 // Failover, per call, through the base URLs in order. A transport failure moves on to the next base, for reads and
 // writes alike. A 5xx moves on for a read only. A write may have been applied before the error (CONTRACT.md §6), and
 // a retry would then answer code_taken or bad_secret for a write that succeeded. A 4xx answer, and any 2xx answer, is
-// final. Relay credentials (CONTRACT.md §5.9) are a POST that writes nothing, so they fail over like a read.
+// final. Relay credentials (CONTRACT.md §5.9) are a POST that changes no room, so they fail over like a read.
 
 #pragma once
 
@@ -97,6 +98,59 @@ using Signer = std::function<bool(std::string_view message, Signature& out)>;
 
 // The first line of every signed message (CONTRACT.md §8a).
 constexpr std::string_view kSignLabel = "G-NET directory v1";
+
+// Relay tickets (CONTRACT.md §5.9). The host signs one for its live room under its own first line, so a ticket can
+// never stand for a directory write. It expires kTicketLifetimeSeconds out, and the host sends a new one every
+// kTicketRefreshSeconds, so a member always holds one the directory takes (it allows 300 s past the expiry).
+constexpr std::string_view kRelayLabel = "G-NET relay v1";
+constexpr uint32_t kTicketLifetimeSeconds = 600;
+constexpr uint32_t kTicketRefreshSeconds = 300;
+
+struct RelayTicket {
+    std::string code;
+    uint64_t expires = 0; // Unix time in seconds
+    Signature sig{};
+};
+
+// The ticket's body before sig: {"code":"...","expires":N}. Refuses a code that fails §3 and an expiry outside the
+// §2 integer range. On refusal out is left alone.
+bool EncodeRelayTicket(std::string_view code, uint64_t expires, std::string& out);
+
+// The bytes a ticket's signature covers: kRelayLabel, "\nPOST /v1/turn\n", then the body EncodeRelayTicket wrote.
+std::string RelaySigningMessage(std::string_view unsignedBody);
+
+// Signs a ticket with the host's signer, the one its directory writes use. false, and out left alone, when the
+// ticket cannot be encoded or the signer refuses.
+bool SignRelayTicket(std::string_view code, uint64_t expires, const Signer& signer, RelayTicket& out);
+
+// The friend mailbox (CONTRACT.md §5.10, §5.11). A send is signed by the sender's friend key and a collect by the
+// inbox's, both under kFriendLabel, so neither can stand for a room write or a relay ticket. The client signs a
+// collect that expires kCollectLifetimeSeconds out; the directory takes it inside the relay ticket's window.
+constexpr std::string_view kFriendLabel = "G-NET friends v1";
+constexpr uint32_t kFriendTtlSeconds = 1209600; // 14 days
+constexpr size_t kFriendInboxMax = 20;
+constexpr size_t kFriendNameMax = 16;
+constexpr uint32_t kCollectLifetimeSeconds = 600;
+
+// One request a collect returned: the sender's friend key (§3) and the name they sent.
+struct FriendRequestEntry {
+    std::string fromKey;
+    std::string name;
+};
+
+// A name a friend request may carry (CONTRACT.md §3): 1 to kFriendNameMax printable ASCII bytes, no space at
+// either end. The profile name rule, so every profile name passes.
+bool IsFriendName(std::string_view text);
+
+// The send's body before sig: {"fromKey":"...","name":"..."}, with a quote or backslash in the name escaped as §2
+// allows. Refuses a key or name that fails §3. On refusal out is left alone.
+bool EncodeFriendRequest(std::string_view fromKey, std::string_view name, std::string& out);
+
+// The collect's body before sig: {"expires":N}. Refuses an expiry outside the §2 integer range.
+bool EncodeFriendCollect(uint64_t expires, std::string& out);
+
+// The bytes a mailbox signature covers: kFriendLabel, "\nPOST ", the path, a line feed, then the body.
+std::string FriendSigningMessage(std::string_view path, std::string_view unsignedBody);
 
 struct RegisterRequest {
     std::string code;
@@ -211,10 +265,12 @@ enum class Error : uint8_t {
     TooLarge,
     BadSecret,
     BadSignature,     // the sig did not verify, or a heartbeat named another key than the record's (CONTRACT.md §8a)
+    StaleTicket,      // a relay ticket's expiry is too far past or ahead of the directory's clock (CONTRACT.md §5.9)
     NotFound,
     NoRoute,
     MethodNotAllowed,
     CodeTaken,
+    InboxFull,        // 409: the recipient's inbox holds kFriendInboxMax requests (CONTRACT.md §5.10)
     RateLimited,
     Internal,         // a write may already be applied (CONTRACT.md §6): report it, never retry it elsewhere
     TurnUpstream,     // 502: Cloudflare gave the directory no relay credentials (CONTRACT.md §5.9); try again later
@@ -257,14 +313,23 @@ public:
     Answer<std::optional<Record>> QuickRace(uint16_t protocol) const;
     // Value: the rooms the key hosts, of any type (CONTRACT.md §5.7).
     Answer<std::vector<Record>> HostRooms(std::string_view hostKey, uint16_t protocol) const;
-    // Value: credentials for the relay (CONTRACT.md §5.9). A base that answers 502 or 503 is passed over for the
-    // next; when none gives credentials, the error is the last of those two any base gave, else Unreachable.
-    Answer<TurnGrant> TurnCredentials() const;
+    // Value: credentials for the relay (CONTRACT.md §5.9), asked with the room host's ticket. A base that answers 502
+    // or 503 is passed over for the next; when none gives credentials, the error is the last of those two any base
+    // gave, else Unreachable. Invalid, with nothing sent, when the ticket cannot be encoded.
+    Answer<TurnGrant> TurnCredentials(const RelayTicket& ticket) const;
+    // Value: the request's lifetime, kFriendTtlSeconds (CONTRACT.md §5.10). The signer must sign with fromKey's
+    // secret half. A send changes the directory, so it fails over as a write does.
+    Answer<uint32_t> SendFriendRequest(std::string_view toKey, std::string_view fromKey, std::string_view name) const;
+    // Value: the requests sent to key, oldest first, which the directory deletes as it answers (CONTRACT.md §5.11).
+    // The signer must sign with key's secret half. expires is Unix seconds, chosen by the caller. A collect deletes,
+    // so it fails over as a write does: a 5xx may have emptied the inbox.
+    Answer<std::vector<FriendRequestEntry>> CollectFriendRequests(std::string_view key, uint64_t expires) const;
 
 private:
-    // Signs body for path and sends it as a write. Invalid when there is no signer or it refuses.
-    Answer<uint32_t> Write(const std::string& path, std::string body, int expected,
-                           bool (*read)(const JsonValue&, uint32_t&)) const;
+    // Signs body for path under label and sends it as a write. Invalid when there is no signer or it refuses.
+    template <typename T>
+    Answer<T> Write(std::string_view label, const std::string& path, std::string body, int expected,
+                    bool (*read)(const JsonValue&, T&)) const;
 
     std::vector<std::string> bases_;
     Transport transport_;

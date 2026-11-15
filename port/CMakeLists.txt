@@ -458,6 +458,7 @@ gdx_add_main_target(G-Diffuser
     net/gdx_net_lottery.cpp        # O6.4 the Open room's lottery commitment and its reveal
     net/gdx_net_succession.cpp     # D28 who takes the room over when its host is lost
     gdx_net_machine_select.c       # O3 lock-in screen: when the stock machine screens belong to the room
+    gdx_net_shield.c               # G4 room rule: the shield beside energy, and its bar
     gdx_net_race_box.c             # O3 room race: the quit box every racer has (continue, return to room, leave the room)
     gdx_net_race_words.c           # O3 room race: the quit box words as stock-style CI textures (original art)
     gdx_net_room_screen.c          # O3 room screen of the main menu: pages, cursor and the texts to draw
@@ -1681,6 +1682,17 @@ if(MSVC)
 elseif(GDX_PORT_WARN_FLAGS)
     target_compile_options(gdx_net_machine_select_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
 endif()
+# Online G4 shield rule: what a hit takes on lap 1 and later, lava, the pit refill and the bar's spans. The
+# room's rule is one function the test supplies, so no game code is linked.
+add_executable(gdx_net_shield_tests
+    tests/gdx_net_shield_tests.c
+    gdx_net_shield.c)
+target_include_directories(gdx_net_shield_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(gdx_net_shield_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_net_shield_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
 # Online O3 room race: the quit box every racer has. Its rows on a host and on a client, what opens and
 # closes it, the cursor, and what each row does. The room and the race are the five functions the test supplies.
 add_executable(gdx_net_race_box_tests
@@ -1779,6 +1791,7 @@ foreach(gdx_net_test IN ITEMS
         gdx_net_channel_tests
         gdx_net_room_tests
         gdx_net_machine_select_tests
+        gdx_net_shield_tests
         gdx_net_race_box_tests
         gdx_net_room_screen_tests
         gdx_net_track_choice_tests
@@ -2421,6 +2434,7 @@ if(GDX_BUILD_JP AND NOT ANDROID)
         gdx_net_friend_store.cpp
         gdx_net_track_cache.cpp
         gdx_net_machine_select.c
+        gdx_net_shield.c
         gdx_net_race_box.c
         gdx_net_race_words.c
         gdx_net_room_screen.c

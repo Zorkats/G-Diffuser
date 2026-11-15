@@ -47,6 +47,8 @@ typedef struct GdxNetRaceRoom {
     float magnetRange;
     float magnetStrength;
     int boostFrames; /* 0 is the stock boost length */
+    int contactDamage; /* GDX_NET_RULE_CONTACT_* (net/gdx_net_race.h) */
+    int shield;
 } GdxNetRaceRoom;
 
 void gdx_lan_race_room(GdxNetRaceRoom* out);
@@ -63,8 +65,9 @@ int gdx_lan_race_elapsed(unsigned raceIndex, int* elapsedMs);
  * this copy is in no room or has not measured the host clock yet; hostMs is then left alone. */
 int gdx_lan_race_clock(unsigned* hostMs);
 
-/* This copy has loaded the track: digest is 32 bytes over its control points. */
-void gdx_lan_race_ready(unsigned raceIndex, const unsigned char* digest, unsigned loadMs);
+/* This copy has loaded the track: digest is 32 bytes over its control points. courseLength is one lap of
+ * that course in game units, 0 when unknown; on the host it sets the shortest lap a member may claim. */
+void gdx_lan_race_ready(unsigned raceIndex, const unsigned char* digest, unsigned loadMs, float courseLength);
 
 /* The host's game leaves the race raceIndex while the others drive on. The room tells every copy that
  * the CPU machines, which only the host's game drives, are out of that race. Does nothing on a client. */

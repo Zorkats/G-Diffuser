@@ -751,7 +751,7 @@ void LobbyHost::HandleMessage(Peer& peer, const Message& msg, uint32_t nowMs) {
             return;
         }
         if (msg.type == kMsgState && peer.joined) {
-            HandleState(peer, msg);
+            HandleState(peer, msg, nowMs);
             return;
         }
         refused_++;
@@ -889,6 +889,7 @@ void LobbyHost::HandleJoin(Peer& peer, const Message& msg, uint32_t nowMs) {
     peer.channel->SendReliable(kMsgWelcome, welcome.data(), welcome.size());
     Dispatch(out);
     SendKeys();
+    SendTicket(peer);
     Note(JoinedText(join.name, join.seat == Seat::Watch));
 }
 
@@ -963,6 +964,22 @@ std::vector<MemberKey> LobbyHost::Keys() const {
 
 void LobbyHost::SendKeys() {
     SendToPlayers(kMsgKeys, EncodeKeys(Keys()));
+}
+
+void LobbyHost::SetRelayTicket(const RelayTicket& ticket) {
+    if (haveTicket_ && ticket == ticket_) {
+        return;
+    }
+    ticket_ = ticket;
+    haveTicket_ = true;
+    SendToPlayers(kMsgRelayTicket, EncodeRelayTicket(ticket_));
+}
+
+void LobbyHost::SendTicket(Peer& peer) {
+    if (haveTicket_) {
+        const std::vector<uint8_t> bytes = EncodeRelayTicket(ticket_);
+        peer.channel->SendReliable(kMsgRelayTicket, bytes.data(), bytes.size());
+    }
 }
 
 void LobbyHost::SetMirrorKeys(const std::vector<MemberKey>& oldKeys) {
@@ -1052,6 +1069,7 @@ void LobbyHost::HandleRejoin(Peer& peer, const Message& msg, uint32_t nowMs) {
     machine_.Rejoined(id, nowMs, out);
     Dispatch(out);
     SendKeys();
+    SendTicket(peer);
     rejoined_++;
     Note(NameOf(id) + " is back in the room.");
 }
@@ -1142,6 +1160,10 @@ bool LobbyHost::GridReady(const ReadyToRace& ready, uint32_t nowMs) {
     return ok;
 }
 
+void LobbyHost::SetCourseLength(uint16_t raceIndex, float length) {
+    machine_.SetCourseLength(raceIndex, length);
+}
+
 LobbyHost::UploadTotals LobbyHost::Upload() const {
     UploadTotals totals = uploadGone_;
     totals.links = peers_.size();
@@ -1158,6 +1180,10 @@ bool LobbyHost::RaceOn() const {
            (phase == Phase::GridSync || phase == Phase::Countdown || phase == Phase::Racing);
 }
 
+bool LobbyHost::PosesFlow() const {
+    return RaceOn() || (!machine_.LastGrid().humans.empty() && machine_.GetPhase() == Phase::Results);
+}
+
 int LobbyHost::RaceSlotOf(uint8_t id) const {
     const PlayerInfo* player = FindIn(machine_.Roster(), id);
     if (player == nullptr || !player->inRace || player->watcher) {
@@ -1172,13 +1198,13 @@ int LobbyHost::RaceSlotOf(uint8_t id) const {
     return -1;
 }
 
-void LobbyHost::HandleState(Peer& peer, const Message& msg) {
+void LobbyHost::HandleState(Peer& peer, const Message& msg, uint32_t nowMs) {
     RaceState state;
     if (!DecodeState(msg.payload.data(), msg.payload.size(), state)) {
         refused_++;
         return;
     }
-    if (!RaceOn() || state.raceIndex != machine_.LastGrid().raceIndex) {
+    if (!PosesFlow() || state.raceIndex != machine_.LastGrid().raceIndex) {
         return; // a pose of a race that is over, still on its way: nobody's fault
     }
     const int slot = RaceSlotOf(peer.id);
@@ -1197,8 +1223,8 @@ void LobbyHost::HandleState(Peer& peer, const Message& msg) {
         posesIn_.clear();
         posesRace_ = state.raceIndex;
     }
-    // The lap is taken from every pose, passed on or not: a finish is held to it.
-    machine_.NoteLap(peer.id, state.poses.back().lap);
+    // The lap is taken from every pose, passed on or not: a finish is held to it, as far as the race allows.
+    machine_.NoteMemberLap(peer.id, state.poses.back().lap, nowMs);
     for (const StatePose& pose : state.poses) {
         if (peer.posesThisUpdate >= kPosesPerPeerPerUpdate || posesOut_.size() >= kPoseBoxCap) {
             return;
@@ -1210,7 +1236,7 @@ void LobbyHost::HandleState(Peer& peer, const Message& msg) {
 }
 
 void LobbyHost::SendPoses(uint16_t raceIndex, const std::vector<StatePose>& poses) {
-    if (closed_ || !RaceOn() || raceIndex != machine_.LastGrid().raceIndex) {
+    if (closed_ || !PosesFlow() || raceIndex != machine_.LastGrid().raceIndex) {
         return;
     }
     const Grid& grid = machine_.LastGrid();
@@ -1262,7 +1288,7 @@ void LobbyHost::FlushPoses() {
     if (posesOut_.empty()) {
         return;
     }
-    if (RaceOn() && posesRace_ == machine_.LastGrid().raceIndex) {
+    if (PosesFlow() && posesRace_ == machine_.LastGrid().raceIndex) {
         std::vector<StatePose> forPeer;
         for (const std::unique_ptr<Peer>& peer : peers_) {
             if (!peer->joined || peer->rejecting) {
@@ -1499,9 +1525,10 @@ PeerEndpoint Usable(const PeerEndpoint& endpoint) {
     return !endpoint.None() && DialableIp(endpoint.ip, endpoint.port, true) ? endpoint : PeerEndpoint();
 }
 
-// The phases the host relays poses in (LobbyHost::RaceOn). The links keep to them as this copy last heard them.
+// The phases the host relays poses in (LobbyHost::PosesFlow). The links keep to them as this copy last heard them.
 bool PosePhase(Phase phase) {
-    return phase == Phase::GridSync || phase == Phase::Countdown || phase == Phase::Racing;
+    return phase == Phase::GridSync || phase == Phase::Countdown || phase == Phase::Racing ||
+           phase == Phase::Results;
 }
 
 } // namespace
@@ -1748,6 +1775,17 @@ void LobbyClient::HandleMessage(const Message& msg, uint32_t nowMs) {
             return;
         }
         keys_ = std::move(keys);
+        return;
+    }
+    case kMsgRelayTicket: {
+        // The host sends a ticket only once it signed a new one, so the one that came last is the newest.
+        RelayTicket ticket;
+        if (state_ != State::Joined || !DecodeRelayTicket(data, len, ticket)) {
+            refused_++;
+            return;
+        }
+        ticket_ = ticket;
+        ticketSerial_++;
         return;
     }
     case kMsgWelcome: {

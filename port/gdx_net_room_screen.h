@@ -60,8 +60,11 @@ extern "C" {
 #define GDX_NET_ROOM_PAGE_NOTICE 12  /* the first-use notice: what G-NET sends, and to whom */
 #define GDX_NET_ROOM_PAGE_FRIENDS 13 /* the player's friend code and friend list */
 #define GDX_NET_ROOM_PAGE_FRIEND_ADD 14 /* a friend code to type or paste */
-#define GDX_NET_ROOM_PAGE_FRIEND 15  /* one friend: their rooms, and remove */
+#define GDX_NET_ROOM_PAGE_FRIEND 15  /* one friend: their Open and Friends rooms (never a Code room), and remove */
 #define GDX_NET_ROOM_PAGE_MET 16     /* the players of the last room, to add as friends */
+#define GDX_NET_ROOM_PAGE_RULES 17   /* the room's race rules: the host changes them, the others read them */
+#define GDX_NET_ROOM_PAGE_REQUESTS 18 /* the friend requests this profile was sent, collected on the way in */
+#define GDX_NET_ROOM_PAGE_REQUEST 19  /* one of them: add the sender to the friend list, or decline */
 
 #define GDX_NET_ROOM_DRAW_MAX 96
 /* A paragraph breaks at this many characters. A capital of the small font is at most 7 pixels wide and a

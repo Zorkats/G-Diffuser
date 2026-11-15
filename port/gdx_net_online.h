@@ -175,6 +175,10 @@ private:
 // shorter way. The credentials and the server's address are fetched on a helper thread; the allocation runs on the
 // worker's tick.
 //
+// The directory grants credentials only for a relay ticket the room's host signed, so nothing is fetched before
+// SetTicket gives the first one. A ticket the directory refuses (stale_ticket, bad_signature, not_found) is
+// dropped, and the relay waits for the host's next ticket; the host signs one every kTicketRefreshSeconds.
+//
 // A failed fetch or allocation is tried again after kRelayRetryFirstMs, doubling up to kRelayRetryMaxMs, and
 // after the directory's Retry-After when it is busy. A directory with no relay (turn_unavailable) is not asked
 // again this session. The credentials last two hours; the allocation ends when the server refuses a refresh with
@@ -196,6 +200,8 @@ public:
     MemberRelay(const MemberRelay&) = delete;
     MemberRelay& operator=(const MemberRelay&) = delete;
 
+    // The newest relay ticket the host sent. The first one starts the fetch; later ones are used by the next.
+    void SetTicket(const net::directory::RelayTicket& ticket);
     // Starts the allocation once the credentials are in, keeps it refreshed, and starts again after a failure.
     void Update(uint32_t now);
     // true when the datagram came from the TURN server and was TURN traffic; the room never sees it then.
@@ -213,6 +219,13 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
+
+// The relay ticket's two forms (CONTRACT.md §5.9). The host signs one for the code its room is listed under,
+// expiring kTicketLifetimeSeconds after nowUnix; false without a signer, or for a code out of range.
+bool MintRelayTicket(uint32_t code, uint64_t nowUnix, const net::directory::Signer& signer,
+                     net::lobby::RelayTicket& out);
+// The directory form of a ticket a member was sent. false when its code is out of range.
+bool DirectoryTicket(const net::lobby::RelayTicket& ticket, net::directory::RelayTicket& out);
 
 // ---- Joining by code: one lookup, off the worker's tick ----
 
@@ -284,6 +297,42 @@ bool IsFriend(const net::lobby::Bytes32& key);
 std::string NewFriendName();
 // The display form of a key: 56 characters in 14 groups of 4.
 std::string FriendCodeOf(const net::lobby::Bytes32& key);
+
+// ---- Friend requests (CONTRACT.md §5.10, §5.11) ----
+//
+// A player added as a friend is asked to add this copy back: SendFriendRequest leaves this profile's key and name
+// in their mailbox on the directory, for up to 14 days. CollectFriendRequests empties this profile's own mailbox into
+// a list kept for the session only. Both read the profile's key, so both are game thread only; the answers land on a
+// helper thread, and MailboxSnapshot reads them from any thread.
+
+struct FriendRequest {
+    std::string name;
+    net::lobby::Bytes32 key{};
+};
+
+struct Mailbox {
+    enum class Status : uint8_t { Idle, Asking, Ready, Failed };
+    Status status = Status::Idle;
+    std::string text;    // the failure, said for the page
+    uint32_t serial = 0; // grows with each answer
+    std::vector<FriendRequest> requests; // oldest first; never a friend or this profile
+};
+
+// The most requests the session keeps: two full mailboxes. A collect past it drops the oldest.
+constexpr size_t kMailboxKeepMax = 40;
+
+// Sends one request, answered on a helper thread and logged. false when nothing was sent: no directory, no profile
+// key, a profile name the directory refuses, or the key is this profile's own.
+bool SendFriendRequest(const net::lobby::Bytes32& to);
+// Asks for this profile's requests. false when nothing was sent: a collect is under way, or there is no directory or
+// profile key; the snapshot then says why.
+bool CollectFriendRequests();
+Mailbox MailboxSnapshot();
+// Adds the request's sender as a friend under the name they sent, and takes the request off the list when the add
+// went through (Added, Updated or Same). Not on the list: NotSaved, and nothing changes.
+FriendAdd AcceptFriendRequest(const net::lobby::Bytes32& key);
+// Takes the request off the list. Nothing is sent: the sender is never told.
+void DeclineFriendRequest(const net::lobby::Bytes32& key);
 
 } // namespace gdx::online
 

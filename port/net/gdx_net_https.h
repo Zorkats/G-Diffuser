@@ -2,7 +2,8 @@
 // Copyright (c) Zorkats
 //
 // The transport is WinHTTP on Windows and libcurl, loaded with dlopen, everywhere else. Both apply the same rules:
-// certificates are verified against the system store, redirects are followed by hand (at most five, each one https),
+// certificates are verified against the system store, redirects are followed by hand (at most five, each one https,
+// and never one that would resend a POST's body),
 // every body is capped, and one timeout covers the whole request. Nothing here throws; a failure is an Error value.
 //
 // Not headless: the transport opens sockets and blocks the calling thread. The caller runs it on its own worker
@@ -26,7 +27,7 @@ enum class Error : uint8_t {
     None,         // a response arrived and this module did not refuse it
     Unsupported,  // no transport here: libcurl is not installed (Linux and macOS only)
     RejectedUrl,  // the first URL is not allowed, see IsAllowedRequestUrl
-    Redirect,     // a redirect had no usable Location, pointed off https, or there were too many
+    Redirect,     // a redirect had no usable Location, pointed off https, would resend a POST, or there were too many
     TooLarge,     // the body is over maxBodyBytes, by its Content-Length or as it arrived
     Io,           // the body sink refused a chunk
     Network,      // connect, TLS, timeout, or a broken read

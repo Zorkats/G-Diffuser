@@ -514,6 +514,31 @@ int gdx_net_race_intro_catch_up(int timer, int elapsedMs) {
     return target;
 }
 
+int gdx_net_race_end_holds(int inRoom, int sameRace, int onGrid, int heldFrames) {
+    return inRoom && sameRace && onGrid && heldFrames >= 0 && heldFrames < GDX_NET_RACE_END_HOLD_FRAMES ? 1 : 0;
+}
+
+int gdx_net_race_speed_cap(float vel[3]) {
+    if (vel == nullptr) {
+        return 0;
+    }
+    if (!std::isfinite(vel[0]) || !std::isfinite(vel[1]) || !std::isfinite(vel[2])) {
+        vel[0] = vel[1] = vel[2] = 0.0f;
+        return 1;
+    }
+    // In double: three floats near FLT_MAX square past what a float holds.
+    const double speed = std::sqrt(static_cast<double>(vel[0]) * vel[0] + static_cast<double>(vel[1]) * vel[1] +
+                                   static_cast<double>(vel[2]) * vel[2]);
+    if (speed <= GDX_NET_RACE_PUPPET_SPEED_MAX) {
+        return 0;
+    }
+    const double scale = GDX_NET_RACE_PUPPET_SPEED_MAX / speed;
+    for (int k = 0; k < 3; k++) {
+        vel[k] = static_cast<float>(vel[k] * scale);
+    }
+    return 1;
+}
+
 void gdx_net_race_set_rules(const GdxNetRules* rules) {
     if (rules == nullptr) {
         sRulesSet.store(0);
@@ -541,6 +566,24 @@ float gdx_net_race_rule_magnet_strength(float own) {
 
 int gdx_net_race_rule_boost_frames(int own) {
     return sRulesSet.load(std::memory_order_relaxed) ? sRules.boostFrames : own;
+}
+
+float gdx_net_race_rule_contact_scale(void) {
+    if (!sRulesSet.load(std::memory_order_relaxed)) {
+        return 1.0f;
+    }
+    switch (sRules.contactDamage) {
+        case GDX_NET_RULE_CONTACT_HALF:
+            return 0.5f;
+        case GDX_NET_RULE_CONTACT_OFF:
+            return 0.0f;
+        default:
+            return 1.0f;
+    }
+}
+
+int gdx_net_race_rule_shield(void) {
+    return sRulesSet.load(std::memory_order_relaxed) ? sRules.shield : 0;
 }
 
 void gdx_net_race_set_machines(const unsigned char* machine, const unsigned char* hasRecord,

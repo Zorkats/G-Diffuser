@@ -9,6 +9,8 @@
 
 #define ROSTER_MACHINES 30 /* net::lobby::kRosterMachines */
 #define STOCK_TRACKS 24    /* net::lobby::kStockTracks */
+#define DISK_TRACK_FIRST 30 /* net::lobby::kDiskTrackFirst */
+#define DISK_TRACK_END 42
 #define MACHINE_SKINS 4    /* net::lobby::kMachineSkins */
 
 static int sOpen;           /* the lock-in screen is up */
@@ -33,14 +35,14 @@ int gdx_net_machine_select_poll_open(void) {
     if (sSent && (sRoom.raceIndex == sRaceIndex)) {
         return 0;
     }
-    if (((sRoom.track < 0) || (sRoom.track >= STOCK_TRACKS)) &&
+    if (!gdx_net_lock_in_course_ok(sRoom.track) &&
         !((sRoom.track == GDX_NET_LOCK_IN_TRACK_CUSTOM) && (sRoom.title[0] != '\0'))) {
         return 0;
     }
     sOpen = 1;
     sSent = 0;
     sRaceIndex = sRoom.raceIndex;
-    gdx_lan_race_capture_rules();
+    gdx_lan_race_capture_cpu();
     gdx_menu_request_close();
     return 1;
 }
@@ -87,6 +89,14 @@ int gdx_net_machine_select_waiting(void) {
     return sOpen && (sSent || sRoom.locked);
 }
 
+int gdx_net_machine_select_engine_fixed(void) {
+    return sOpen && sRoom.engineFixed;
+}
+
+int gdx_net_lock_in_course_ok(int track) {
+    return (track >= 0 && track < STOCK_TRACKS) || (track >= DISK_TRACK_FIRST && track < DISK_TRACK_END);
+}
+
 void gdx_net_machine_select_confirm(int character, int skin, float engine) {
     if (!sOpen || gdx_net_machine_select_waiting()) {
         return;
@@ -97,7 +107,10 @@ void gdx_net_machine_select_confirm(int character, int skin, float engine) {
     if ((skin < 0) || (skin >= MACHINE_SKINS)) {
         skin = 0;
     }
-    gdx_lan_lock_in_send(character, skin, gdx_net_lock_in_engine_percent(engine));
+    /* The host refuses any other setting in a room that fixes it. */
+    gdx_lan_lock_in_send(character, skin,
+                         sRoom.engineFixed ? gdx_net_lock_in_engine_percent(GDX_NET_LOCK_IN_ENGINE_FIXED)
+                                           : gdx_net_lock_in_engine_percent(engine));
     sSent = 1;
 }
 

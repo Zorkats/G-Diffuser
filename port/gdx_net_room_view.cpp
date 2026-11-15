@@ -84,6 +84,7 @@ static_assert(static_cast<int>(gdx::online::Ask::Open) == GDX_NET_ROOM_ASK_OPEN,
 static_assert(static_cast<int>(gdx::online::Ask::Quick) == GDX_NET_ROOM_ASK_QUICK, "ask");
 static_assert(static_cast<int>(gdx::online::Ask::Friend) == GDX_NET_ROOM_ASK_FRIEND, "ask");
 static_assert(gdx::net::codes::kFriendCodeChars == GDX_NET_ROOM_FRIEND_CODE_CHARS, "friend code");
+static_assert(gdx::online::kMailboxKeepMax == GDX_NET_ROOM_REQUESTS_MAX, "friend requests kept");
 static_assert(gdx::net::codes::kFriendCodeChars + gdx::net::codes::kFriendCodeChars / 4 <=
                   GDX_NET_ROOM_FRIEND_CODE_BYTES,
               "friend code text");
@@ -93,7 +94,7 @@ static_assert(gdx::net::codes::kRoomCodeChars == GDX_NET_ROOM_CODE_CHARS, "code"
 // The first-use notice the player last read. Raising it shows the notice again, to everyone, once. 2: a room
 // gets the friend code of each member, and a host can ban it (O7.3).
 constexpr const char* kNoticeCvar = "gEnhancements.Online.NoticeRead";
-constexpr int kNoticeVersion = 2;
+constexpr int kNoticeVersion = 3; // 3: a friend added gets a request through the directory
 
 // The directory's room type in the session's numbering.
 RoomType TypeOf(gdx::net::directory::RoomType type) {
@@ -179,6 +180,15 @@ void Fill(const View& view, GdxNetRoomView& out) {
     out.cpuFill = view.room.cpuFill ? 1 : 0;
     out.successor = view.room.successor < kMaxPlayers ? view.room.successor : GDX_NET_ROOM_NOBODY;
     out.pool = view.room.pool;
+    out.rules.laps = view.room.rules.laps;
+    out.rules.contactDamage = view.room.rules.contactDamage;
+    out.rules.shield = view.room.rules.shield ? 1 : 0;
+    out.rules.engineFixed = view.room.rules.engineFixed ? 1 : 0;
+    out.rules.boostFrames = static_cast<int>(view.room.rules.boostFrames);
+    out.rules.lavaNoKill = view.room.rules.lavaNoKill ? 1 : 0;
+    out.rules.magnetRange = view.room.rules.magnetRange;
+    out.rules.magnetStrength = view.room.rules.magnetStrength;
+    out.rules.ignoreTrackSettings = view.room.rules.ignoreTrackSettings ? 1 : 0;
     out.track = view.room.track;
     if (view.room.track == kTrackCustom) {
         std::copy(view.room.custom.id.begin(), view.room.custom.id.end(), out.trackId);
@@ -309,7 +319,8 @@ extern "C" int gdx_lan_room_host(int type, char* error, int size) {
         reason.clear();
         if (gdx::lan::StartHost(gdx::lan::PortSetting(), me, static_cast<RoomType>(type), reason)) {
             // The room carries the rules and CPU settings from the start, so a successor has them even if
-            // the host is lost before the first grid (D28.1). The lock-in screen captures them again.
+            // the host is lost before the first grid (D28.1). The rules start from the host's Gameplay
+            // options; from here on the RULES page sets them. The lock-in screen captures the CPU options.
             gdx_lan_race_capture_rules();
             return 1;
         }
@@ -414,7 +425,7 @@ extern "C" void gdx_lan_room_race_next(int raceNext) {
 
 namespace {
 
-// A track a ballot or a pick may name: a stock one or Random. The room checks it against its own pool.
+// A track a ballot or a pick may name: a course or Random. The room checks it against its own pool.
 bool ChoosableTrack(int track) {
     return track >= 0 && track <= 0xFF && TrackInPool(static_cast<uint8_t>(track), kPoolAll);
 }
@@ -492,6 +503,27 @@ extern "C" void gdx_lan_room_cpu_fill(int on) {
     gdx::lan::SetCpuFill(on != 0);
 }
 
+extern "C" void gdx_lan_room_set_rules(const GdxNetRoomRules* in) {
+    if (in == nullptr) {
+        return;
+    }
+    const auto clampF = [](float v, float low, float high) { return !(v >= low) ? low : v > high ? high : v; };
+    RaceRules rules;
+    rules.laps = static_cast<uint8_t>(in->laps < 1 ? 1 : in->laps > kLapsMax ? kLapsMax : in->laps);
+    rules.contactDamage = static_cast<uint8_t>(
+        in->contactDamage < kContactNormal || in->contactDamage > kContactOff ? kContactNormal : in->contactDamage);
+    rules.shield = in->shield != 0;
+    rules.engineFixed = in->engineFixed != 0;
+    rules.boostFrames = in->boostFrames <= 0                                   ? 0u
+                        : in->boostFrames > static_cast<int>(kBoostFramesMax) ? kBoostFramesMax
+                                                                              : static_cast<uint32_t>(in->boostFrames);
+    rules.lavaNoKill = in->lavaNoKill != 0;
+    rules.magnetRange = clampF(in->magnetRange, kMagnetRangeMin, kMagnetRangeMax);
+    rules.magnetStrength = clampF(in->magnetStrength, kMagnetStrengthMin, kMagnetStrengthMax);
+    rules.ignoreTrackSettings = in->ignoreTrackSettings != 0;
+    gdx::lan::SetRules(rules);
+}
+
 extern "C" void gdx_lan_room_kick(int id) {
     if (id >= 0 && id < GDX_NET_ROOM_NOBODY) {
         gdx::lan::Kick(static_cast<uint8_t>(id));
@@ -541,14 +573,15 @@ extern "C" void gdx_lan_room_track_name(int track, char* out, int size) {
         std::snprintf(out, bytes, "Random");
         return;
     }
-    if (track < 0 || track >= static_cast<int>(kStockTracks)) {
+    if (track < 0 || track > 0xFF || !RaceTrackOk(static_cast<uint8_t>(track))) {
         std::snprintf(out, bytes, "No track");
         return;
     }
     // The game fills the names at start-up; before that the cup and number stand in.
     const char* name = gTrackNames[track];
     if (name == nullptr || name[0] == '\0') {
-        std::snprintf(out, bytes, "%s %d", kCupNames[static_cast<size_t>(track) / kCupTracks],
+        const size_t cup = static_cast<size_t>(track) / kCupTracks;
+        std::snprintf(out, bytes, "%s %d", cup < 4 ? kCupNames[cup] : cup == 5 ? "DD-1" : "DD-2",
                       static_cast<int>(static_cast<size_t>(track) % kCupTracks) + 1);
         return;
     }
@@ -593,6 +626,24 @@ bool FriendAt(int index, gdx::online::FriendEntry& out) {
     }
     out = friends[static_cast<size_t>(index)];
     return true;
+}
+
+bool RequestAt(int index, gdx::online::FriendRequest& out) {
+    const gdx::online::Mailbox mailbox = gdx::online::MailboxSnapshot();
+    if (index < 0 || static_cast<size_t>(index) >= mailbox.requests.size()) {
+        return false;
+    }
+    out = mailbox.requests[static_cast<size_t>(index)];
+    return true;
+}
+
+// A new friend is asked to add this copy back (CONTRACT.md 5.10). A rename or a friend listed already is not:
+// they had this copy's request, or added it themselves.
+int AddedAndAsked(const Bytes32& key, gdx::online::FriendAdd result) {
+    if (result == gdx::online::FriendAdd::Added) {
+        gdx::online::SendFriendRequest(key);
+    }
+    return AddResult(result);
 }
 
 bool MetAt(int index, gdx::lan::RoomMember& out) {
@@ -646,7 +697,7 @@ extern "C" int gdx_lan_room_friend_add_code(const char* code) {
     if (gdx::online::IsFriend(key)) {
         return GDX_NET_ROOM_FRIEND_LISTED;
     }
-    return AddResult(gdx::online::AddFriend(key, gdx::online::NewFriendName()));
+    return AddedAndAsked(key, gdx::online::AddFriend(key, gdx::online::NewFriendName()));
 }
 
 extern "C" int gdx_lan_room_friend_remove(int index) {
@@ -704,7 +755,67 @@ extern "C" int gdx_lan_room_met_add(int index) {
     if (!MetAt(index, member)) {
         return GDX_NET_ROOM_FRIEND_GONE;
     }
-    return AddResult(gdx::online::AddFriend(member.key, member.name));
+    return AddedAndAsked(member.key, gdx::online::AddFriend(member.key, member.name));
+}
+
+extern "C" int gdx_lan_room_requests_collect(void) {
+    return gdx::online::CollectFriendRequests() ? 1 : 0;
+}
+
+extern "C" int gdx_lan_room_requests_state(char* text, int size) {
+    const gdx::online::Mailbox mailbox = gdx::online::MailboxSnapshot();
+    if (text != nullptr) {
+        Put(text, size, mailbox.status == gdx::online::Mailbox::Status::Failed ? mailbox.text : std::string());
+    }
+    switch (mailbox.status) {
+        case gdx::online::Mailbox::Status::Asking:
+            return GDX_NET_ROOM_MAIL_ASKING;
+        case gdx::online::Mailbox::Status::Ready:
+            return GDX_NET_ROOM_MAIL_READY;
+        case gdx::online::Mailbox::Status::Failed:
+            return GDX_NET_ROOM_MAIL_FAILED;
+        default:
+            return GDX_NET_ROOM_MAIL_IDLE;
+    }
+}
+
+extern "C" int gdx_lan_room_request_count(void) {
+    return static_cast<int>(gdx::online::MailboxSnapshot().requests.size());
+}
+
+extern "C" int gdx_lan_room_request_name(int index, char* out, int size) {
+    gdx::online::FriendRequest request;
+    if (!RequestAt(index, request)) {
+        Put(out, size, "");
+        return 0;
+    }
+    return Put(out, size, request.name);
+}
+
+extern "C" int gdx_lan_room_request_code(int index, char* out, int size) {
+    gdx::online::FriendRequest request;
+    if (!RequestAt(index, request)) {
+        Put(out, size, "");
+        return 0;
+    }
+    return Put(out, size, gdx::online::FriendCodeOf(request.key));
+}
+
+extern "C" int gdx_lan_room_request_accept(int index) {
+    gdx::online::FriendRequest request;
+    if (!RequestAt(index, request)) {
+        return GDX_NET_ROOM_FRIEND_GONE;
+    }
+    return AddResult(gdx::online::AcceptFriendRequest(request.key));
+}
+
+extern "C" int gdx_lan_room_request_decline(int index) {
+    gdx::online::FriendRequest request;
+    if (!RequestAt(index, request)) {
+        return 0;
+    }
+    gdx::online::DeclineFriendRequest(request.key);
+    return 1;
 }
 
 extern "C" int gdx_lan_room_clipboard_set(const char* text) {

@@ -72,6 +72,11 @@ constexpr uint32_t kAfterWinnerMs = 60000;
 // game that runs slow, or a report held back, gains nothing.
 constexpr uint32_t kFinishAheadMs = 1000;
 constexpr uint32_t kFinishBehindMs = 1000;
+// The fastest a lap is taken to be driven: the course's length at this many units a frame, 60 frames a second.
+// The speedometer shows a machine's speed times 21.6 in km/h, so 280 is about 6000 km/h, three times the fastest
+// stock boost. A member's poses claim no more laps than that allows, and a finish needs that many laps of it.
+constexpr float kLapSpeedMax = 280.0f;
+constexpr uint32_t kLapFramesPerSecond = 60;
 
 // Preset messages one player may send per window.
 constexpr size_t kEmoteBurst = 5;
@@ -81,7 +86,7 @@ constexpr uint8_t kEveryone = 0xFE;
 
 struct RoomConfig {
     uint32_t roomId = 1; // a fresh random value per room
-    uint32_t pool = kPoolAll;
+    uint64_t pool = kPoolAll;
     uint32_t voteMs = kVoteMs;
     uint32_t lotteryMs = kLotteryMs;
     uint32_t pickMs = kPickMs;
@@ -138,11 +143,11 @@ struct Outgoing {
 uint32_t RoomHash(uint32_t roomId, uint16_t raceIndex, const std::vector<Ballot>& ballots);
 
 // The pool's track that hash selects, never `avoid` while the pool holds another one. 0 for an empty pool.
-uint8_t DrawTrack(uint32_t hash, uint32_t pool, uint8_t avoid);
+uint8_t DrawTrack(uint32_t hash, uint64_t pool, uint8_t avoid);
 
 // The track the host draws when nobody chooses: a series' first race when last place picks, a pick that timed
 // out, a Random pick. Never the track just raced while the pool holds another one.
-uint8_t DrawnTrack(uint32_t roomId, uint16_t raceIndex, uint32_t pool, uint8_t lastTrack);
+uint8_t DrawnTrack(uint32_t roomId, uint16_t raceIndex, uint64_t pool, uint8_t lastTrack);
 
 // The lottery: one of the ballots cast wins, so a track's odds are its share of the votes. A Random ballot
 // that wins, and a vote nobody cast a ballot in, draw from the pool as DrawnTrack does. The ballots are
@@ -150,12 +155,12 @@ uint8_t DrawnTrack(uint32_t roomId, uint16_t raceIndex, uint32_t pool, uint8_t l
 // The committed lottery of an Open room (decision 39): the same rule, with the draw seed of the salt in place
 // of RoomHash, and the salt in the result.
 LotteryResult RunCommittedLottery(const Bytes32& salt, uint32_t roomId, uint16_t raceIndex, std::vector<Ballot> ballots,
-                                  uint32_t pool, uint8_t lastTrack);
+                                  uint64_t pool, uint8_t lastTrack);
 // A client's check of the host's lottery against the room it was drawn in: with a commitment, the salt must
 // open it and the committed lottery must give this result; without one, the salt is zero, the room is not
 // Open, and RunLottery gives this result.
 bool CheckLottery(const RoomState& room, const LotteryResult& lottery);
-LotteryResult RunLottery(uint32_t roomId, uint16_t raceIndex, std::vector<Ballot> ballots, uint32_t pool,
+LotteryResult RunLottery(uint32_t roomId, uint16_t raceIndex, std::vector<Ballot> ballots, uint64_t pool,
                          uint8_t lastTrack);
 
 // The preset message rate limit. true, with nowMs recorded in times, while the sender is under kEmoteBurst
@@ -214,8 +219,9 @@ public:
     // is the one the others are held to: a racer whose track differs watches this race.
     bool GridReady(uint8_t id, const ReadyToRace& ready, uint32_t nowMs, std::vector<Outgoing>& out);
     // A racer says how its own race ended: once per race, only while it runs. Retiring is always taken. A
-    // finish is refused when the racer's poses never reached the last lap, or when the time is further ahead
-    // of the host's count of the race than kFinishAheadMs. Everyone gets the table as it stands, and the
+    // finish is refused when the racer's poses never reached the last lap, when the time is further ahead
+    // of the host's count of the race than kFinishAheadMs, or when the race has not yet lasted the laps at
+    // MinLapMs each. Everyone gets the table as it stands, and the
     // final one when this was the last result missing.
     bool ReportFinish(uint8_t id, const FinishReport& report, uint32_t nowMs, std::vector<Outgoing>& out);
 
@@ -223,6 +229,15 @@ public:
 
     // The lap the racer's latest pose named: what a finish is held to.
     void NoteLap(uint8_t id, int16_t lap);
+    // The same for a member's pose, which the host cannot see driven: the lap is taken only as far as the
+    // race so far allows at kLapSpeedMax (the first lap at GO, one more each MinLapMs), and a stored lap is
+    // never lowered. Without a course length this is NoteLap.
+    void NoteMemberLap(uint8_t id, int16_t lap, uint32_t nowMs);
+    // The length of one lap of the course the host's copy loaded for race raceIndex. 0, or another race's,
+    // turns the lap rules off.
+    void SetCourseLength(uint16_t raceIndex, float length);
+    // The shortest lap the course allows at kLapSpeedMax, for the race on the grid; 0 when no length is known.
+    uint32_t MinLapMs() const;
     // The host game's order of the humans, first to last. It places those still driving when the race ends.
     void SetStanding(const std::vector<uint8_t>& order);
     // The host's game left the race that is running, so nothing drives the CPU machines or sends a standing
@@ -243,7 +258,8 @@ public:
     // The host's course choice (decision 75): false, the racers vote; true, last place picks (D13). It applies
     // from the next track choice; one already open runs as it began.
     bool SetLastPlacePicks(bool on, uint32_t nowMs, std::vector<Outgoing>& out);
-    // The rules of the next race. Refused once a grid has been sent, and for values outside their limits.
+    // The rules of the next race. Refused from MACHINE on, where racers lock in under them, and for values
+    // outside their limits.
     // They travel in the next `room`, which Update sends.
     bool SetRules(const RaceRules& rules);
     // The CPU settings. Refused once a grid has been sent, and for an aggression outside its limits.
@@ -418,6 +434,8 @@ private:
     bool customTracks_ = false;
     bool lastPlacePicks_ = false;
     uint16_t raceIndex_ = 0;    // every race of this room, so two series never draw alike
+    float courseLength_ = 0.0f; // one lap of the host copy's course, for race courseRace_
+    uint16_t courseRace_ = 0;
     uint32_t seriesRaces_ = 0;  // races finished in this series
     uint32_t nextSerial_ = 0;
     uint32_t joinSerial_ = 0;
