@@ -983,6 +983,27 @@ static int gdx_net_race_road(void* context, const float pos[3], float frame[9]) 
     return 1;
 }
 
+// The point the cameras look at (racer->focusPos) and how far it moved this tick. Racer_UpdateFromControls sets
+// both for a machine this copy drives; a puppet skips it, so without this WATCH and its cinematic keep looking
+// at the grid. Lifted off the shown place the way that function lifts it. A machine put at its place at once
+// has not moved there, so it gets no focus velocity: the race camera's look-ahead would swing on the jump.
+static void gdx_net_race_focus_to(Racer* racer, const Vec3f* shown, s32 put) {
+    f32 lift = (racer->unk_198 != 0.0f) ? racer->heightAboveGround : racer->unk_17C;
+    Vec3f focus;
+
+    focus.x = shown->x - (lift * racer->trueBasis.y.x);
+    focus.y = shown->y - (lift * racer->trueBasis.y.y);
+    focus.z = shown->z - (lift * racer->trueBasis.y.z);
+    if (put) {
+        racer->focusVelocity.x = racer->focusVelocity.y = racer->focusVelocity.z = 0.0f;
+    } else {
+        racer->focusVelocity.x = focus.x - racer->focusPos.x;
+        racer->focusVelocity.y = focus.y - racer->focusPos.y;
+        racer->focusVelocity.z = focus.z - racer->focusPos.z;
+    }
+    racer->focusPos = focus;
+}
+
 // The third branch of Racer_UpdateMovement: this racer belongs to another player.
 void gdx_net_race_puppet_update(Racer* racer) {
     RacerSegmentPositionInfo* info = &racer->segmentPositionInfo;
@@ -1068,6 +1089,7 @@ void gdx_net_race_puppet_update(Racer* racer) {
                       (racer->trueBasis.y.z * racer->velocity.z);
     racer->unk_5C.z = (racer->trueBasis.x.x * racer->velocity.x) + (racer->trueBasis.x.y * racer->velocity.y) +
                       (racer->trueBasis.x.z * racer->velocity.z);
+    gdx_net_race_focus_to(racer, &shown, put);
 
     if (!gdx_net_race_seat(info, shown.x, shown.y, shown.z)) {
         // Far from any road (falling, or a track we could not follow): drawn where it is, and its
