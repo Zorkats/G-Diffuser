@@ -137,6 +137,17 @@ static s32 sClockOk;
 // for the road under its guess starts next to it.
 static RacerSegmentPositionInfo sRoadSeat[GDX_NET_RACE_MAX_RACERS];
 static u8 sRoadSeated[GDX_NET_RACE_MAX_RACERS];
+// How each puppet is shown to the eye (gdx_net_race_view).
+typedef struct GdxNetPuppetView {
+    u32 tick;       // sTick of the last update, plus one; 0 before the first
+    u32 heardTick;  // the owner's tick of the newest pose heard then
+    Vec3f heard[2]; // that pose's forward and up, as its owner sent them
+    Vec3f turn[2];  // how far forward and up turned a tick between the last two poses heard
+    Vec3f moving;   // the machine's velocity then
+    Vec3f shown[3]; // the place, forward and up shown
+} GdxNetPuppetView;
+
+static GdxNetPuppetView sView[GDX_NET_RACE_MAX_RACERS];
 
 // The room's race: armed when the lock-in screen leaves, taken by the Racer_Init that follows.
 static GdxNetRaceRoom sRoom;
@@ -499,6 +510,7 @@ s32 gdx_net_race_begin(s32 stockRacers) {
     sClockOk = 0;
     for (slot = 0; slot < GDX_NET_RACE_MAX_RACERS; slot++) {
         sRoadSeated[slot] = 0;
+        sView[slot].tick = 0;
     }
 
     if (armed) {
@@ -983,9 +995,79 @@ static int gdx_net_race_road(void* context, const float pos[3], float frame[9]) 
     return 1;
 }
 
+// What a camera watching a puppet follows, and the way the puppet faces. The guess of where a puppet is
+// jumps a little each time a pose comes in, by how far its owner's driving parted from the guess. Settle
+// eases that place over a few ticks, but the race camera hangs its eye on the focus point and leads its
+// aim by the focus velocity, so what is left of each jump shakes the whole screen in WATCH. And the way
+// the machine faces was taken as guessed, jumps and all. So each is eased again here: every tick it moves
+// the way the machine moves, then a part of the way to the guess. The place moves by the machine's
+// velocity, the mean of this tick's and the last so it keeps to a bend; forward and up turn as much as
+// they turned between the last two poses heard. Not by how the guess moved: the guess turns with the road,
+// a driver turns more, and easing toward a guess that is always a little behind would trail it. The place
+// the race itself uses (contacts, the road) is not touched.
+#define GDX_NET_VIEW_KEEP 0.85f // the part of a jump still to go after a tick
+
+// Eases the place, forward and up of a puppet (`now`, in and out). `heard` is the newest pose as its owner
+// sent it, `moving` the machine's velocity. `reset` shows them as guessed.
+static void gdx_net_race_view(s32 slot, const GdxNetPose* heard, const Vec3f* moving, s32 reset, Vec3f now[3]) {
+    GdxNetPuppetView* view = &sView[slot];
+    Vec3f sent[2];
+    Vec3f step[3];
+    s32 ticks;
+    s32 i;
+
+    sent[0].x = heard->forward[0];
+    sent[0].y = heard->forward[1];
+    sent[0].z = heard->forward[2];
+    sent[1].x = heard->up[0];
+    sent[1].y = heard->up[1];
+    sent[1].z = heard->up[2];
+
+    // The first update, or one after a missed tick: nothing kept says how it moves now.
+    if (reset || (view->tick == 0) || (view->tick != sTick)) {
+        for (i = 0; i < 2; i++) {
+            view->turn[i].x = view->turn[i].y = view->turn[i].z = 0.0f;
+        }
+        for (i = 0; i < 3; i++) {
+            view->shown[i] = now[i];
+        }
+    } else {
+        ticks = (s32) (heard->tick - view->heardTick);
+        if (ticks != 0) { // a new pose
+            for (i = 0; i < 2; i++) {
+                if ((ticks > 0) && (ticks <= 8)) {
+                    view->turn[i].x = (sent[i].x - view->heard[i].x) / (f32) ticks;
+                    view->turn[i].y = (sent[i].y - view->heard[i].y) / (f32) ticks;
+                    view->turn[i].z = (sent[i].z - view->heard[i].z) / (f32) ticks;
+                } else {
+                    view->turn[i].x = view->turn[i].y = view->turn[i].z = 0.0f; // too far apart to say
+                }
+            }
+        }
+        step[0].x = 0.5f * (moving->x + view->moving.x);
+        step[0].y = 0.5f * (moving->y + view->moving.y);
+        step[0].z = 0.5f * (moving->z + view->moving.z);
+        step[1] = view->turn[0];
+        step[2] = view->turn[1];
+        for (i = 0; i < 3; i++) {
+            view->shown[i].x = now[i].x + GDX_NET_VIEW_KEEP * (view->shown[i].x + step[i].x - now[i].x);
+            view->shown[i].y = now[i].y + GDX_NET_VIEW_KEEP * (view->shown[i].y + step[i].y - now[i].y);
+            view->shown[i].z = now[i].z + GDX_NET_VIEW_KEEP * (view->shown[i].z + step[i].z - now[i].z);
+        }
+    }
+    for (i = 0; i < 3; i++) {
+        now[i] = view->shown[i];
+    }
+    view->heard[0] = sent[0];
+    view->heard[1] = sent[1];
+    view->heardTick = heard->tick;
+    view->moving = *moving;
+    view->tick = sTick + 1;
+}
+
 // The point the cameras look at (racer->focusPos) and how far it moved this tick. Racer_UpdateFromControls sets
 // both for a machine this copy drives; a puppet skips it, so without this WATCH and its cinematic keep looking
-// at the grid. Lifted off the shown place the way that function lifts it. A machine put at its place at once
+// at the grid. Lifted off the eased place the way that function lifts it. A machine put at its place at once
 // has not moved there, so it gets no focus velocity: the race camera's look-ahead would swing on the jump.
 static void gdx_net_race_focus_to(Racer* racer, const Vec3f* shown, s32 put) {
     f32 lift = (racer->unk_198 != 0.0f) ? racer->heightAboveGround : racer->unk_17C;
@@ -1008,10 +1090,12 @@ static void gdx_net_race_focus_to(Racer* racer, const Vec3f* shown, s32 put) {
 void gdx_net_race_puppet_update(Racer* racer) {
     RacerSegmentPositionInfo* info = &racer->segmentPositionInfo;
     GdxNetPose pose;
+    GdxNetPose heard; // the newest pose as its owner sent it, before the guess moves it
     RacerSegmentPositionInfo seated;
     Mtx3F basis;
     Vec3f velocity;
     Vec3f shown;
+    Vec3f eye[3]; // the place, forward and up shown to the eye (gdx_net_race_view)
     float offset[3];
     float shove[3];
     float target[3];
@@ -1049,6 +1133,7 @@ void gdx_net_race_puppet_update(Racer* racer) {
     racer->attackState = (s16) pose.attack;
     gdx_net_race_flames_to(racer, &pose);
 
+    heard = pose;
     // Where its owner has it now. In the air or off the track a machine does not follow the road.
     gdx_net_race_advance(&pose, ahead,
                          (pose.flags & (RACER_STATE_AIRBORNE | RACER_STATE_FALLING_OFF_TRACK)) ? NULL
@@ -1071,15 +1156,19 @@ void gdx_net_race_puppet_update(Racer* racer) {
     racer->velocity.x = moving[0];
     racer->velocity.y = moving[1];
     racer->velocity.z = moving[2];
-    racer->modelPos = shown;
     racer->speed = sqrtf(SQ(racer->velocity.x) + SQ(racer->velocity.y) + SQ(racer->velocity.z));
 
-    basis.x.x = pose.forward[0];
-    basis.x.y = pose.forward[1];
-    basis.x.z = pose.forward[2];
-    basis.y.x = pose.up[0];
-    basis.y.y = pose.up[1];
-    basis.y.z = pose.up[2];
+    eye[0] = shown;
+    eye[1].x = pose.forward[0];
+    eye[1].y = pose.forward[1];
+    eye[1].z = pose.forward[2];
+    eye[2].x = pose.up[0];
+    eye[2].y = pose.up[1];
+    eye[2].z = pose.up[2];
+    gdx_net_race_view(slot, &heard, &racer->velocity, put, eye);
+    racer->modelPos = eye[0]; // drawn where the cameras follow it, so it does not shake in their view
+    basis.x = eye[1];
+    basis.y = eye[2];
     if (Math_OrthonormalizeAroundForward(&basis) == 0) {
         racer->trueBasis = racer->modelBasis = basis;
     }
@@ -1089,7 +1178,7 @@ void gdx_net_race_puppet_update(Racer* racer) {
                       (racer->trueBasis.y.z * racer->velocity.z);
     racer->unk_5C.z = (racer->trueBasis.x.x * racer->velocity.x) + (racer->trueBasis.x.y * racer->velocity.y) +
                       (racer->trueBasis.x.z * racer->velocity.z);
-    gdx_net_race_focus_to(racer, &shown, put);
+    gdx_net_race_focus_to(racer, &eye[0], put);
 
     if (!gdx_net_race_seat(info, shown.x, shown.y, shown.z)) {
         // Far from any road (falling, or a track we could not follow): drawn where it is, and its

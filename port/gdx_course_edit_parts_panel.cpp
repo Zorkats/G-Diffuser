@@ -388,9 +388,9 @@ void DrawHorizon() {
                                     "Click or drag the compass, or Ctrl+click the value to type it.";
     const int count = gdx_branch_edit_background_count();
 
-    ImGui::TextUnformatted("Horizon images");
-    ImGui::SetItemTooltip("Images that stand on the horizon of this track, %d at most. A track with none keeps the "
-                          "stock horizon. They show in single player races and test runs, not in the editor's view.",
+    ImGui::TextUnformatted("Skyline images");
+    ImGui::SetItemTooltip("Images that stand on the skyline of this track, %d at most. A track with none keeps the "
+                          "stock skyline. They show in single player races and test runs, not in the editor's view.",
                           GDX_BRANCH_EDIT_BACKGROUND_MAX);
     for (int slot = 0; slot < count; slot++) {
         int image = 1;
@@ -435,7 +435,7 @@ void DrawHorizon() {
         }
         ImGui::EndCombo();
     }
-    ImGui::SetItemTooltip("Replaces the list with the horizon of a stock course. A course without horizon images "
+    ImGui::SetItemTooltip("Replaces the list with the skyline of a stock course. A course without skyline images "
                           "empties it.");
 }
 
