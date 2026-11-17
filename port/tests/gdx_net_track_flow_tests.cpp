@@ -170,9 +170,11 @@ uint8_t AbortReasonOf(const Wire& w) {
 // A host with guests 1 to 3, each optional. The room's track and owner are set by the case.
 class Room {
 public:
-    explicit Room(std::vector<uint8_t> guests) : guests_(std::move(guests)), host_(disks_[lobby::kHostId].Store()) {
+    // config: the track flow by default, or SongFlow() for the song (protocol 15).
+    explicit Room(std::vector<uint8_t> guests, lobby::FlowConfig config = lobby::FlowConfig())
+        : config_(config), guests_(std::move(guests)), host_(disks_[lobby::kHostId].Store(), config_) {
         for (uint8_t g : guests_) {
-            clients_[g] = std::make_unique<ClientTrackFlow>(disks_[g].Store());
+            clients_[g] = std::make_unique<ClientTrackFlow>(disks_[g].Store(), config_);
         }
     }
 
@@ -190,9 +192,9 @@ public:
 
     // Recreates the flows so a disk filled after construction is what they load from.
     void Reset() {
-        host_ = HostTrackFlow(disks_[lobby::kHostId].Store());
+        host_ = HostTrackFlow(disks_[lobby::kHostId].Store(), config_);
         for (uint8_t g : guests_) {
-            clients_[g] = std::make_unique<ClientTrackFlow>(disks_[g].Store());
+            clients_[g] = std::make_unique<ClientTrackFlow>(disks_[g].Store(), config_);
         }
     }
 
@@ -206,7 +208,7 @@ public:
     void Join(uint8_t id) {
         disks_[id] = Disk();
         guests_.push_back(id);
-        clients_[id] = std::make_unique<ClientTrackFlow>(disks_[id].Store());
+        clients_[id] = std::make_unique<ClientTrackFlow>(disks_[id].Store(), config_);
     }
 
     // One tick of every copy. Returns true when any message moved.
@@ -238,7 +240,7 @@ public:
         while (!toHost.empty()) {
             Wire w = std::move(toHost.front());
             toHost.pop_front();
-            if (w.type == lobby::kMsgTrackChunk && tamperUpload) {
+            if (w.type == config_.chunk && tamperUpload) {
                 w.payload.back() ^= 0x5A;
                 tamperUpload = false;
             }
@@ -253,7 +255,7 @@ public:
         }
         for (uint8_t g : guests_) {
             moved |= host_.Pump(g, 0, nowMs, [this, g](const std::vector<uint8_t>& p) {
-                toClient[g].push_back({ lobby::kHostId, lobby::kMsgTrackChunk, p });
+                toClient[g].push_back({ lobby::kHostId, config_.chunk, p });
                 sentChunks[g]++;
                 return true;
             }) > 0;
@@ -261,7 +263,7 @@ public:
         for (auto& [id, client] : clients_) {
             const uint8_t from = id;
             moved |= client->Pump(0, nowMs, [this, from](const std::vector<uint8_t>& p) {
-                toHost.push_back({ from, lobby::kMsgTrackChunk, p });
+                toHost.push_back({ from, config_.chunk, p });
                 return true;
             }) > 0;
         }
@@ -318,6 +320,7 @@ public:
     std::deque<Wire> toHost;
 
 private:
+    lobby::FlowConfig config_;
     std::map<uint8_t, Disk> disks_;
     std::vector<uint8_t> guests_;
     HostTrackFlow host_;
@@ -573,6 +576,103 @@ void TestRefusals() {
           "refusals: an Offer after the track went stock is refused");
 }
 
+// A song (protocol 15): a FLAC magic, then bytes no decoder sees here, several chunks long. Its id is its SHA-256.
+Track Song(size_t size, uint8_t seed, bool flac = true) {
+    Track t;
+    t.bytes.resize(size);
+    uint32_t x = 0x9E3779B9u ^ seed;
+    for (uint8_t& b : t.bytes) {
+        x = x * 1664525u + 1013904223u;
+        b = uint8_t(x >> 24);
+    }
+    if (flac) {
+        std::memcpy(t.bytes.data(), "fLaC", 4);
+    } else {
+        std::memcpy(t.bytes.data(), "MThd", 4); // a MIDI file: not a format the game plays
+    }
+    t.id = track::Identify(t.bytes.data(), t.bytes.size());
+    return t;
+}
+
+// Guest 1 owns the song. The host asks it under the song's types and relays it to guest 2, as it does a track.
+void TestSongRelay() {
+    const Track song = Song(transfer::kChunkData * 4 + 100, 1);
+    Room room({ 1, 2 }, lobby::SongFlow());
+    room.DiskOf(1).tracks[song.id] = song.bytes;
+    room.Reset();
+    room.track = Custom(song);
+    room.owner = 1;
+    room.Run(0);
+    Check(room.Sent(1, lobby::kMsgSongNeed) == 1 && room.Sent(2, lobby::kMsgSongOffer) == 1,
+          "song relay: the host asks the owner and offers the other guest, under the song's types");
+    Check(room.Sent(1, lobby::kMsgTrackNeed) == 0 && room.Sent(2, lobby::kMsgTrackOffer) == 0 &&
+              room.Sent(2, lobby::kMsgTrackChunk) == 0,
+          "song relay: no track message carries the song");
+    Check(room.held.count(lobby::kHostId) == 1 && room.held.count(2) == 1, "song relay: host and guest hold it");
+    Check(SameBytes(room.Host().Held(), song) && SameBytes(room.Client(2).Held(), song),
+          "song relay: both hold the owner's bytes");
+    Check(room.Client(2).Held()->Carries() == transfer::Blob::Song, "song relay: the guest's buffer is a song");
+    Check(room.DiskOf(lobby::kHostId).stores == 1 && room.DiskOf(2).stores == 1, "song relay: each keeps it once");
+    Check(room.hostRefused == 0 && room.clientRefused[2] == 0, "song relay: no message refused");
+}
+
+// A guest that kept the song from an earlier race says Have, and nothing streams to it.
+void TestSongCached() {
+    const Track song = Song(transfer::kChunkData * 3, 2);
+    Room room({ 1, 2 }, lobby::SongFlow());
+    room.DiskOf(lobby::kHostId).tracks[song.id] = song.bytes;
+    room.DiskOf(2).tracks[song.id] = song.bytes;
+    room.Reset();
+    room.track = Custom(song);
+    room.owner = lobby::kHostId;
+    room.Run(0);
+    Check(room.held.count(2) == 1 && room.sentChunks[2] == 0, "song cached: the guest says Have, no chunk is sent");
+    Check(room.held.count(1) == 1 && room.sentChunks[1] > 0, "song cached: the other guest downloads it");
+}
+
+// Bytes that are not Ogg, FLAC or WAV fail the song check even with the right hash: nobody holds them.
+void TestSongNotAudio() {
+    const Track midi = Song(transfer::kChunkData * 2, 3, false);
+    Room room({ 1, 2 }, lobby::SongFlow());
+    room.DiskOf(1).tracks[midi.id] = midi.bytes;
+    room.Reset();
+    room.track = Custom(midi);
+    room.owner = 1;
+    room.Run(0);
+    Check(room.held.count(lobby::kHostId) == 0 && room.held.count(2) == 0, "not audio: nobody holds it");
+    Check(room.Host().Held() == nullptr && room.Client(2).Held() == nullptr, "not audio: no copy plays it");
+    Check(room.DiskOf(lobby::kHostId).stores == 0 && room.DiskOf(2).stores == 0, "not audio: nothing is kept");
+}
+
+// A song over 64 MB is never sent, even by a host that holds it.
+void TestSongOverLimit() {
+    Track big;
+    big.bytes.assign(transfer::kSongMaxBytes + 1, 0);
+    std::memcpy(big.bytes.data(), "OggS", 4);
+    big.id = track::Identify(big.bytes.data(), big.bytes.size());
+    Room room({ 1 }, lobby::SongFlow());
+    room.DiskOf(lobby::kHostId).tracks[big.id] = big.bytes;
+    room.Reset();
+    room.track = Custom(big);
+    room.owner = lobby::kHostId;
+    room.Run(0, 2000);
+    Check(room.Host().Held() == nullptr && room.held.count(1) == 0, "over 64 MB: nobody holds it");
+    Check(room.sentChunks[1] == 0 && room.Sent(1, lobby::kMsgSongOffer) == 0, "over 64 MB: nothing is offered");
+}
+
+// A song as large as a track's limit allows, and larger: the song's chunk index runs past a track's last chunk.
+void TestSongPastTrackLimit() {
+    const Track song = Song(track::kMaxBytes + transfer::kChunkData * 2, 4);
+    Room room({ 1 }, lobby::SongFlow());
+    room.DiskOf(lobby::kHostId).tracks[song.id] = song.bytes;
+    room.Reset();
+    room.track = Custom(song);
+    room.owner = lobby::kHostId;
+    room.Run(0, 600000);
+    Check(room.held.count(1) == 1 && SameBytes(room.Client(1).Held(), song),
+          "past a track's size: the guest holds the whole song");
+}
+
 } // namespace
 
 int main() {
@@ -592,6 +692,11 @@ int main() {
     TestNextRace();
     TestLeaveAndRejoin();
     TestRefusals();
+    TestSongRelay();
+    TestSongCached();
+    TestSongNotAudio();
+    TestSongOverLimit();
+    TestSongPastTrackLimit();
     std::printf("%d checks, %d failed\n", gChecks, gFailures);
     return gFailures == 0 ? 0 : 1;
 }

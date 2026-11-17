@@ -292,6 +292,15 @@ enum MessageType : uint8_t {
     kMsgPeers = 38,
     kMsgPaths = 39,
     kMsgRelayTicket = 40,
+    // Protocol 15: the creator names and the song of the room's custom track (gdx_net_track_info.h), and the
+    // song's own transfer, the five kinds of gdx_net_transfer.h under their own numbers.
+    kMsgTrackInfoNeed = 41,
+    kMsgTrackInfo = 42,
+    kMsgSongOffer = 43,
+    kMsgSongChunk = 44,
+    kMsgSongHave = 45,
+    kMsgSongNeed = 46,
+    kMsgSongAbort = 47,
 };
 
 // Wire values. Never renumber them.

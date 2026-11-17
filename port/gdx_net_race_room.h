@@ -84,6 +84,14 @@ void gdx_lan_room_hand_over(void);
  * room's and it fits capacity. 0 otherwise; nothing is written then. */
 int gdx_lan_race_track(unsigned char* id, unsigned char* out, unsigned long capacity, unsigned long* length);
 
+/* The creator names and song of the room's custom track (protocol 15), for the race on the track whose 32-byte
+ * identity is id. meta gets the GXM1 block its owner sent (metaCap bytes, 512 is enough), bound to the CRC-32 of
+ * id; *metaLength is 0 when the track has none. songPath gets the song file this copy verified for it, as UTF-8,
+ * or "" when it holds none whole: the song never holds the race, so a late one is simply not played. 1 when the
+ * room's track is that custom track and its Info is known; 0 otherwise, with *metaLength 0 and songPath "". */
+int gdx_lan_race_info(const unsigned char* id, unsigned char* meta, unsigned long metaCap, unsigned long* metaLength,
+                      char* songPath, unsigned long songPathCap);
+
 /* The clock the room runs on, in milliseconds. It wraps. */
 unsigned gdx_lan_now_ms(void);
 

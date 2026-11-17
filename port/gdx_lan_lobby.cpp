@@ -23,11 +23,13 @@
 #include "gdx_net_track_cache.h"
 #include "gdx_profile_keys.h"
 #include "gdx_profile_state.h"
+#include "gdx_recovery_file.h"
 #include "net/gdx_net_codes.h"
 #include "net/gdx_net_friends.h"
 #include "net/gdx_net_host_info.h"
 #include "net/gdx_net_race.h"
 #include "net/gdx_net_track_pack.h"
+#include "net/gdx_net_transfer.h"
 
 #include "libultraship/bridge/consolevariablebridge.h"
 #include "ship/Context.h"
@@ -44,6 +46,7 @@
 #include <cstring>
 #include <ctime>
 #include <deque>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -630,11 +633,25 @@ void DeliverRacePoses(LobbyHost* host, LobbyClient* client) {
     }
 }
 
-// This copy's own tracks, as the course select read them for a ballot or a pick (gdx_net_own_tracks.h). Kept
-// from the game thread, read by the worker's store.
+// One of this copy's own tracks, as the course select read it for a ballot or a pick (gdx_net_own_tracks.h).
+// The song fields are filled by the song's hash thread; songReady says it ended.
+struct OwnTrack {
+    net::track::TrackId id{};
+    std::vector<uint8_t> bytes;
+    std::vector<uint8_t> meta;
+    std::string songPath; // empty for none
+    uint64_t serial = 0;  // which KeepOwnTrack the hash thread answers
+    bool songReady = false;
+    bool hasSong = false; // the file read, fits the limit and is a format the game plays
+    net::track::TrackId songId{};
+    uint32_t songSize = 0;
+};
+
+// Kept from the game thread, read by the worker's stores and Info source.
 struct OwnTracks {
     std::mutex lock;
-    std::deque<std::pair<net::track::TrackId, std::vector<uint8_t>>> tracks; // oldest first
+    std::deque<OwnTrack> tracks; // oldest first
+    uint64_t serial = 0;
 };
 
 constexpr size_t kOwnTracksMax = 6;
@@ -647,13 +664,108 @@ OwnTracks& Own() {
 bool LoadOwnTrack(const net::track::TrackId& id, std::vector<uint8_t>& bytes) {
     OwnTracks& own = Own();
     std::lock_guard<std::mutex> guard(own.lock);
-    for (const auto& kept : own.tracks) {
-        if (kept.first == id) {
-            bytes = kept.second;
+    for (const OwnTrack& kept : own.tracks) {
+        if (kept.id == id) {
+            bytes = kept.bytes;
             return true;
         }
     }
     return false;
+}
+
+// The track's Info (protocol 15) for the room's Info flow, on the worker thread.
+InfoReady OwnTrackInfo(const net::track::TrackId& id, TrackInfo& out) {
+    OwnTracks& own = Own();
+    std::lock_guard<std::mutex> guard(own.lock);
+    for (const OwnTrack& kept : own.tracks) {
+        if (kept.id != id) {
+            continue;
+        }
+        if (!kept.songPath.empty() && !kept.songReady) {
+            return InfoReady::Pending;
+        }
+        out = TrackInfo();
+        out.track = id;
+        out.meta = kept.meta;
+        out.hasSong = kept.hasSong;
+        out.song = kept.songId;
+        out.songSize = kept.songSize;
+        return InfoReady::Ready;
+    }
+    return InfoReady::Unknown;
+}
+
+// The song file of one of this copy's tracks whose hash is id, or an empty path.
+std::string OwnSongPath(const net::track::TrackId& id) {
+    OwnTracks& own = Own();
+    std::lock_guard<std::mutex> guard(own.lock);
+    for (const OwnTrack& kept : own.tracks) {
+        if (kept.songReady && kept.hasSong && kept.songId == id) {
+            return kept.songPath;
+        }
+    }
+    return std::string();
+}
+
+// The room caches' folder, online/cache/<name> under the data folder. A portable install's data folder is ".",
+// and the caches refuse a relative folder, so it is made absolute here, against the folder the saves use too.
+std::filesystem::path CacheFolder(const char* name) {
+    std::error_code ec;
+    const std::filesystem::path data =
+        std::filesystem::absolute(std::filesystem::u8path(Ship::Context::GetAppDirectoryPath()), ec);
+    if (ec) {
+        return std::filesystem::path(); // the cache stays closed
+    }
+    return data.lexically_normal() / "online" / "cache" / name;
+}
+
+// Downloaded songs. Shared by every worker and the game thread: SongCache keeps no state but its folder, and
+// its writes go through one lock (StoreSong).
+net::SongCache& Songs() {
+    static net::SongCache* songs = new net::SongCache(CacheFolder("music"));
+    return *songs;
+}
+
+// A 40 MB write with write-through and a readback takes long enough to stall the room, so it runs on a thread
+// of its own. The race finds the file only once it is whole: writeFile renames it into place.
+void StoreSong(const net::track::TrackId& id, std::shared_ptr<const std::vector<uint8_t>> bytes) {
+    std::thread([id, bytes]() {
+        static std::mutex writing;
+        std::lock_guard<std::mutex> guard(writing);
+        if (!Songs().Store(id, *bytes)) {
+            gdx_port_logf("[lan] a verified song could not be kept in the cache\n");
+        }
+    }).detach();
+}
+
+// Reads and hashes the song of an own track kept as serial, then fills its entry if it is still there.
+void HashOwnSong(uint64_t serial, std::string path) {
+    std::thread([serial, path]() {
+        bool ok = false;
+        net::track::TrackId songId{};
+        uint32_t size = 0;
+        gdx::recovery::Bytes raw;
+        if (gdx::recovery::readFile(std::filesystem::u8path(path), raw, net::transfer::kSongMaxBytes) &&
+            !raw.empty() && net::transfer::SongFormatOf(raw.data(), raw.size()) != net::transfer::SongFormat::None) {
+            songId = net::track::Identify(raw.data(), raw.size());
+            size = static_cast<uint32_t>(raw.size());
+            ok = true;
+        }
+        if (!ok) {
+            gdx_port_logf("[lan] the track's song is not sent: missing, over %u MB or not OGG, FLAC or WAV\n",
+                          static_cast<unsigned>(net::transfer::kSongMaxBytes >> 20));
+        }
+        OwnTracks& own = Own();
+        std::lock_guard<std::mutex> guard(own.lock);
+        for (OwnTrack& kept : own.tracks) {
+            if (kept.serial == serial) {
+                kept.songReady = true;
+                kept.hasSong = ok;
+                kept.songId = songId;
+                kept.songSize = size;
+            }
+        }
+    }).detach();
 }
 
 // The worker. socket is already open; everything else is built here and never leaves this thread.
@@ -686,8 +798,7 @@ void Run(Kind kind, std::shared_ptr<UdpSocket> socket, uint16_t port, LocalProfi
     const uint32_t start = NowMs();
 
     // This copy's own tracks first, then the downloaded ones, which are read and written on this thread only.
-    auto cache = std::make_shared<net::TrackCache>(std::filesystem::path(Ship::Context::GetAppDirectoryPath()) /
-                                                   "online" / "cache" / "tracks");
+    auto cache = std::make_shared<net::TrackCache>(CacheFolder("tracks"));
     TrackStore store;
     store.load = [cache](const net::track::TrackId& id, std::vector<uint8_t>& bytes) {
         return LoadOwnTrack(id, bytes) || (cache->ok() && cache->Load(id, bytes));
@@ -698,7 +809,35 @@ void Run(Kind kind, std::shared_ptr<UdpSocket> socket, uint16_t port, LocalProfi
                 gdx_port_logf("[lan] a verified track could not be kept in the cache\n");
             }
         };
+    } else {
+        gdx_port_logf("[lan] the track cache could not open its folder: downloaded tracks are not kept\n");
     }
+    // The race's song (protocol 15): this copy's own song file first, then the downloaded ones. Reading and
+    // hashing a song happens once per race on this thread; writing it happens on a thread of its own.
+    TrackStore songStore;
+    songStore.load = [](const net::track::TrackId& id, std::vector<uint8_t>& bytes) {
+        bytes.clear();
+        const std::string own = OwnSongPath(id);
+        gdx::recovery::Bytes raw;
+        if (!own.empty() &&
+            gdx::recovery::readFile(std::filesystem::u8path(own), raw, net::transfer::kSongMaxBytes)) {
+            bytes.assign(raw.begin(), raw.end());
+            return true;
+        }
+        return Songs().ok() && Songs().Load(id, bytes);
+    };
+    if (Songs().ok()) {
+        songStore.store = [](const net::track::TrackId& id, const std::vector<uint8_t>& bytes) {
+            if (OwnSongPath(id).empty()) {
+                StoreSong(id, std::make_shared<const std::vector<uint8_t>>(bytes));
+            }
+        };
+    } else {
+        gdx_port_logf("[lan] the song cache could not open its folder: downloaded songs do not play\n");
+    }
+    const auto setSongSources = [&songStore](auto& session) {
+        session.SetSongSources(songStore, OwnTrackInfo);
+    };
 
     // A directory room's listing (O5.10), on whichever copy hosts it: the first host registers a code, a promoted
     // one takes the code over with the secret the old host handed it.
@@ -772,6 +911,7 @@ void Run(Kind kind, std::shared_ptr<UdpSocket> socket, uint16_t port, LocalProfi
     };
     const auto makeClient = [&](const NetAddress& addr) {
         auto made = std::make_unique<LobbyClient>(build, me, seat, addr, RandomNonce(), send, store);
+        setSongSources(*made);
         made->SetSigner(SignerFor(online));
         made->AllowLoopback(online.localTest);
         made->SetPaths(livePaths);
@@ -786,6 +926,7 @@ void Run(Kind kind, std::shared_ptr<UdpSocket> socket, uint16_t port, LocalProfi
         return made;
     };
     const auto setUpHost = [&](LobbyHost& made) {
+        setSongSources(made);
         made.SetIdentity(online.identity);
         made.SetFriends(online.friends);
     };
@@ -880,6 +1021,7 @@ void Run(Kind kind, std::shared_ptr<UdpSocket> socket, uint16_t port, LocalProfi
         if (plan.kind == HandoverPlan::Kind::Rejoin) {
             // A Rejoin is proved by its token, not a key: the successor's key is not the one the directory gave.
             auto next = std::make_unique<LobbyClient>(build, me, seat, plan.address, RandomNonce(), send, store);
+            setSongSources(*next);
             next->SetSigner(SignerFor(online));
             next->AllowLoopback(online.localTest);
             next->SetPaths(livePaths);
@@ -921,6 +1063,7 @@ void Run(Kind kind, std::shared_ptr<UdpSocket> socket, uint16_t port, LocalProfi
     RaceUpload upload;
     bool memberRacing = false;            // the race phase as LogRacePaths last saw it
     uint32_t loggedLottery = 0xFFFFFFFFu; // the race whose lottery a member last logged
+    uint32_t loggedSong = 0xFFFFFFFFu;    // the race whose song a member last logged, as its window closed
 
     while (!ctl->stop.load()) {
         const uint32_t now = NowMs();
@@ -1179,6 +1322,11 @@ void Run(Kind kind, std::shared_ptr<UdpSocket> socket, uint16_t port, LocalProfi
             v.haveResults = v.results.final || !v.results.entries.empty();
             v.trackProgress = host->Track();
             v.raceTrack = host->RaceTrack();
+            if (const TrackInfo* info = host->RaceInfo()) {
+                v.raceInfo = *info;
+                v.haveRaceInfo = true;
+            }
+            v.raceSong = host->RaceSong();
             v.clockReady = true; // the room runs on this copy's clock
             if (listing) {
                 v.listing = listing->View();
@@ -1238,6 +1386,24 @@ void Run(Kind kind, std::shared_ptr<UdpSocket> socket, uint16_t port, LocalProfi
             v.haveResults = client->Results(v.results);
             v.trackProgress = client->Track();
             v.raceTrack = client->RaceTrack();
+            if (const TrackInfo* info = client->RaceInfo()) {
+                v.raceInfo = *info;
+                v.haveRaceInfo = true;
+            }
+            v.raceSong = client->RaceSong();
+            // The song moves only while the room is on the lock-in screen or fetching assets; say once per race
+            // where it stood when that window closed, so a race on the stock music can be told apart from a bug.
+            if (v.room.track == kTrackCustom && v.room.phase == Phase::GridSync && loggedSong != v.room.raceIndex) {
+                loggedSong = v.room.raceIndex;
+                const TrackProgress song = client->Song();
+                const char* state = !v.haveRaceInfo        ? "no Info from the host"
+                                    : !v.raceInfo.hasSong ? "the track has none"
+                                    : v.raceSong != nullptr ? "held"
+                                    : song.failed           ? "refused"
+                                                            : "not finished, the stock music plays";
+                gdx_port_logf("[lan] race %u song: %s (%zu of %zu chunks)\n", static_cast<unsigned>(v.room.raceIndex),
+                              state, song.chunks, song.of);
+            }
             v.clockReady = client->Clock().Ready();
             v.clockOffsetMs = client->Clock().OffsetMs();
             v.keys = client->Keys();
@@ -1488,18 +1654,39 @@ void PickCustom(const CustomTrack& track) {
     Push(std::move(cmd));
 }
 
-void KeepOwnTrack(const net::track::TrackId& id, std::vector<uint8_t> bytes) {
+void KeepOwnTrack(const net::track::TrackId& id, std::vector<uint8_t> bytes, std::vector<uint8_t> meta,
+                  std::string songPath) {
     OwnTracks& own = Own();
-    std::lock_guard<std::mutex> guard(own.lock);
-    for (auto it = own.tracks.begin(); it != own.tracks.end(); ++it) {
-        if (it->first == id) {
-            own.tracks.erase(it);
-            break;
+    uint64_t hash = 0; // the serial whose song needs hashing, 0 for none
+    {
+        std::lock_guard<std::mutex> guard(own.lock);
+        OwnTrack kept;
+        for (auto it = own.tracks.begin(); it != own.tracks.end(); ++it) {
+            if (it->id == id) {
+                // The same song stays hashed: a slot read again does not read 40 MB again.
+                if (it->songPath == songPath) {
+                    kept = std::move(*it);
+                }
+                own.tracks.erase(it);
+                break;
+            }
+        }
+        if (kept.songPath != songPath) {
+            kept = OwnTrack();
+            kept.songPath = songPath;
+            kept.serial = ++own.serial;
+            hash = kept.serial;
+        }
+        kept.id = id;
+        kept.bytes = std::move(bytes);
+        kept.meta = std::move(meta);
+        own.tracks.push_back(std::move(kept));
+        while (own.tracks.size() > kOwnTracksMax) {
+            own.tracks.pop_front();
         }
     }
-    own.tracks.emplace_back(id, std::move(bytes));
-    while (own.tracks.size() > kOwnTracksMax) {
-        own.tracks.pop_front();
+    if (hash != 0) {
+        HashOwnSong(hash, std::move(songPath));
     }
 }
 
@@ -1678,6 +1865,7 @@ void Shutdown() {
     StopWorker(true);
     ReapLeaver(true);
 }
+
 
 void DevFrame() {
     enum class Dev : uint8_t { Unread, Off, Host, Join };
@@ -1914,6 +2102,50 @@ extern "C" int gdx_lan_race_track(unsigned char* id, unsigned char* out, unsigne
     std::copy(view.raceTrack->Id().begin(), view.raceTrack->Id().end(), id);
     std::copy(view.raceTrack->Bytes(), view.raceTrack->Bytes() + view.raceTrack->Size(), out);
     *length = static_cast<unsigned long>(view.raceTrack->Size());
+    return 1;
+}
+
+extern "C" int gdx_lan_race_info(const unsigned char* id, unsigned char* meta, unsigned long metaCap,
+                                 unsigned long* metaLength, char* songPath, unsigned long songPathCap) {
+    using namespace gdx::lan;
+    if (id == nullptr || meta == nullptr || metaLength == nullptr || songPath == nullptr || songPathCap == 0) {
+        return 0;
+    }
+    *metaLength = 0;
+    songPath[0] = '\0';
+    gdx::net::track::TrackId track{};
+    std::copy(id, id + track.size(), track.begin());
+    TrackInfo info;
+    std::shared_ptr<const gdx::net::transfer::TrackBuffer> song;
+    {
+        Runtime& rt = Rt();
+        std::lock_guard<std::mutex> guard(rt.lock);
+        const View& view = rt.view;
+        if ((view.mode != Mode::Hosting && view.mode != Mode::Joined) ||
+            view.room.track != gdx::net::lobby::kTrackCustom || view.room.custom.id != track || !view.haveRaceInfo ||
+            view.raceInfo.track != track || view.raceInfo.meta.size() > metaCap) {
+            return 0;
+        }
+        info = view.raceInfo;
+        song = view.raceSong;
+    }
+    std::copy(info.meta.begin(), info.meta.end(), meta);
+    *metaLength = static_cast<unsigned long>(info.meta.size());
+    // Only a song this copy verified this session plays: its own file, or the cache's once the write is whole.
+    if (info.hasSong && song && song->Complete() && song->Id() == info.song) {
+        std::string path = OwnSongPath(info.song);
+        if (path.empty()) {
+            std::error_code ec;
+            const std::filesystem::path cached = Songs().PathOf(info.song);
+            if (!cached.empty() && std::filesystem::file_size(cached, ec) == info.songSize && !ec) {
+                const std::u8string text = cached.u8string();
+                path.assign(text.begin(), text.end());
+            }
+        }
+        if (!path.empty() && path.size() < songPathCap) {
+            std::memcpy(songPath, path.c_str(), path.size() + 1);
+        }
+    }
     return 1;
 }
 

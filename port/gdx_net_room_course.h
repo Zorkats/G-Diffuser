@@ -55,6 +55,15 @@ void gdx_net_room_course_apply_settings(int ringCount);
  * none or its key is not registered here: the course's own skybox byte then stands. */
 int gdx_net_room_course_skybox(void);
 
+/* The active course's creator names (protocol 15): 1 with out filled while the course raced is the room's custom
+ * track, empty fields when its owner sent none or they have not arrived; 0 otherwise. */
+struct GdxCourseMeta;
+int gdx_net_room_course_meta(struct GdxCourseMeta* out);
+
+/* The active course's song file, UTF-8, or NULL when the course raced is not the room's custom track or this copy
+ * does not hold its song whole: the stock song plays then. Valid until the next prepare() or end(). */
+const char* gdx_net_room_course_song(void);
+
 /* The room's race is over on this copy: drops the course and the extended height it forced. */
 void gdx_net_room_course_end(void);
 

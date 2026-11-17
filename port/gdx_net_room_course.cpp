@@ -5,6 +5,7 @@
 
 #include "gdx_course_bounds.h"
 #include "gdx_course_branch_format.h"
+#include "gdx_course_meta.h"
 #include "gdx_course_registry.h"
 #include "gdx_course_settings.h"
 #include "gdx_course_snapshot.h"
@@ -14,6 +15,7 @@
 #include "net/gdx_net_track_pack.h"
 
 #include <cstring>
+#include <string>
 #include <vector>
 
 namespace {
@@ -32,6 +34,10 @@ struct RoomCourse {
     GdxCourseSettings settings{};
     bool haveSkybox = false;
     GdxCourseExtRecord skybox{};
+    gdx::net::track::TrackId id{};
+    bool haveInfo = false; // the owner's Info reached the lobby (protocol 15)
+    GdxCourseMeta meta{};  // its creator names; empty when it has none or its block did not decode
+    std::string songPath;  // its song, once the lobby holds it whole; empty until then
 };
 
 RoomCourse& Course() {
@@ -47,6 +53,10 @@ void Drop() {
     course.forks = GdxBranchSet{};
     course.settings = GdxCourseSettings{};
     course.skybox = GdxCourseExtRecord{};
+    course.id = gdx::net::track::TrackId{};
+    course.haveInfo = false;
+    course.meta = GdxCourseMeta{};
+    course.songPath.clear();
     gdx_course_bounds_force_extended(0);
 }
 
@@ -85,6 +95,29 @@ bool DecodeMetadata(const gdx::snapshot::Generation& generation, RoomCourse& cou
     return true;
 }
 
+// Asks the lobby for the track's Info and song. The song may still be on its way at prepare(), so it is asked
+// again when the race arms its music; a path once found stays.
+void RefreshInfo(RoomCourse& course) {
+    static std::vector<unsigned char> meta(512);
+    static std::vector<char> path(4096);
+    unsigned long length = 0;
+    if (!gdx_lan_race_info(course.id.data(), meta.data(), static_cast<unsigned long>(meta.size()), &length,
+                           path.data(), static_cast<unsigned long>(path.size()))) {
+        return;
+    }
+    if (!course.haveInfo) {
+        course.haveInfo = true;
+        // A block bound to another track, or damaged, shows no names.
+        const uint32_t bind = gdx_course_registry_crc32(course.id.data(), course.id.size());
+        if (length == 0 || gdx_meta_decode(meta.data(), length, bind, &course.meta) != GDX_META_OK) {
+            course.meta = GdxCourseMeta{};
+        }
+    }
+    if (course.songPath.empty() && path[0] != 0) {
+        course.songPath = path.data();
+    }
+}
+
 } // namespace
 
 extern "C" int gdx_net_room_course_prepare(int track) {
@@ -115,6 +148,8 @@ extern "C" int gdx_net_room_course_prepare(int track) {
         Drop();
         return 0;
     }
+    course.id = id;
+    RefreshInfo(course);
     course.prepared = true;
     return 1;
 }
@@ -176,6 +211,29 @@ extern "C" int gdx_net_room_course_skybox(void) {
     gdx_course_boot();
     const int stock = gdx_course_registry_resolve(GDX_COURSE_KIND_SKYBOX, course.skybox.key, &missing);
     return missing != 0 ? -1 : stock;
+}
+
+extern "C" int gdx_net_room_course_meta(struct GdxCourseMeta* out) {
+    RoomCourse& course = Course();
+    if (out == nullptr || !course.active) {
+        return 0;
+    }
+    if (!course.haveInfo) {
+        RefreshInfo(course);
+    }
+    *out = course.meta;
+    return 1;
+}
+
+extern "C" const char* gdx_net_room_course_song(void) {
+    RoomCourse& course = Course();
+    if (!course.active) {
+        return nullptr;
+    }
+    if (course.songPath.empty()) {
+        RefreshInfo(course);
+    }
+    return course.songPath.empty() ? nullptr : course.songPath.c_str();
 }
 
 extern "C" void gdx_net_room_course_end(void) {

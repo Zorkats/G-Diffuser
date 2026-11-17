@@ -472,6 +472,67 @@ void CheckFolders(const fs::path& root) {
 
 } // namespace
 
+// Protocol 15 song cache: a song keeps the extension its magic names, a file under the wrong one is deleted, and the
+// byte cap drops the least recently used song but never the one just stored. Other files are never touched.
+Bytes Song(const char* magic, size_t size, uint8_t fill) {
+    Bytes bytes(size, fill);
+    std::memcpy(bytes.data(), magic, std::strlen(magic));
+    return bytes;
+}
+
+void CheckSongCache(const fs::path& root) {
+    using gdx::net::SongCache;
+    const fs::path folder = root / "songs";
+    SongCache cache(folder, SongCache::kDefaultMaxFiles, 300);
+    Check(cache.ok(), "a song cache in a new absolute folder opens");
+    Check(!SongCache(fs::path("relative/songs")).ok(), "a relative song folder is refused");
+
+    const Bytes ogg = Song("OggS", 128, 0x01);
+    const track::TrackId oggId = IdOf(ogg);
+    Check(cache.PathOf(oggId).empty(), "an empty song cache has no path");
+    Bytes out{7};
+    Check(!cache.Load(oggId, out) && out.empty(), "a song miss returns false and clears the output");
+    Check(cache.Store(oggId, ogg), "an OGG song is stored");
+    const fs::path oggPath = cache.PathOf(oggId);
+    Check(oggPath.filename().string() == track::ToHex(oggId) + ".ogg", "an OGG song is named by its hash and .ogg");
+    Check(cache.Load(oggId, out) && out == ogg, "store then load gives the same song bytes");
+
+    Check(!cache.Store(IdOf(Song("MThd", 64, 0x02)), Song("MThd", 64, 0x02)), "a file with no song magic is refused");
+    Check(!cache.Store(oggId, Bytes()), "no bytes are refused");
+    Check(!cache.Store(IdOf(Song("OggS", 301, 0x03)), Song("OggS", 301, 0x03)), "a song over the byte cap is refused");
+
+    // The same id stored again as FLAC: the bytes decide the extension, so the OGG file goes.
+    const Bytes flac = Song("fLaC", 128, 0x04);
+    Check(cache.Store(oggId, flac), "a song stored again with other bytes is kept");
+    Check(!Exists(oggPath), "the file under the old extension is deleted");
+    Check(cache.PathOf(oggId).extension().string() == ".flac", "the song is now under .flac");
+    Check(cache.Load(oggId, out) && out == flac, "the FLAC bytes load back");
+
+    // OGG bytes written by hand under .wav: the extension lies, so the load deletes the file.
+    const Bytes stray = Song("OggS", 64, 0x05);
+    const track::TrackId strayId = IdOf(stray);
+    const fs::path wrong = folder / (track::ToHex(strayId) + ".wav");
+    WriteRaw(wrong, stray);
+    Check(cache.PathOf(strayId) == wrong, "a hand-written file is found by its name");
+    Check(!cache.Load(strayId, out) && out.empty(), "a song under the wrong extension is a miss");
+    Check(!Exists(wrong), "a song under the wrong extension is deleted on load");
+
+    // Byte cap 300: the FLAC (128) is the oldest, a second song (128) fits, a third (128) drops the oldest.
+    const fs::path notes = folder / "notes.txt";
+    WriteRaw(notes, Bytes{1, 2, 3});
+    SetAge(cache.PathOf(oggId), 0);
+    const Bytes second = Song("OggS", 128, 0x06);
+    Check(cache.Store(IdOf(second), second), "a second song is stored");
+    SetAge(cache.PathOf(IdOf(second)), 1);
+    Bytes wav = Song("RIFF", 128, 0x07);
+    std::memcpy(wav.data() + 8, "WAVE", 4);
+    Check(cache.Store(IdOf(wav), wav), "a WAV song is stored");
+    Check(cache.PathOf(IdOf(wav)).extension().string() == ".wav", "a WAV song is named .wav");
+    Check(cache.PathOf(oggId).empty(), "the byte cap drops the least recently used song");
+    Check(!cache.PathOf(IdOf(second)).empty(), "the newer song stays");
+    Check(Exists(notes), "a file that is not a cached song is never deleted");
+}
+
 int main() {
     gBase = fs::file_time_type::clock::now() - std::chrono::hours(1);
     const fs::path root = MakeScratch();
@@ -488,6 +549,7 @@ int main() {
     CheckRelativeRefused();
     CheckNonRegularNeverFollowed(root);
     CheckFolders(root);
+    CheckSongCache(root);
 
     std::error_code ec;
     fs::remove_all(root, ec);

@@ -709,8 +709,19 @@ void LobbyHost::ApplyNews(const RoomNews& news, uint32_t nowMs, std::vector<Outg
     }
 }
 
+// The song flow's track: the song the race's Info names, or none.
+static TrackChoice SongChoice(const TrackInfo* info) {
+    TrackChoice song;
+    if (info != nullptr && info->hasSong) {
+        song.track = kTrackCustom;
+        song.custom.id = info->song;
+    }
+    return song;
+}
+
 // The flow learns the room's track, asks, offers and reports; then each guest's stream gets what its channel
-// has room for. A track the room just dropped is cancelled at the next call.
+// has room for. A track the room just dropped is cancelled at the next call. The Info and song flows follow
+// the track; the song's chunks take only what the track's left of the channel's share.
 void LobbyHost::SyncTrack(uint32_t nowMs) {
     const Phase phase = machine_.GetPhase();
     const bool open = phase == Phase::Machine || phase == Phase::Assets;
@@ -722,9 +733,12 @@ void LobbyHost::SyncTrack(uint32_t nowMs) {
     }
     std::vector<Outgoing> out;
     RoomNews news;
-    flow_.Sync(machine_.CurrentTrack(), machine_.TrackOwner(), machine_.State(nowMs).raceIndex, open, guests, nowMs,
-               out, news);
+    const uint16_t raceIndex = machine_.State(nowMs).raceIndex;
+    flow_.Sync(machine_.CurrentTrack(), machine_.TrackOwner(), raceIndex, open, guests, nowMs, out, news);
     ApplyNews(news, nowMs, out);
+    info_.Sync(machine_.CurrentTrack(), machine_.TrackOwner(), raceIndex, guests, out);
+    RoomNews songNews; // ignored: the song never holds the race
+    songFlow_.Sync(SongChoice(info_.Info()), machine_.TrackOwner(), raceIndex, open, guests, nowMs, out, songNews);
     Dispatch(out);
     for (const std::unique_ptr<Peer>& peer : peers_) {
         if (!peer->joined || peer->rejecting || peer->dead) {
@@ -733,6 +747,9 @@ void LobbyHost::SyncTrack(uint32_t nowMs) {
         Channel& channel = *peer->channel;
         flow_.Pump(peer->id, channel.ReliableOutstanding(), nowMs, [&channel](const std::vector<uint8_t>& payload) {
             return channel.SendReliable(kMsgTrackChunk, payload.data(), payload.size()) == QueueResult::Ok;
+        });
+        songFlow_.Pump(peer->id, channel.ReliableOutstanding(), nowMs, [&channel](const std::vector<uint8_t>& payload) {
+            return channel.SendReliable(kMsgSongChunk, payload.data(), payload.size()) == QueueResult::Ok;
         });
     }
 }
@@ -816,6 +833,19 @@ void LobbyHost::HandleMessage(Peer& peer, const Message& msg, uint32_t nowMs) {
         RoomNews news;
         ok = flow_.Receive(id, msg.type, data, len, nowMs, out, news);
         ApplyNews(news, nowMs, out);
+        break;
+    }
+    case kMsgTrackInfoNeed:
+    case kMsgTrackInfo:
+        ok = info_.Receive(id, msg.type, data, len);
+        break;
+    case kMsgSongOffer:
+    case kMsgSongChunk:
+    case kMsgSongHave:
+    case kMsgSongNeed:
+    case kMsgSongAbort: {
+        RoomNews ignored; // the song never holds the race
+        ok = songFlow_.Receive(id, msg.type, data, len, nowMs, out, ignored);
         break;
     }
     case kMsgLock: {
@@ -1680,6 +1710,9 @@ void LobbyClient::Update(uint32_t nowMs) {
         flow_.Pump(channel_.ReliableOutstanding(), nowMs, [this](const std::vector<uint8_t>& payload) {
             return channel_.SendReliable(kMsgTrackChunk, payload.data(), payload.size()) == QueueResult::Ok;
         });
+        songFlow_.Pump(channel_.ReliableOutstanding(), nowMs, [this](const std::vector<uint8_t>& payload) {
+            return channel_.SendReliable(kMsgSongChunk, payload.data(), payload.size()) == QueueResult::Ok;
+        });
         const uint32_t every = clock_.Samples() < kClockWarmSamples ? kClockPingFastMs : kClockPingSlowMs;
         if (!clockPinged_ || Elapsed(nowMs, lastClockPingMs_) >= every) {
             clockPinged_ = true;
@@ -1969,6 +2002,24 @@ void LobbyClient::HandleMessage(const Message& msg, uint32_t nowMs) {
         }
         return;
     }
+    case kMsgTrackInfoNeed:
+    case kMsgTrackInfo:
+    case kMsgSongOffer:
+    case kMsgSongChunk:
+    case kMsgSongHave:
+    case kMsgSongNeed:
+    case kMsgSongAbort: {
+        SyncTrack(nowMs);
+        std::vector<Outgoing> out;
+        const bool info = msg.type == kMsgTrackInfoNeed || msg.type == kMsgTrackInfo;
+        if (!(info ? info_.Receive(msg.type, data, len, out) : songFlow_.Receive(msg.type, data, len, nowMs, out))) {
+            refused_++;
+        }
+        for (const Outgoing& reply : out) {
+            Send(reply.type, reply.payload);
+        }
+        return;
+    }
     default:
         refused_++;
         return;
@@ -2113,7 +2164,14 @@ void LobbyClient::SyncTrack(uint32_t nowMs) {
     track.track = room_.track;
     track.custom = room_.custom;
     const bool open = room_.phase == Phase::Machine || room_.phase == Phase::Assets;
-    flow_.Sync(track, OwnsTrack(), room_.raceIndex, open, nowMs);
+    const bool owner = OwnsTrack();
+    flow_.Sync(track, owner, room_.raceIndex, open, nowMs);
+    std::vector<Outgoing> out;
+    info_.Sync(track, room_.raceIndex, out);
+    songFlow_.Sync(SongChoice(info_.Info()), owner, room_.raceIndex, open, nowMs);
+    for (const Outgoing& reply : out) {
+        Send(reply.type, reply.payload);
+    }
 }
 
 void LobbyClient::Lock(const LockRequest& lock) {

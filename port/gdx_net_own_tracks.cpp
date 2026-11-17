@@ -10,10 +10,14 @@
 #include "gdx_net_own_tracks.h"
 
 #include "gdx_content_io.h"
+#include "gdx_course_meta.h"
+#include "gdx_course_music.h"
+#include "gdx_course_registry.h"
 #include "gdx_course_snapshot_io.h"
 #include "gdx_edit_cup.h"
 #include "gdx_net_room_view.h"
 #include "net/gdx_net_lobby.h"
+#include "net/gdx_net_track_info.h"
 #include "net/gdx_net_track_pack.h"
 
 #include <algorithm>
@@ -66,6 +70,40 @@ std::string TitleOf(const std::string& name) {
     return title;
 }
 
+// What a room's racers need beside the track's bytes (protocol 15): its creator names as a GXM1 block bound to
+// the CRC-32 of the track id, and the file of its song. Only the names and the signature go: the staff time,
+// splits and ghost are the owner's records, and a room race keeps none. Either is left empty when the slot
+// has none.
+void Extras(const std::string& name, const track::TrackId& id, std::vector<uint8_t>& meta, std::string& song) {
+    meta.clear();
+    song.clear();
+    char courseId[GDX_COURSE_FILE_ID_MAX + 1];
+    if (!gdx_course_music_course_id(name.c_str(), "CRSD", courseId, static_cast<int>(sizeof(courseId)))) {
+        return;
+    }
+    GdxCourseMeta stored;
+    if (gdx_meta_store_get(courseId, &stored) && (stored.author[0] != '\0' || stored.editedBy[0] != '\0')) {
+        GdxCourseMeta names;
+        std::memset(&names, 0, sizeof(names));
+        std::memcpy(names.author, stored.author, sizeof(names.author));
+        std::memcpy(names.editedBy, stored.editedBy, sizeof(names.editedBy));
+        names.hasSignature = stored.hasSignature;
+        std::memcpy(names.signature, stored.signature, sizeof(names.signature));
+        // The encoder wants room for every record it could write; the names and the signature use far less, and
+        // the Info message carries at most kInfoMetaMax bytes.
+        std::vector<unsigned char> block(GDX_META_BLOCK_MAX_BYTES);
+        const int length =
+            gdx_meta_encode(&names, gdx_course_registry_crc32(id.data(), id.size()), block.data(), block.size());
+        if (length > 0 && static_cast<size_t>(length) <= lobby::kInfoMetaMax) {
+            meta.assign(block.begin(), block.begin() + length);
+        }
+    }
+    char path[GDX_COURSE_PATH_MAX];
+    if (gdx_course_music_course_song(courseId, path, static_cast<int>(sizeof(path)))) {
+        song = path;
+    }
+}
+
 // Reads the slot's track. false with known set when the slot holds no track a room can race, and with known
 // clear when the disk was busy, so a later call tries again.
 void Read(Slot& slot) {
@@ -95,7 +133,11 @@ void Read(Slot& slot) {
     slot.id = id;
     slot.title = TitleOf(slot.name);
     slot.ok = true;
-    gdx_lan_room_keep_track(id.data(), content.data(), static_cast<unsigned long>(content.size()));
+    std::vector<uint8_t> meta;
+    std::string song;
+    Extras(slot.name, id, meta, song);
+    gdx_lan_room_keep_track(id.data(), content.data(), static_cast<unsigned long>(content.size()), meta.data(),
+                            static_cast<unsigned long>(meta.size()), song.c_str());
 }
 
 } // namespace

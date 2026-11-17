@@ -31,6 +31,10 @@
 // its flow every Update and passes it the transfer messages; the host tells its room who holds the track.
 // RaceTrack() is the verified track a copy races on, from memory.
 //
+// Protocol 15 adds the track's creator names and song: an Info flow (gdx_net_track_info.h) and a second track
+// flow for the song (SongFlow()). SetSongSources gives both their stores; without it a copy has no own Info and
+// keeps no song. RaceInfo() and RaceSong() are what the race shows and plays.
+//
 // When the host is lost, each client's NextHost() says what comes next (HandoverPlan): the successor hosts the
 // room from its own mirror, and the others come back to it with Rejoin and the token the old host gave them.
 //
@@ -53,6 +57,7 @@
 #include "gdx_net_room.h"
 #include "gdx_net_socket.h"
 #include "gdx_net_track_flow.h"
+#include "gdx_net_track_info.h"
 
 #include <array>
 #include <cstddef>
@@ -338,6 +343,26 @@ public:
         return flow_.Held();
     }
 
+    // Before the first Update: where the song is loaded from and kept, and this copy's own Info.
+    void SetSongSources(TrackStore song, InfoSource own) {
+        songFlow_ = HostTrackFlow(std::move(song), SongFlow());
+        info_ = HostInfoFlow(std::move(own));
+    }
+
+    // The race's creator names and song, once known. Null for a stock track and until the owner answered.
+    const TrackInfo* RaceInfo() const {
+        return info_.Info();
+    }
+
+    // The race's song, once this copy holds it verified.
+    std::shared_ptr<const transfer::TrackBuffer> RaceSong() const {
+        return songFlow_.Held();
+    }
+
+    TrackProgress Song() const {
+        return songFlow_.Progress();
+    }
+
     TrackProgress Track() const {
         return flow_.Progress();
     }
@@ -486,6 +511,8 @@ private:
     DatagramSend send_;
     RoomMachine machine_;
     HostTrackFlow flow_;
+    HostTrackFlow songFlow_{ TrackStore(), SongFlow() };
+    HostInfoFlow info_;
     std::vector<std::unique_ptr<Peer>> peers_;
     std::deque<ShownLine> lines_;
     uint32_t lastPingMs_ = 0;
@@ -648,6 +675,24 @@ public:
         return flow_.Held();
     }
 
+    // As LobbyHost::SetSongSources.
+    void SetSongSources(TrackStore song, InfoSource own) {
+        songFlow_ = ClientTrackFlow(std::move(song), SongFlow());
+        info_ = ClientInfoFlow(std::move(own));
+    }
+
+    const TrackInfo* RaceInfo() const {
+        return info_.Info();
+    }
+
+    std::shared_ptr<const transfer::TrackBuffer> RaceSong() const {
+        return songFlow_.Held();
+    }
+
+    TrackProgress Song() const {
+        return songFlow_.Progress();
+    }
+
     TrackProgress Track() const {
         return flow_.Progress();
     }
@@ -805,6 +850,8 @@ private:
     std::string closeText_;
     uint32_t refused_ = 0;
     ClientTrackFlow flow_;
+    ClientTrackFlow songFlow_{ TrackStore(), SongFlow() };
+    ClientInfoFlow info_;
     uint64_t ownToken_ = 0;
     std::vector<HandoverTokenEntry> tokenTable_;
     Bytes32 takeoverSecret_{};

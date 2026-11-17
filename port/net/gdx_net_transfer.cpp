@@ -78,7 +78,80 @@ bool DecodeIdOnly(const uint8_t* data, size_t len, track::TrackId& out) {
     return true;
 }
 
+bool StartsWith(const uint8_t* bytes, size_t length, size_t at, const char* magic) {
+    const size_t n = std::strlen(magic);
+    return length >= at + n && std::memcmp(bytes + at, magic, n) == 0;
+}
+
 } // namespace
+
+size_t MaxBytes(Blob blob) {
+    return blob == Blob::Song ? kSongMaxBytes : track::kMaxBytes;
+}
+
+size_t MaxChunks(Blob blob) {
+    return blob == Blob::Song ? kSongMaxChunks : kMaxChunks;
+}
+
+SongFormat SongFormatOf(const uint8_t* bytes, size_t length) {
+    if (bytes == nullptr) {
+        return SongFormat::None;
+    }
+    if (StartsWith(bytes, length, 0, "OggS")) {
+        return SongFormat::Ogg;
+    }
+    if (StartsWith(bytes, length, 0, "RIFF") && StartsWith(bytes, length, 8, "WAVE")) {
+        return SongFormat::Wav;
+    }
+    size_t at = 0;
+    // A tagger may put an ID3v2 tag before the FLAC stream; dr_flac skips it, so this does too. Its size is
+    // four 7-bit bytes after the 6-byte header, and a footer flag adds 10 more bytes.
+    if (StartsWith(bytes, length, 0, "ID3") && length >= 10) {
+        size_t tag = 0;
+        for (size_t i = 6; i < 10; i++) {
+            if ((bytes[i] & 0x80u) != 0) {
+                return SongFormat::None;
+            }
+            tag = (tag << 7) | bytes[i];
+        }
+        at = 10 + tag + ((bytes[5] & 0x10u) != 0 ? 10 : 0);
+    }
+    return StartsWith(bytes, length, at, "fLaC") ? SongFormat::Flac : SongFormat::None;
+}
+
+const char* SongExtension(SongFormat format) {
+    switch (format) {
+    case SongFormat::Ogg:
+        return ".ogg";
+    case SongFormat::Flac:
+        return ".flac";
+    case SongFormat::Wav:
+        return ".wav";
+    case SongFormat::None:
+        break;
+    }
+    return "";
+}
+
+track::Verdict VerifySong(const uint8_t* bytes, size_t length, const track::TrackId& expected) {
+    if (bytes == nullptr || length == 0) {
+        return track::Verdict::Empty;
+    }
+    if (length > kSongMaxBytes) {
+        return track::Verdict::Oversized;
+    }
+    if (track::Identify(bytes, length) != expected) {
+        return track::Verdict::WrongIdentity;
+    }
+    return SongFormatOf(bytes, length) == SongFormat::None ? track::Verdict::Undecodable : track::Verdict::Ok;
+}
+
+track::Verdict VerifyBlob(Blob blob, const uint8_t* bytes, size_t length, const track::TrackId& expected) {
+    if (blob == Blob::Song) {
+        return VerifySong(bytes, length, expected);
+    }
+    return track::Verify(bytes, length, expected, nullptr);
+}
 
 size_t ChunkCount(size_t size) {
     return (size + kChunkData - 1) / kChunkData;
@@ -95,8 +168,8 @@ size_t ChunkLength(size_t size, size_t index) {
     return kChunkData;
 }
 
-bool EncodeOffer(const Offer& offer, std::vector<uint8_t>& out) {
-    if (offer.size == 0 || offer.size > track::kMaxBytes || offer.title.size() > kTitleMax) {
+bool EncodeOffer(const Offer& offer, std::vector<uint8_t>& out, Blob blob) {
+    if (offer.size == 0 || offer.size > MaxBytes(blob) || offer.title.size() > kTitleMax) {
         return false;
     }
     std::vector<uint8_t> bytes;
@@ -110,8 +183,8 @@ bool EncodeOffer(const Offer& offer, std::vector<uint8_t>& out) {
 }
 
 bool EncodeChunk(const track::TrackId& id, size_t index, const uint8_t* data, size_t length,
-                 std::vector<uint8_t>& out) {
-    if (index >= kMaxChunks || data == nullptr || length == 0 || length > kChunkData) {
+                 std::vector<uint8_t>& out, Blob blob) {
+    if (index >= MaxChunks(blob) || data == nullptr || length == 0 || length > kChunkData) {
         return false;
     }
     std::vector<uint8_t> bytes;
@@ -143,7 +216,7 @@ bool EncodeAbort(const Abort& value, std::vector<uint8_t>& out) {
     return true;
 }
 
-bool DecodeOffer(const uint8_t* data, size_t len, Offer& out) {
+bool DecodeOffer(const uint8_t* data, size_t len, Offer& out, Blob blob) {
     if (data == nullptr || len < kOfferFixed) {
         return false;
     }
@@ -153,7 +226,7 @@ bool DecodeOffer(const uint8_t* data, size_t len, Offer& out) {
         return false;
     }
     const uint32_t size = GetU32(data + kIdLen);
-    if (size == 0 || size > track::kMaxBytes) {
+    if (size == 0 || size > MaxBytes(blob)) {
         return false;
     }
     Offer offer;
@@ -164,12 +237,12 @@ bool DecodeOffer(const uint8_t* data, size_t len, Offer& out) {
     return true;
 }
 
-bool DecodeChunk(const uint8_t* data, size_t len, Chunk& out) {
+bool DecodeChunk(const uint8_t* data, size_t len, Chunk& out, Blob blob) {
     if (data == nullptr || len <= kChunkFixed || len > kChunkFixed + kChunkData) {
         return false;
     }
     const uint16_t index = GetU16(data + kIdLen);
-    if (static_cast<size_t>(index) >= kMaxChunks) {
+    if (static_cast<size_t>(index) >= MaxChunks(blob)) {
         return false;
     }
     Chunk chunk;
@@ -199,23 +272,24 @@ bool DecodeAbort(const uint8_t* data, size_t len, Abort& out) {
     return true;
 }
 
-TrackBuffer::TrackBuffer(const track::TrackId& id, size_t size)
-    : id_(id), bytes_(size, static_cast<uint8_t>(0)), have_(ChunkCount(size), false) {
+TrackBuffer::TrackBuffer(const track::TrackId& id, size_t size, Blob blob)
+    : id_(id), blob_(blob), bytes_(size, static_cast<uint8_t>(0)), have_(ChunkCount(size), false) {
 }
 
-std::shared_ptr<TrackBuffer> TrackBuffer::Empty(const track::TrackId& id, size_t size) {
-    if (size == 0 || size > track::kMaxBytes) {
+std::shared_ptr<TrackBuffer> TrackBuffer::Empty(const track::TrackId& id, size_t size, Blob blob) {
+    if (size == 0 || size > MaxBytes(blob)) {
         return nullptr;
     }
-    return std::shared_ptr<TrackBuffer>(new TrackBuffer(id, size));
+    return std::shared_ptr<TrackBuffer>(new TrackBuffer(id, size, blob));
 }
 
-std::shared_ptr<TrackBuffer> TrackBuffer::Whole(const track::TrackId& id, const uint8_t* bytes, size_t length) {
+std::shared_ptr<TrackBuffer> TrackBuffer::Whole(const track::TrackId& id, const uint8_t* bytes, size_t length,
+                                                Blob blob) {
     // The whole buffer is verified before any copy is made, so an owner's copy and a received copy meet the same bar.
-    if (track::Verify(bytes, length, id, nullptr) != track::Verdict::Ok) {
+    if (VerifyBlob(blob, bytes, length, id) != track::Verdict::Ok) {
         return nullptr;
     }
-    std::shared_ptr<TrackBuffer> buffer = Empty(id, length);
+    std::shared_ptr<TrackBuffer> buffer = Empty(id, length, blob);
     if (buffer == nullptr) {
         return nullptr;
     }
@@ -281,7 +355,7 @@ bool Admit(Kind kind, const Route& route, Counters& counters) {
     return allowed;
 }
 
-Receiver::Receiver(const track::TrackId& expected) : expected_(expected) {
+Receiver::Receiver(const track::TrackId& expected, Blob blob) : expected_(expected), blob_(blob) {
 }
 
 bool Receiver::OnOffer(const Offer& offer, uint32_t nowMs) {
@@ -298,11 +372,11 @@ bool Receiver::OnOffer(const Offer& offer, uint32_t nowMs) {
         return false;
     }
     // A bad size or title is refused before any buffer exists, so an oversize Offer costs nothing.
-    if (offer.title.size() > kTitleMax || offer.size == 0 || offer.size > track::kMaxBytes) {
+    if (offer.title.size() > kTitleMax || offer.size == 0 || offer.size > MaxBytes(blob_)) {
         counts_.Count(Drop::Malformed);
         return false;
     }
-    buffer_ = TrackBuffer::Empty(expected_, offer.size);
+    buffer_ = TrackBuffer::Empty(expected_, offer.size, blob_);
     title_ = offer.title;
     state_ = State::Receiving;
     lastProgressMs_ = nowMs;
@@ -373,7 +447,8 @@ Receiver::State Receiver::StateAt(uint32_t nowMs, uint32_t stallMs) const {
 
 void Receiver::Finish() {
     gdx::snapshot::Generation decoded;
-    verdict_ = track::Verify(buffer_->Bytes(), buffer_->Size(), expected_, &decoded);
+    verdict_ = blob_ == Blob::Song ? VerifySong(buffer_->Bytes(), buffer_->Size(), expected_)
+                                   : track::Verify(buffer_->Bytes(), buffer_->Size(), expected_, &decoded);
     if (verdict_ == track::Verdict::Ok) {
         decoded_ = std::move(decoded);
         state_ = State::Ok;
@@ -398,7 +473,7 @@ size_t Sender::Pump(uint32_t nowMs, size_t outstanding, const EmitFn& emit) {
             break;
         }
         std::vector<uint8_t> payload;
-        if (!EncodeChunk(buffer_->Id(), next_, data, length, payload) || !emit(payload)) {
+        if (!EncodeChunk(buffer_->Id(), next_, data, length, payload, buffer_->Carries()) || !emit(payload)) {
             // A refused payload means the channel is full. The chunk stays next, so the order never breaks.
             break;
         }

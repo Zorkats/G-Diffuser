@@ -1766,8 +1766,8 @@ void TestMachineRecordBounds() {
 
 void TestCustomTrackWire() {
     std::printf("codec: custom tracks, machine records, hack identity, boost length\n");
-    CHECK(kLobbyVersion == kProtocolVersion && kProtocolVersion == 14); // O5.1, O5.3, O6.1, O7.3, R4, direct links, the course choice, relay tickets,
-                                                                         // the 64DD pool with the room rules and the pose flames bumped it
+    CHECK(kLobbyVersion == kProtocolVersion && kProtocolVersion == 15); // O5.1, O5.3, O6.1, O7.3, R4, direct links, the course choice, relay tickets,
+                                                                         // the 64DD pool with the room rules, the pose flames and the track's song bumped it
     CHECK(static_cast<uint8_t>(Phase::Assets) == 9 && kPhaseCount == 10);
     CHECK(std::string(PhaseName(Phase::Assets)) == "Getting the track");
     CHECK(static_cast<uint8_t>(RejectReason::Hack) == 7 && RejectReasonText(RejectReason::Hack)[0] != '\0');

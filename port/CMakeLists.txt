@@ -479,6 +479,7 @@ gdx_add_main_target(G-Diffuser
     net/gdx_net_track_pack.cpp     # O4 custom tracks: a track's identity (SHA-256 of its content bytes) and the receiver's check
     net/gdx_net_transfer.cpp       # O4.2 custom track transfer: chunks, the sender and phase gate, and the host relay
     net/gdx_net_track_flow.cpp     # O4.6 who asks, offers and streams a room's custom track, and what the room hears
+    net/gdx_net_track_info.cpp     # Protocol 15: the creator names and song of a room's custom track
     net/gdx_net_https.cpp          # O5.4 shared HTTPS transport: WinHTTP on Windows, libcurl elsewhere
     net/gdx_net_codes.cpp          # O5.2 room and friend codes: Crockford base32 with a check
     net/gdx_net_directory.cpp      # O5.5 room directory client: rules, encoders, strict reader, failover
@@ -1782,7 +1783,7 @@ add_executable(gdx_net_lobby_tests
     net/gdx_net_friends.cpp
     net/gdx_net_channel.cpp
     net/gdx_net_socket.cpp
-    net/gdx_net_track_flow.cpp net/gdx_net_transfer.cpp net/gdx_net_track_pack.cpp
+    net/gdx_net_track_flow.cpp net/gdx_net_track_info.cpp net/gdx_net_transfer.cpp net/gdx_net_track_pack.cpp
     gdx_course_snapshot.cpp gdx_recovery_file.cpp gdx_course_branch_format.c gdx_course_settings.c
     gdx_course_registry.c)
 target_include_directories(gdx_net_lobby_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/net")
@@ -1831,6 +1832,7 @@ foreach(gdx_net_test IN ITEMS
         gdx_net_track_cache_tests
         gdx_net_transfer_tests
         gdx_net_track_flow_tests
+        gdx_net_track_info_tests
         gdx_net_https_tests
         gdx_net_open_rooms_tests
         gdx_net_succession_tests
@@ -1882,7 +1884,7 @@ endif()
 # in a temporary directory.
 add_executable(gdx_net_track_cache_tests
     tests/gdx_net_track_cache_tests.cpp
-    gdx_net_track_cache.cpp gdx_user_folders.cpp net/gdx_net_track_pack.cpp
+    gdx_net_track_cache.cpp gdx_user_folders.cpp net/gdx_net_track_pack.cpp net/gdx_net_transfer.cpp
     gdx_course_snapshot.cpp gdx_recovery_file.cpp gdx_course_branch_format.c gdx_course_settings.c
     gdx_course_registry.c)
 target_include_directories(gdx_net_track_cache_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/net")
@@ -1924,7 +1926,7 @@ endif()
 # with the two flows wired back to back in memory and every time a nowMs argument.
 add_executable(gdx_net_track_flow_tests
     tests/gdx_net_track_flow_tests.cpp
-    net/gdx_net_track_flow.cpp net/gdx_net_transfer.cpp net/gdx_net_track_pack.cpp net/gdx_net_lobby.cpp
+    net/gdx_net_track_flow.cpp net/gdx_net_track_info.cpp net/gdx_net_transfer.cpp net/gdx_net_track_pack.cpp net/gdx_net_lobby.cpp
     gdx_course_snapshot.cpp gdx_recovery_file.cpp gdx_course_branch_format.c gdx_course_settings.c
     gdx_course_registry.c)
 target_include_directories(gdx_net_track_flow_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/net")
@@ -1933,6 +1935,20 @@ if(MSVC)
     target_compile_options(gdx_net_track_flow_tests PRIVATE /W3)
 elseif(GDX_PORT_WARN_FLAGS)
     target_compile_options(gdx_net_track_flow_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
+endif()
+# Protocol 15 track Info: the InfoNeed and Info codecs, and the host's relay of a track's creator names and song
+# between the owner, the other racers and a latecomer.
+add_executable(gdx_net_track_info_tests
+    tests/gdx_net_track_info_tests.cpp
+    net/gdx_net_track_info.cpp net/gdx_net_transfer.cpp net/gdx_net_track_pack.cpp net/gdx_net_lobby.cpp
+    gdx_course_snapshot.cpp gdx_recovery_file.cpp gdx_course_branch_format.c gdx_course_settings.c
+    gdx_course_registry.c)
+target_include_directories(gdx_net_track_info_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/net")
+target_compile_features(gdx_net_track_info_tests PRIVATE cxx_std_17)
+if(MSVC)
+    target_compile_options(gdx_net_track_info_tests PRIVATE /W3)
+elseif(GDX_PORT_WARN_FLAGS)
+    target_compile_options(gdx_net_track_info_tests PRIVATE ${GDX_PORT_WARN_FLAGS})
 endif()
 # O5.4 shared HTTPS transport: Get and Post against a plain-socket server on 127.0.0.1, through the same
 # WinHTTP or libcurl code the updater uses.
@@ -2016,6 +2032,7 @@ add_executable(gdx_net_upload_tests
     net/gdx_net_channel.cpp
     net/gdx_net_socket.cpp
     net/gdx_net_track_flow.cpp
+    net/gdx_net_track_info.cpp
     net/gdx_net_transfer.cpp
     net/gdx_net_track_pack.cpp
     gdx_course_snapshot.cpp
@@ -2445,6 +2462,7 @@ if(GDX_BUILD_JP AND NOT ANDROID)
         net/gdx_net_lottery.cpp
         net/gdx_net_succession.cpp
         net/gdx_net_track_flow.cpp
+        net/gdx_net_track_info.cpp
         net/gdx_net_transfer.cpp
         net/gdx_net_track_pack.cpp
         net/gdx_net_codes.cpp
@@ -2795,7 +2813,7 @@ endif()
 # lobby, the extended height switch and the boot are stubs in the test, and the stores must stay empty.
 add_executable(gdx_net_room_course_tests
     tests/gdx_net_room_course_tests.cpp tests/gdx_course_snapshot_fixture.c
-    gdx_net_room_course.cpp net/gdx_net_track_pack.cpp
+    gdx_net_room_course.cpp gdx_course_meta.c gdx_course_splits.c gdx_staff_ghost.c net/gdx_net_track_pack.cpp
     gdx_course_snapshot_state.cpp gdx_course_snapshot.cpp gdx_course_snapshot_native.c gdx_course_disk.c
     gdx_recovery_metadata.cpp gdx_course_branch_format.c gdx_course_registry.c gdx_course_settings.c
     gdx_recovery_file.cpp "${DECOMP}/src/game/course.c")

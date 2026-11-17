@@ -45,4 +45,37 @@ class TrackCache {
     bool ok_;
 };
 
+// A custom track's song (protocol 15) at <data root>/online/cache/music/<hex id>.<ogg|flac|wav>, named by the
+// SHA-256 of the file and given the extension its first bytes name, so the game's decoder picks it up. The same
+// least-recently-used rule as TrackCache, with a larger byte cap: a FLAC song alone can be 40 MB.
+class SongCache {
+  public:
+    static constexpr size_t kDefaultMaxFiles = 64;
+    static constexpr size_t kDefaultMaxBytes = 512u * 1024u * 1024u;
+
+    explicit SongCache(const std::filesystem::path& folder, size_t maxFiles = kDefaultMaxFiles,
+                       size_t maxBytes = kDefaultMaxBytes);
+
+    bool ok() const;
+
+    // The cached file of id, or an empty path. Not verified.
+    std::filesystem::path PathOf(const track::TrackId& id) const;
+
+    // Clears bytes first. Reads the file when its size is in range and its extension matches its magic, and
+    // makes it the most recently used. It does not hash the bytes: the caller does (TrackBuffer::Whole with
+    // Blob::Song), so a 40 MB song is hashed once per read instead of twice. A file with the wrong size or
+    // magic is deleted.
+    bool Load(const track::TrackId& id, std::vector<unsigned char>& bytes);
+
+    // Keeps bytes the caller verified (transfer::VerifySong) under the extension their magic names. Refuses an
+    // unknown format and bytes over either byte cap.
+    bool Store(const track::TrackId& id, const std::vector<unsigned char>& bytes);
+
+  private:
+    std::filesystem::path folder_;
+    size_t maxFiles_;
+    size_t maxBytes_;
+    bool ok_;
+};
+
 } // namespace gdx::net

@@ -322,8 +322,11 @@ void gdx_lan_room_pick(int track);
 void gdx_lan_room_vote_custom(const unsigned char* id, const char* title);
 void gdx_lan_room_pick_custom(const unsigned char* id, const char* title);
 /* Keeps the content bytes of a track of this copy's, whose identity is id, for the room to send. The last six
- * kept stay. Bytes that are not a track are kept too; the room's racers refuse them. */
-void gdx_lan_room_keep_track(const unsigned char* id, const unsigned char* bytes, unsigned long length);
+ * kept stay. Bytes that are not a track are kept too; the room's racers refuse them. meta is the track's GXM1
+ * block bound to the CRC-32 of id (metaLength 0 for none, at most 512 bytes) and songPath its song file as UTF-8
+ * (NULL or "" for none): they go to the room as the track's Info (protocol 15). */
+void gdx_lan_room_keep_track(const unsigned char* id, const unsigned char* bytes, unsigned long length,
+                             const unsigned char* meta, unsigned long metaLength, const char* songPath);
 
 /* Send preset message index, 0 to GDX_NET_ROOM_MESSAGES - 1, to the room. The room refuses a player who sends
  * too many too fast and says so in the log. */

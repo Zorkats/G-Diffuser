@@ -49,10 +49,11 @@ constexpr size_t kUnreliableOutCap = 64; // unreliable messages waiting for the 
 // (decisions 75 and 76); 12 adds the relay ticket the host signs for its members (the RelayTicket message, CONTRACT.md
 // §5.9), because the directory now refuses relay credentials without one; 13 adds the 64DD courses to the pool, which
 // grows to 64 bits, and the contact damage, shield and engine rules of the RULES page; 14 adds the booster flame state
-// to every pose of the State message (boost timer, burst and ramp), which then holds 17 poses. A peer on another version
-// is refused with VersionMismatch. Since O5.1 this number alone decides who may join, not the build string (decision 25), so
+// to every pose of the State message (boost timer, burst and ramp), which then holds 17 poses; 15 adds the custom track's
+// creator names and song (the TrackInfoNeed and TrackInfo messages) and the song's transfer (types 43 to 47). A peer on
+// another version is refused with VersionMismatch. Since O5.1 this number alone decides who may join, not the build string (decision 25), so
 // a change to any message or to the track encoding must bump it.
-constexpr uint16_t kProtocolVersion = 14;
+constexpr uint16_t kProtocolVersion = 15;
 
 enum class Role : uint8_t {
     Client,

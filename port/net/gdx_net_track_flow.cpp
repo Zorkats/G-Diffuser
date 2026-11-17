@@ -19,39 +19,34 @@ using transfer::Receiver;
 using transfer::Route;
 using transfer::TrackBuffer;
 
-bool KindOf(uint8_t type, Kind& kind) {
-    switch (type) {
-    case kMsgTrackOffer:
+bool KindOf(const FlowConfig& config, uint8_t type, Kind& kind) {
+    if (type == config.offer) {
         kind = Kind::Offer;
-        return true;
-    case kMsgTrackChunk:
+    } else if (type == config.chunk) {
         kind = Kind::Chunk;
-        return true;
-    case kMsgTrackHave:
+    } else if (type == config.have) {
         kind = Kind::Have;
-        return true;
-    case kMsgTrackNeed:
+    } else if (type == config.need) {
         kind = Kind::Need;
-        return true;
-    case kMsgTrackAbort:
+    } else if (type == config.abort) {
         kind = Kind::Abort;
-        return true;
-    default:
+    } else {
         return false;
     }
+    return true;
 }
 
-bool Decoded(Kind kind, const uint8_t* data, size_t len, transfer::Offer& offer, transfer::Chunk& chunk,
-             track::TrackId& id, Abort& abort) {
+bool Decoded(transfer::Blob blob, Kind kind, const uint8_t* data, size_t len, transfer::Offer& offer,
+             transfer::Chunk& chunk, track::TrackId& id, Abort& abort) {
     switch (kind) {
     case Kind::Offer:
-        if (!transfer::DecodeOffer(data, len, offer)) {
+        if (!transfer::DecodeOffer(data, len, offer, blob)) {
             return false;
         }
         id = offer.id;
         return true;
     case Kind::Chunk:
-        if (!transfer::DecodeChunk(data, len, chunk)) {
+        if (!transfer::DecodeChunk(data, len, chunk, blob)) {
             return false;
         }
         id = chunk.id;
@@ -75,16 +70,21 @@ bool OfferFor(const std::shared_ptr<const TrackBuffer>& buffer, const std::strin
     offer.id = buffer->Id();
     offer.size = static_cast<uint32_t>(buffer->Size());
     offer.title = title;
-    return transfer::EncodeOffer(offer, out);
+    return transfer::EncodeOffer(offer, out, buffer->Carries());
 }
 
-// The whole track from the store, verified, or null.
-std::shared_ptr<const TrackBuffer> LoadWhole(const TrackStore& store, const track::TrackId& id) {
+// The whole track or song from the store, verified, or null.
+std::shared_ptr<const TrackBuffer> LoadWhole(const TrackStore& store, const track::TrackId& id, transfer::Blob blob) {
     std::vector<uint8_t> bytes;
     if (!store.load || !store.load(id, bytes) || bytes.empty()) {
         return nullptr;
     }
-    return TrackBuffer::Whole(id, bytes.data(), bytes.size());
+    return TrackBuffer::Whole(id, bytes.data(), bytes.size(), blob);
+}
+
+// What a receiver's verdict says about the transfer: still running (Empty), held (Ok), or failed.
+bool VerdictFailed(track::Verdict verdict) {
+    return verdict != track::Verdict::Empty && verdict != track::Verdict::Ok;
 }
 
 void Keep(const TrackStore& store, const std::shared_ptr<const TrackBuffer>& buffer) {
@@ -95,7 +95,18 @@ void Keep(const TrackStore& store, const std::shared_ptr<const TrackBuffer>& buf
 
 } // namespace
 
-HostTrackFlow::HostTrackFlow(TrackStore store) : store_(std::move(store)) {
+FlowConfig SongFlow() {
+    FlowConfig config;
+    config.blob = transfer::Blob::Song;
+    config.offer = kMsgSongOffer;
+    config.chunk = kMsgSongChunk;
+    config.have = kMsgSongHave;
+    config.need = kMsgSongNeed;
+    config.abort = kMsgSongAbort;
+    return config;
+}
+
+HostTrackFlow::HostTrackFlow(TrackStore store, FlowConfig config) : store_(std::move(store)), config_(config) {
 }
 
 void HostTrackFlow::Abort(uint8_t to, AbortReason reason, std::vector<Outgoing>& out) const {
@@ -104,7 +115,7 @@ void HostTrackFlow::Abort(uint8_t to, AbortReason reason, std::vector<Outgoing>&
     value.reason = reason;
     std::vector<uint8_t> bytes;
     if (transfer::EncodeAbort(value, bytes)) {
-        out.push_back({ to, kMsgTrackAbort, std::move(bytes) });
+        out.push_back({ to, config_.abort, std::move(bytes) });
     }
 }
 
@@ -137,7 +148,7 @@ void HostTrackFlow::Begin(const TrackChoice& track, uint8_t owner, uint16_t race
     id_ = track.custom.id;
     title_ = track.custom.title;
     owner_ = owner;
-    std::shared_ptr<const TrackBuffer> whole = LoadWhole(store_, id_);
+    std::shared_ptr<const TrackBuffer> whole = LoadWhole(store_, id_, config_.blob);
     if (whole != nullptr) {
         buffer_ = whole;
         held_ = whole;
@@ -151,7 +162,7 @@ void HostTrackFlow::Begin(const TrackChoice& track, uint8_t owner, uint16_t race
         news.failed = true;
         return;
     }
-    upload_ = std::make_unique<Receiver>(id_);
+    upload_ = std::make_unique<Receiver>(id_, config_.blob);
 }
 
 void HostTrackFlow::Sync(const TrackChoice& track, uint8_t owner, uint16_t raceIndex, bool open,
@@ -187,11 +198,10 @@ void HostTrackFlow::Sync(const TrackChoice& track, uint8_t owner, uint16_t raceI
 
     if (upload_ != nullptr && held_ == nullptr) {
         if (!needSent_) {
-            out.push_back({ owner_, kMsgTrackNeed, transfer::EncodeNeed(id_) });
+            out.push_back({ owner_, config_.need, transfer::EncodeNeed(id_) });
             needSent_ = true;
         }
-        if (upload_->Aborted() || (upload_->Verdict() != track::Verdict::Empty &&
-                                   upload_->Verdict() != track::Verdict::Ok)) {
+        if (upload_->Aborted() || VerdictFailed(upload_->Verdict())) {
             // Nobody else can have the bytes (decision 11). What was relayed so far cannot verify anywhere.
             news.failed = true;
             failed_ = true;
@@ -219,7 +229,7 @@ void HostTrackFlow::Sync(const TrackChoice& track, uint8_t owner, uint16_t raceI
         }
         std::vector<uint8_t> bytes;
         if (OfferFor(buffer_, title_, bytes)) {
-            out.push_back({ guest, kMsgTrackOffer, std::move(bytes) });
+            out.push_back({ guest, config_.offer, std::move(bytes) });
             offered_.insert(guest);
         }
     }
@@ -229,7 +239,7 @@ bool HostTrackFlow::Receive(uint8_t from, uint8_t type, const uint8_t* data, siz
                             std::vector<Outgoing>& out, RoomNews& news) {
     (void)out;
     Kind kind = Kind::Offer;
-    if (!KindOf(type, kind)) {
+    if (!KindOf(config_, type, kind)) {
         return false;
     }
     Route route;
@@ -243,7 +253,7 @@ bool HostTrackFlow::Receive(uint8_t from, uint8_t type, const uint8_t* data, siz
     transfer::Chunk chunk;
     track::TrackId id{};
     transfer::Abort abort;
-    if (!Decoded(kind, data, len, offer, chunk, id, abort)) {
+    if (!Decoded(config_.blob, kind, data, len, offer, chunk, id, abort)) {
         counts_.Count(transfer::Drop::Malformed);
         return false;
     }
@@ -300,7 +310,7 @@ TrackProgress HostTrackFlow::Progress() const {
     return p;
 }
 
-ClientTrackFlow::ClientTrackFlow(TrackStore store) : store_(std::move(store)) {
+ClientTrackFlow::ClientTrackFlow(TrackStore store, FlowConfig config) : store_(std::move(store)), config_(config) {
 }
 
 void ClientTrackFlow::Reset() {
@@ -331,13 +341,13 @@ void ClientTrackFlow::Sync(const TrackChoice& track, bool owner, uint16_t raceIn
     race_ = raceIndex;
     id_ = track.custom.id;
     title_ = track.custom.title;
-    held_ = LoadWhole(store_, id_); // the owner's own track, or one this copy kept from an earlier room
+    held_ = LoadWhole(store_, id_, config_.blob); // the owner's own track, or one this copy kept from an earlier room
 }
 
 bool ClientTrackFlow::Receive(uint8_t type, const uint8_t* data, size_t len, uint32_t nowMs,
                               std::vector<Outgoing>& out) {
     Kind kind = Kind::Offer;
-    if (!KindOf(type, kind)) {
+    if (!KindOf(config_, type, kind)) {
         return false;
     }
     Route route;
@@ -352,7 +362,7 @@ bool ClientTrackFlow::Receive(uint8_t type, const uint8_t* data, size_t len, uin
     transfer::Chunk chunk;
     track::TrackId id{};
     transfer::Abort abort;
-    if (!Decoded(kind, data, len, offer, chunk, id, abort)) {
+    if (!Decoded(config_.blob, kind, data, len, offer, chunk, id, abort)) {
         counts_.Count(transfer::Drop::Malformed);
         return false;
     }
@@ -363,19 +373,19 @@ bool ClientTrackFlow::Receive(uint8_t type, const uint8_t* data, size_t len, uin
     switch (kind) {
     case Kind::Offer:
         if (held_ != nullptr) {
-            out.push_back({ kHostId, kMsgTrackHave, transfer::EncodeHave(id_) });
+            out.push_back({ kHostId, config_.have, transfer::EncodeHave(id_) });
             return true;
         }
         if (download_ != nullptr) {
             counts_.Count(transfer::Drop::Duplicate);
             return false;
         }
-        download_ = std::make_unique<Receiver>(id_);
+        download_ = std::make_unique<Receiver>(id_, config_.blob);
         if (!download_->OnOffer(offer, nowMs)) {
             download_.reset();
             return false;
         }
-        out.push_back({ kHostId, kMsgTrackNeed, transfer::EncodeNeed(id_) });
+        out.push_back({ kHostId, config_.need, transfer::EncodeNeed(id_) });
         return true;
     case Kind::Chunk: {
         if (download_ == nullptr || !download_->OnChunk(chunk, nowMs)) {
@@ -384,7 +394,7 @@ bool ClientTrackFlow::Receive(uint8_t type, const uint8_t* data, size_t len, uin
         if (download_->Verdict() == track::Verdict::Ok && held_ == nullptr) {
             held_ = download_->Buffer();
             Keep(store_, held_);
-            out.push_back({ kHostId, kMsgTrackHave, transfer::EncodeHave(id_) });
+            out.push_back({ kHostId, config_.have, transfer::EncodeHave(id_) });
         }
         return true;
     }
@@ -401,11 +411,11 @@ bool ClientTrackFlow::Receive(uint8_t type, const uint8_t* data, size_t len, uin
             failed.reason = AbortReason::Failed;
             std::vector<uint8_t> abortBytes;
             if (transfer::EncodeAbort(failed, abortBytes)) {
-                out.push_back({ kHostId, kMsgTrackAbort, std::move(abortBytes) });
+                out.push_back({ kHostId, config_.abort, std::move(abortBytes) });
             }
             return true;
         }
-        out.push_back({ kHostId, kMsgTrackOffer, std::move(bytes) });
+        out.push_back({ kHostId, config_.offer, std::move(bytes) });
         upload_ = std::make_unique<transfer::Sender>(held_);
         return true;
     }
@@ -433,8 +443,7 @@ TrackProgress ClientTrackFlow::Progress() const {
     p.active = active_;
     p.held = held_ != nullptr;
     if (download_ != nullptr) {
-        p.failed = download_->Aborted() ||
-                   (download_->Verdict() != track::Verdict::Empty && download_->Verdict() != track::Verdict::Ok);
+        p.failed = download_->Aborted() || VerdictFailed(download_->Verdict());
         const std::shared_ptr<const TrackBuffer> buffer = download_->Buffer();
         if (buffer != nullptr) {
             p.chunks = buffer->Held();

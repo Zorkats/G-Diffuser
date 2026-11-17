@@ -9,6 +9,7 @@
 #include "gdx_profile_state.h"
 #include "port_log.h"
 
+#include <stdio.h>
 #include <string.h>
 
 /* decomp/src/game/racer.c: the course file id of the course about to start, 1 when out holds one. */
@@ -18,6 +19,8 @@ extern int gdx_racer_last_ghost(unsigned int* raceTime, unsigned int* lapTimes, 
                                 unsigned int* replaySize, unsigned char* machine, unsigned char* replay,
                                 int replayCap);
 extern int CVarGetInteger(const char* name, int defaultValue); // libultraship consolevariablebridge.h
+/* port/gdx_net_room_course.h: the creator names of a G-NET room's custom track, 1 while one is raced. */
+extern int gdx_net_room_course_meta(struct GdxCourseMeta* out);
 
 /* The meta of the raced course, empty when it has none. 0 when no course file is raced. */
 static int raced_meta(char* courseId, int idCap, GdxCourseMeta* meta) {
@@ -196,13 +199,14 @@ int gdx_meta_view_staff_ghost(const char* trackName, int* raceTime, int* lapTime
     return 1;
 }
 
-/* Font_GetCharIndex (decomp/src/overlays/ovl_i2/font.c) draws these as themselves. Anything else would show
- * another glyph. Lowercase is left out: the caption fonts put kana where 'a' to 'z' land. */
+/* FONT_SET_4, the caption font, draws these as themselves. Anything else would show another glyph: its colon,
+ * comma and parenthesis slots draw an A (sFont4CompTexInfos, decomp/src/overlays/ovl_i2/font.c). Lowercase is
+ * left out: the caption fonts put kana where 'a' to 'z' land. */
 static int font_char_ok(char c) {
     if (c == '\0') {
         return 0;
     }
-    return ((c >= 'A') && (c <= 'Z')) || ((c >= '0') && (c <= '9')) || (strchr(" '\"&+-:.,()", c) != NULL);
+    return ((c >= 'A') && (c <= 'Z')) || ((c >= '0') && (c <= '9')) || (strchr(" '\"&+-.", c) != NULL);
 }
 
 /* The caption form of c: uppercase, like the course names beside it, or a space when the font has no glyph. */
@@ -222,20 +226,41 @@ static int append(char* out, int cap, int pos, const char* text) {
     return pos;
 }
 
-int gdx_meta_view_race_caption(char* out, int cap) {
-    char courseId[GDX_BRANCH_COURSE_ID_MAX + 1];
-    GdxCourseMeta meta;
+int gdx_meta_view_race_caption_text(const GdxCourseMeta* meta, int line, char* out, int cap) {
     int pos = 0;
 
     if ((out == NULL) || (cap <= 0)) {
         return 0;
     }
     out[0] = '\0';
-    if (!raced_meta(courseId, sizeof(courseId), &meta) || (meta.author[0] == '\0')) {
+    if ((meta == NULL) || (meta->author[0] == '\0')) {
         return 0;
     }
-    pos = append(out, cap, pos, "BY ");
-    return append(out, cap, pos, meta.author);
+    /* The labels go in as written: their colon is the only one in the line, since names lose theirs, and the
+     * race intro draws it from periods (Menus_DrawCourseCreatorText in decomp ovl_i3/menus.c). */
+    if (line == GDX_META_RACE_LINE_AUTHOR) {
+        pos = snprintf(out, (size_t) cap, "%s", "BY: ");
+        pos = append(out, cap, (pos < cap) ? pos : cap - 1, meta->author);
+    } else if ((line == GDX_META_RACE_LINE_EDITOR) && (meta->editedBy[0] != '\0')) {
+        pos = snprintf(out, (size_t) cap, "%s", "EDITED BY: ");
+        pos = append(out, cap, (pos < cap) ? pos : cap - 1, meta->editedBy);
+    }
+    return pos;
+}
+
+int gdx_meta_view_race_caption(int line, char* out, int cap) {
+    char courseId[GDX_BRANCH_COURSE_ID_MAX + 1];
+    GdxCourseMeta meta;
+
+    if ((out == NULL) || (cap <= 0)) {
+        return 0;
+    }
+    out[0] = '\0';
+    /* A G-NET room's custom track has no course file here: its names are the ones its owner sent. */
+    if (!gdx_net_room_course_meta(&meta) && !raced_meta(courseId, sizeof(courseId), &meta)) {
+        return 0;
+    }
+    return gdx_meta_view_race_caption_text(&meta, line, out, cap);
 }
 
 int gdx_meta_view_caption(const char* trackName, int line, char* out, int cap) {

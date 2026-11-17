@@ -52,6 +52,11 @@ struct View {
     bool haveResults = false;
     net::lobby::TrackProgress trackProgress; // this copy's hold on the room's custom track
     std::shared_ptr<const net::transfer::TrackBuffer> raceTrack; // that track, once verified; null for a stock track
+    // That track's creator names and song (protocol 15): the Info, once the owner's reached this copy, and the
+    // song, once this copy holds it verified.
+    net::lobby::TrackInfo raceInfo;
+    bool haveRaceInfo = false;
+    std::shared_ptr<const net::transfer::TrackBuffer> raceSong;
     uint32_t clockOffsetMs = 0; // the host clock minus ours; 0 on the host
     bool clockReady = false;
     std::vector<net::lobby::ShownLine> lines;
@@ -102,8 +107,11 @@ void Pick(uint8_t track);
 void VoteCustom(const net::lobby::CustomTrack& track);
 void PickCustom(const net::lobby::CustomTrack& track);
 // Keeps the content bytes of a track of this copy's for the room's store, which looks there before the
-// download cache. The last six stay: one Edit Cup.
-void KeepOwnTrack(const net::track::TrackId& id, std::vector<uint8_t> bytes);
+// download cache. The last six stay: one Edit Cup. meta is the track's GXM1 block bound to the CRC-32 of id
+// (empty for none) and songPath its song file (empty for none): they make the track's Info (protocol 15). The
+// song is read and hashed on a thread of its own; until that ends the Info is pending.
+void KeepOwnTrack(const net::track::TrackId& id, std::vector<uint8_t> bytes, std::vector<uint8_t> meta = {},
+                  std::string songPath = std::string());
 void Lock(const net::lobby::LockRequest& lock);
 void Emote(uint8_t emote);
 void RaceNext(bool raceNext);

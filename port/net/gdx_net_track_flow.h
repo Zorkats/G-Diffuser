@@ -20,6 +20,10 @@
 //      Have. The host tells the room (RoomNews), and the room decides who races.
 //   5. If the host's copy fails its check, or the owner aborts, the host aborts every stream and the room
 //      draws a stock track. When the room's track changes, every stream is cancelled.
+//
+// Protocol 15 runs a second pair of these flows for the track's song, under types 43 to 47 (SongFlow()). The
+// session gives the song flow a TrackChoice it builds from the race's Info (gdx_net_track_info.h): the song's
+// hash as the id and no title. Its RoomNews is ignored: the song never holds the race.
 
 #pragma once
 
@@ -44,6 +48,19 @@ struct TrackStore {
     std::function<void(const track::TrackId& id, const std::vector<uint8_t>& bytes)> store;
 };
 
+// The type numbers a flow sends and takes, and what it carries. The default is the track.
+struct FlowConfig {
+    transfer::Blob blob = transfer::Blob::Track;
+    uint8_t offer = kMsgTrackOffer;
+    uint8_t chunk = kMsgTrackChunk;
+    uint8_t have = kMsgTrackHave;
+    uint8_t need = kMsgTrackNeed;
+    uint8_t abort = kMsgTrackAbort;
+};
+
+// The song's flow: Blob::Song under types 43 to 47.
+FlowConfig SongFlow();
+
 // What the host's flow tells its room. held: players who now hold the track, the host included; the caller
 // passes each to RoomMachine::TrackHeld. failed: the host cannot get the track (RoomMachine::TrackFailed).
 struct RoomNews {
@@ -62,7 +79,7 @@ struct TrackProgress {
 
 class HostTrackFlow {
 public:
-    explicit HostTrackFlow(TrackStore store = TrackStore());
+    explicit HostTrackFlow(TrackStore store = TrackStore(), FlowConfig config = FlowConfig());
 
     // Once per tick, after the room ran. track and owner: RoomMachine::CurrentTrack and TrackOwner. open:
     // the room is in MACHINE or ASSETS, the two phases a track may move in. guests: the joined players other
@@ -70,7 +87,7 @@ public:
     void Sync(const TrackChoice& track, uint8_t owner, uint16_t raceIndex, bool open,
               const std::vector<uint8_t>& guests, uint32_t nowMs, std::vector<Outgoing>& out, RoomNews& news);
 
-    // A message of type 26 to 30 from a joined guest. false when it was refused; the reason is counted.
+    // A message of the config's five types from a joined guest. false when it was refused; the reason is counted.
     bool Receive(uint8_t from, uint8_t type, const uint8_t* data, size_t len, uint32_t nowMs,
                  std::vector<Outgoing>& out, RoomNews& news);
 
@@ -94,6 +111,7 @@ private:
     void Abort(uint8_t to, transfer::AbortReason reason, std::vector<Outgoing>& out) const;
 
     TrackStore store_;
+    FlowConfig config_;
     bool active_ = false;
     bool open_ = false;
     uint16_t race_ = 0;
@@ -112,13 +130,13 @@ private:
 
 class ClientTrackFlow {
 public:
-    explicit ClientTrackFlow(TrackStore store = TrackStore());
+    explicit ClientTrackFlow(TrackStore store = TrackStore(), FlowConfig config = FlowConfig());
 
     // Once per tick. track: the room's track as the last room message gave it. owner: this copy named it.
     // open as for the host.
     void Sync(const TrackChoice& track, bool owner, uint16_t raceIndex, bool open, uint32_t nowMs);
 
-    // A message of type 26 to 30 from the host. What to send back goes to out (Outgoing::to is unused).
+    // A message of the config's five types from the host. What to send back goes to out (Outgoing::to is unused).
     bool Receive(uint8_t type, const uint8_t* data, size_t len, uint32_t nowMs, std::vector<Outgoing>& out);
 
     // The owner's upload to the host, while the channel has room.
@@ -138,6 +156,7 @@ private:
     void Reset();
 
     TrackStore store_;
+    FlowConfig config_;
     bool active_ = false;
     bool open_ = false;
     bool owner_ = false;

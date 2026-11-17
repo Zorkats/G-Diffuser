@@ -8,6 +8,7 @@
 // height switch and the boot are the three functions this file supplies.
 
 #include "gdx_course_branch_format.h"
+#include "gdx_course_meta.h"
 #include "gdx_course_registry.h"
 #include "gdx_course_settings.h"
 #include "gdx_course_snapshot.h"
@@ -55,6 +56,29 @@ extern "C" int gdx_lan_race_track(unsigned char* id, unsigned char* out, unsigne
     std::memcpy(id, sId.data(), sId.size());
     std::memcpy(out, sBytes.data(), sBytes.size());
     *length = static_cast<unsigned long>(sBytes.size());
+    return 1;
+}
+
+// The lobby's Info for the room's track (protocol 15): none unless a test sets one.
+namespace {
+bool sInfo;
+std::vector<unsigned char> sMeta;
+std::string sSong;
+int sInfoCalls;
+} // namespace
+
+extern "C" int gdx_lan_race_info(const unsigned char* id, unsigned char* meta, unsigned long metaCap,
+                                 unsigned long* metaLength, char* songPath, unsigned long songPathCap) {
+    sInfoCalls++;
+    *metaLength = 0;
+    songPath[0] = '\0';
+    if (!sInfo || std::memcmp(id, sId.data(), sId.size()) != 0 || sMeta.size() > metaCap ||
+        sSong.size() >= songPathCap) {
+        return 0;
+    }
+    std::memcpy(meta, sMeta.data(), sMeta.size());
+    *metaLength = static_cast<unsigned long>(sMeta.size());
+    std::memcpy(songPath, sSong.c_str(), sSong.size() + 1);
     return 1;
 }
 
@@ -217,6 +241,73 @@ void TestRace(const std::vector<unsigned char>& bytes, const gdx::net::track::Tr
     Check(gdx_net_room_course_take(24, 1) == 0, "an ended course is not taken again");
 }
 
+// Protocol 15: the creator names and the song the lobby holds for the room's track. The names must be bound to the
+// track's id; the song path may arrive after the race was prepared, so the race asks again until it has one.
+std::vector<unsigned char> Names(const char* author, const char* editedBy, uint32_t bind) {
+    GdxCourseMeta meta;
+    std::memset(&meta, 0, sizeof(meta));
+    std::snprintf(meta.author, sizeof(meta.author), "%s", author);
+    std::snprintf(meta.editedBy, sizeof(meta.editedBy), "%s", editedBy);
+    std::vector<unsigned char> block(GDX_META_BLOCK_MAX_BYTES);
+    const int length = gdx_meta_encode(&meta, bind, block.data(), block.size());
+    block.resize(length > 0 && length <= 512 ? static_cast<size_t>(length) : 0);
+    return block;
+}
+
+void TestInfo(const std::vector<unsigned char>& bytes, const gdx::net::track::TrackId& id) {
+    const uint32_t bind = gdx_course_registry_crc32(id.data(), id.size());
+    sServe = true;
+    sBytes = bytes;
+    sId = id;
+    GdxCourseMeta meta;
+
+    sInfo = false;
+    Check(gdx_net_room_course_meta(&meta) == 0, "no names before the race is taken");
+    Check(gdx_net_room_course_prepare(GDX_NET_ROOM_COURSE_TRACK_CUSTOM) == 1 && gdx_net_room_course_take(24, 1) == 1,
+          "the room's track races without Info");
+    Check(gdx_net_room_course_meta(&meta) == 1 && meta.author[0] == '\0', "no Info: no names");
+    Check(gdx_net_room_course_song() == nullptr, "no Info: no song, so the stock music plays");
+
+    // The Info arrives after the race was prepared: the next question reads it.
+    sInfo = true;
+    sMeta = Names("ZORKATS", "ERNST FAN", bind);
+    sSong = "C:/cache/music/ernst.flac";
+    Check(!sMeta.empty(), "the names encode");
+    Check(gdx_net_room_course_meta(&meta) == 1 && std::strcmp(meta.author, "ZORKATS") == 0 &&
+              std::strcmp(meta.editedBy, "ERNST FAN") == 0,
+          "late Info gives the author and the editor");
+    Check(gdx_net_room_course_song() != nullptr && std::strcmp(gdx_net_room_course_song(), sSong.c_str()) == 0,
+          "late Info gives the song");
+
+    // Names bound to another track are not shown, and the song still plays.
+    sMeta = Names("SOMEONE", "", bind ^ 1u);
+    Check(gdx_net_room_course_prepare(GDX_NET_ROOM_COURSE_TRACK_CUSTOM) == 1 && gdx_net_room_course_take(24, 1) == 1,
+          "the track prepares again");
+    Check(gdx_net_room_course_meta(&meta) == 1 && meta.author[0] == '\0', "names bound to another track are dropped");
+    Check(gdx_net_room_course_song() != nullptr, "the song does not depend on the names");
+
+    // The song finishes after the names arrived: the names are read once, the song path until it is there.
+    sMeta = Names("ZORKATS", "", bind);
+    sSong.clear();
+    Check(gdx_net_room_course_prepare(GDX_NET_ROOM_COURSE_TRACK_CUSTOM) == 1 && gdx_net_room_course_take(24, 1) == 1,
+          "the track prepares a third time");
+    Check(gdx_net_room_course_song() == nullptr, "a song still on its way is not played");
+    sMeta = Names("CHANGED", "", bind);
+    sSong = "C:/cache/music/late.ogg";
+    const int calls = sInfoCalls;
+    Check(gdx_net_room_course_song() != nullptr && std::strcmp(gdx_net_room_course_song(), sSong.c_str()) == 0,
+          "a song that finished later is played");
+    Check(sInfoCalls == calls + 1, "the lobby is asked once, then the path is kept");
+    Check(gdx_net_room_course_meta(&meta) == 1 && std::strcmp(meta.author, "ZORKATS") == 0,
+          "the names are the ones read first");
+
+    gdx_net_room_course_end();
+    Check(gdx_net_room_course_song() == nullptr && gdx_net_room_course_meta(&meta) == 0, "the end drops the Info");
+    sInfo = false;
+    sMeta.clear();
+    sSong.clear();
+}
+
 } // namespace
 
 int main() {
@@ -229,6 +320,7 @@ int main() {
         TestStockTrack();
         TestNothingToRace(bytes, id);
         TestRace(bytes, id, runtime);
+        TestInfo(bytes, id);
     }
     std::printf("gdx_net_room_course_tests: %d checks, %d failed\n", sChecks, sFailures);
     return sFailures == 0 ? 0 : 1;

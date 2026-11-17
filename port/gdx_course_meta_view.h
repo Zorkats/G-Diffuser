@@ -49,9 +49,17 @@ int gdx_meta_view_staff_ghost(const char* trackName, int* raceTime, int* lapTime
  * length, 0 when that part is not set. */
 int gdx_meta_view_caption(const char* trackName, int line, char* out, int cap);
 
-/* "BY <author>" for the raced course, shown under its name during the course intro. Returns the length, 0 when
- * no course file is raced or the course has no author. */
-int gdx_meta_view_race_caption(char* out, int cap);
+/* The creator lines of the raced course, shown under its name during the course intro: an Edit Cup or editor
+ * course, or a G-NET room's custom track with the names its owner sent. */
+#define GDX_META_RACE_LINE_AUTHOR 0 /* "BY: <author>" */
+#define GDX_META_RACE_LINE_EDITOR 1 /* "EDITED BY: <editor>", below it */
+
+/* One of those lines. Returns the length, 0 when the raced course has no author, or for the editor line when
+ * it has no editor either. */
+int gdx_meta_view_race_caption(int line, char* out, int cap);
+/* The text of that line for meta (NULL gives 0), in characters the game font draws. */
+struct GdxCourseMeta;
+int gdx_meta_view_race_caption_text(const struct GdxCourseMeta* meta, int line, char* out, int cap);
 
 #ifdef __cplusplus
 }

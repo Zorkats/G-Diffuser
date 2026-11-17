@@ -20,6 +20,10 @@
 //   Have   id[32]                                       guest to host: this guest already holds the track
 //   Need   id[32]                                       guest to host: send it to me; host to owner: send it to the host
 //   Abort  id[32], u8 AbortReason                       host to a guest or the owner, or owner to host
+//
+// The same five kinds also move a custom track's song (protocol 15), under their own type numbers. A song is a
+// Blob::Song: its id is the SHA-256 of the file, it may be up to kSongMaxBytes, and its check is the hash, the
+// size and the magic of an Ogg, FLAC or WAV file (VerifySong). It is never decoded here.
 
 #pragma once
 
@@ -46,6 +50,39 @@ constexpr size_t kTitleMax = 20;
 constexpr size_t kTransferShare = 32;
 // Chunks in the largest track.
 constexpr size_t kMaxChunks = (track::kMaxBytes + kChunkData - 1) / kChunkData;
+// The largest song a room moves (owner decision 2026-11-15). Its chunk count must fit the u16 chunk index.
+constexpr size_t kSongMaxBytes = 64u * 1024u * 1024u;
+constexpr size_t kSongMaxChunks = (kSongMaxBytes + kChunkData - 1) / kChunkData;
+static_assert(kSongMaxChunks <= 0x10000u, "every song chunk index must fit a u16");
+
+// What a transfer carries. Not a wire value: the type number the caller sends under says which one it is.
+enum class Blob : uint8_t {
+    Track, // a track's content bytes, checked with track::Verify
+    Song,  // a song file, checked with VerifySong
+};
+
+size_t MaxBytes(Blob blob);
+size_t MaxChunks(Blob blob);
+
+// The song file formats the game plays (gdx_music_files.h). The numbers are not sent.
+enum class SongFormat : uint8_t {
+    None = 0,
+    Ogg = 1,
+    Flac = 2,
+    Wav = 3,
+};
+
+// The format the bytes start with: OggS, fLaC (an ID3v2 tag before it is skipped), or RIFF....WAVE.
+SongFormat SongFormatOf(const uint8_t* bytes, size_t length);
+// ".ogg", ".flac" or ".wav"; "" for None.
+const char* SongExtension(SongFormat format);
+
+// Checks, in this order: the size (Empty, Oversized), the hash against expected (WrongIdentity), and the
+// format magic (Undecodable). Ok means the bytes are the file the owner hashed and look like a song file; it
+// does not mean they decode.
+track::Verdict VerifySong(const uint8_t* bytes, size_t length, const track::TrackId& expected);
+// The check a blob's whole buffer must pass: track::Verify (without decoding) or VerifySong.
+track::Verdict VerifyBlob(Blob blob, const uint8_t* bytes, size_t length, const track::TrackId& expected);
 
 // The five kinds. The enum names the kinds for the gate and the counters; it is not a wire value.
 enum class Kind : uint8_t {
@@ -85,15 +122,16 @@ size_t ChunkCount(size_t size);
 size_t ChunkLength(size_t size, size_t index);
 
 // The encoders refuse what their decoder would refuse, so a sender cannot emit a message its peer must drop.
-bool EncodeOffer(const Offer& offer, std::vector<uint8_t>& out);
+// blob bounds the Offer's size and the chunk index.
+bool EncodeOffer(const Offer& offer, std::vector<uint8_t>& out, Blob blob = Blob::Track);
 bool EncodeChunk(const track::TrackId& id, size_t index, const uint8_t* data, size_t length,
-                 std::vector<uint8_t>& out);
+                 std::vector<uint8_t>& out, Blob blob = Blob::Track);
 std::vector<uint8_t> EncodeHave(const track::TrackId& id);
 std::vector<uint8_t> EncodeNeed(const track::TrackId& id);
 bool EncodeAbort(const Abort& value, std::vector<uint8_t>& out);
 
-bool DecodeOffer(const uint8_t* data, size_t len, Offer& out);
-bool DecodeChunk(const uint8_t* data, size_t len, Chunk& out);
+bool DecodeOffer(const uint8_t* data, size_t len, Offer& out, Blob blob = Blob::Track);
+bool DecodeChunk(const uint8_t* data, size_t len, Chunk& out, Blob blob = Blob::Track);
 bool DecodeHave(const uint8_t* data, size_t len, track::TrackId& out);
 bool DecodeNeed(const uint8_t* data, size_t len, track::TrackId& out);
 bool DecodeAbort(const uint8_t* data, size_t len, Abort& out);
@@ -130,14 +168,19 @@ private:
 // taken, in whatever order they came. A chunk is stored once and never replaced.
 class TrackBuffer {
 public:
-    // Null when size is outside 1..kMaxBytes.
-    static std::shared_ptr<TrackBuffer> Empty(const track::TrackId& id, size_t size);
+    // Null when size is outside 1..MaxBytes(blob).
+    static std::shared_ptr<TrackBuffer> Empty(const track::TrackId& id, size_t size, Blob blob = Blob::Track);
     // Null unless the bytes verify against id, so an owner's copy goes through the same check a receiver makes.
     // Every chunk is held.
-    static std::shared_ptr<TrackBuffer> Whole(const track::TrackId& id, const uint8_t* bytes, size_t length);
+    static std::shared_ptr<TrackBuffer> Whole(const track::TrackId& id, const uint8_t* bytes, size_t length,
+                                              Blob blob = Blob::Track);
 
     const track::TrackId& Id() const {
         return id_;
+    }
+
+    Blob Carries() const {
+        return blob_;
     }
 
     size_t Size() const {
@@ -172,9 +215,10 @@ public:
     }
 
 private:
-    TrackBuffer(const track::TrackId& id, size_t size);
+    TrackBuffer(const track::TrackId& id, size_t size, Blob blob);
 
     track::TrackId id_;
+    Blob blob_;
     std::vector<uint8_t> bytes_;
     std::vector<bool> have_;
     size_t held_ = 0;
@@ -217,7 +261,7 @@ public:
         Failed,
     };
 
-    explicit Receiver(const track::TrackId& expected);
+    explicit Receiver(const track::TrackId& expected, Blob blob = Blob::Track);
 
     bool OnOffer(const Offer& offer, uint32_t nowMs);
     bool OnChunk(const Chunk& chunk, uint32_t nowMs);
@@ -245,7 +289,7 @@ public:
         return cause_;
     }
 
-    // Set when Verdict() is Ok.
+    // Set when Verdict() is Ok on a track. A song is never decoded.
     const gdx::snapshot::Generation& Decoded() const {
         return decoded_;
     }
@@ -271,6 +315,7 @@ private:
     void Finish();
 
     track::TrackId expected_;
+    Blob blob_;
     State state_ = State::Waiting;
     std::shared_ptr<TrackBuffer> buffer_;
     std::string title_;

@@ -315,6 +315,33 @@ extern "C" void gdx_course_music_arm_for_course(const char* courseId, int bgmId)
     gdx_music_stream_set_course_override(bgmId, entry->sourcePath, entry->displayName);
 }
 
+extern "C" void gdx_course_music_arm_file(const char* path, int bgmId) {
+    if (path == nullptr || path[0] == '\0') {
+        gdx_port_logf("[music] room track: no song held, the stock track plays\n");
+        gdx_music_stream_set_course_override(bgmId, nullptr, nullptr);
+        return;
+    }
+    gdx_port_logf("[music] room track: course song %s for BGM id %d\n", path, bgmId);
+    gdx_music_stream_set_course_override(bgmId, path, "room track song");
+}
+
+extern "C" int gdx_course_music_course_song(const char* courseId, char* out, int outCap) {
+    if (out == nullptr || outCap <= 0) {
+        return 0;
+    }
+    out[0] = '\0';
+    const GdxCourseElement* entry = course_music_entry(courseId);
+    if (entry == nullptr || entry->sourcePath == nullptr) {
+        return 0;
+    }
+    const size_t length = std::strlen(entry->sourcePath);
+    if (length == 0 || length >= static_cast<size_t>(outCap)) {
+        return 0;
+    }
+    std::memcpy(out, entry->sourcePath, length + 1);
+    return 1;
+}
+
 extern "C" int gdx_course_music_export_key(const char* key, const char* directory) {
     if (!key || !directory) {
         return 0;

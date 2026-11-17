@@ -472,13 +472,19 @@ extern "C" void gdx_lan_room_pick_custom(const unsigned char* id, const char* ti
     }
 }
 
-extern "C" void gdx_lan_room_keep_track(const unsigned char* id, const unsigned char* bytes, unsigned long length) {
+extern "C" void gdx_lan_room_keep_track(const unsigned char* id, const unsigned char* bytes, unsigned long length,
+                                        const unsigned char* meta, unsigned long metaLength, const char* songPath) {
     if (id == nullptr || bytes == nullptr || length == 0 || length > gdx::net::track::kMaxBytes) {
         return;
     }
     gdx::net::track::TrackId key;
     std::copy(id, id + kTrackIdBytes, key.begin());
-    gdx::lan::KeepOwnTrack(key, std::vector<uint8_t>(bytes, bytes + length));
+    std::vector<uint8_t> info;
+    if (meta != nullptr && metaLength <= gdx::net::lobby::kInfoMetaMax) {
+        info.assign(meta, meta + metaLength);
+    }
+    gdx::lan::KeepOwnTrack(key, std::vector<uint8_t>(bytes, bytes + length), std::move(info),
+                           songPath != nullptr ? std::string(songPath) : std::string());
 }
 
 extern "C" void gdx_lan_room_start(void) {

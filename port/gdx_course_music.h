@@ -52,6 +52,14 @@ int gdx_course_music_preview(int extIndex);
  * the course has no extension BGM choice. courseId may be NULL, which clears it. */
 void gdx_course_music_arm_for_course(const char* courseId, int bgmId);
 
+/* Race start of a G-NET room's custom track: sets the stream course override for bgmId to path, the song the
+ * room sent (UTF-8), or clears it when path is NULL or "", so the stock track plays. */
+void gdx_course_music_arm_file(const char* path, int bgmId);
+
+/* The file of the course's extension BGM choice, as UTF-8, into out (outCap bytes). Returns 1 when out holds a
+ * path, 0 when the course has no choice, its song has no file here, or out is too short. */
+int gdx_course_music_course_song(const char* courseId, char* out, int outCap);
+
 /* Export: copies the file of every extension BGM choice of the course into directory, named after its
  * key suffix. Returns the number copied. Failures are logged and skipped. */
 int gdx_course_music_export_key(const char* key, const char* directory);

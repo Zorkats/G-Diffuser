@@ -973,6 +973,116 @@ void CheckLobbyWait() {
 
 } // namespace
 
+// Protocol 15 song rules: the format magic, VerifySong's order of checks, and the Song blob's larger bounds, which a
+// Track blob must still refuse.
+std::vector<uint8_t> SongBytes(const char* magic, size_t size) {
+    std::vector<uint8_t> bytes(size, 0x5A);
+    std::memcpy(bytes.data(), magic, std::strlen(magic));
+    return bytes;
+}
+
+void CheckSongRules() {
+    using transfer::Blob;
+    using transfer::SongFormat;
+    using transfer::SongFormatOf;
+    using transfer::VerifySong;
+
+    const std::vector<uint8_t> ogg = SongBytes("OggS", 64);
+    const std::vector<uint8_t> flac = SongBytes("fLaC", 64);
+    std::vector<uint8_t> wav = SongBytes("RIFF", 64);
+    std::memcpy(wav.data() + 8, "WAVE", 4);
+    std::vector<uint8_t> riffOnly = SongBytes("RIFF", 64);
+    std::memcpy(riffOnly.data() + 8, "AVI ", 4);
+    const std::vector<uint8_t> midi = SongBytes("MThd", 64);
+    Check(SongFormatOf(ogg.data(), ogg.size()) == SongFormat::Ogg, "OggS reads as OGG");
+    Check(SongFormatOf(flac.data(), flac.size()) == SongFormat::Flac, "fLaC reads as FLAC");
+    Check(SongFormatOf(wav.data(), wav.size()) == SongFormat::Wav, "RIFF....WAVE reads as WAV");
+    Check(SongFormatOf(riffOnly.data(), riffOnly.size()) == SongFormat::None, "a RIFF that is not WAVE is no song");
+    Check(SongFormatOf(midi.data(), midi.size()) == SongFormat::None, "a MIDI file is no song");
+    Check(SongFormatOf(nullptr, 0) == SongFormat::None, "no bytes is no song");
+    Check(SongFormatOf(ogg.data(), 3) == SongFormat::None, "a cut magic is no song");
+    Check(std::string(transfer::SongExtension(SongFormat::Flac)) == ".flac", "FLAC is stored as .flac");
+    Check(std::string(transfer::SongExtension(SongFormat::None)).empty(), "no format has no extension");
+
+    // An ID3v2 tag of 20 bytes (syncsafe size 0,0,0,20) before the FLAC stream is skipped; a footer adds 10 more.
+    std::vector<uint8_t> tagged(10 + 20 + 32, 0);
+    std::memcpy(tagged.data(), "ID3", 3);
+    tagged[9] = 20;
+    std::memcpy(tagged.data() + 30, "fLaC", 4);
+    Check(SongFormatOf(tagged.data(), tagged.size()) == SongFormat::Flac, "an ID3v2 tag before fLaC is skipped");
+    std::vector<uint8_t> footer(10 + 20 + 10 + 32, 0);
+    std::memcpy(footer.data(), "ID3", 3);
+    footer[5] = 0x10;
+    footer[9] = 20;
+    std::memcpy(footer.data() + 40, "fLaC", 4);
+    Check(SongFormatOf(footer.data(), footer.size()) == SongFormat::Flac, "an ID3v2 footer is skipped too");
+    std::vector<uint8_t> badTag = tagged;
+    badTag[8] = 0x80;
+    Check(SongFormatOf(badTag.data(), badTag.size()) == SongFormat::None, "a size byte past 7 bits is refused");
+    std::vector<uint8_t> tagOnly = tagged;
+    std::memcpy(tagOnly.data() + 30, "OggS", 4);
+    Check(SongFormatOf(tagOnly.data(), tagOnly.size()) == SongFormat::None, "an ID3v2 tag before OggS is no song");
+
+    const track::TrackId oggId = track::Identify(ogg.data(), ogg.size());
+    const track::TrackId midiId = track::Identify(midi.data(), midi.size());
+    Check(VerifySong(ogg.data(), ogg.size(), oggId) == track::Verdict::Ok, "a song with its own hash verifies");
+    Check(VerifySong(ogg.data(), ogg.size(), midiId) == track::Verdict::WrongIdentity,
+          "a song checked against another hash is refused");
+    Check(VerifySong(midi.data(), midi.size(), midiId) == track::Verdict::Undecodable,
+          "a file with the right hash but no song magic is refused");
+    Check(VerifySong(ogg.data(), 0, oggId) == track::Verdict::Empty, "no bytes is refused as empty");
+    Check(transfer::VerifyBlob(Blob::Song, ogg.data(), ogg.size(), oggId) == track::Verdict::Ok,
+          "a Song blob is checked as a song");
+    Check(transfer::VerifyBlob(Blob::Track, ogg.data(), ogg.size(), oggId) != track::Verdict::Ok,
+          "a song's bytes are never a track");
+
+    Check(transfer::MaxBytes(Blob::Song) == transfer::kSongMaxBytes, "a song may hold 64 MiB");
+    Check(transfer::MaxBytes(Blob::Track) == track::kMaxBytes, "a track keeps its own cap");
+    Check(transfer::kSongMaxChunks <= 0x10000u, "every song chunk index fits the u16 on the wire");
+
+    // A size between the two caps: a Song Offer, a Song chunk past the track's last index, and a Song buffer.
+    const uint32_t between = static_cast<uint32_t>(track::kMaxBytes + transfer::kChunkData * 4);
+    Offer offer;
+    offer.id = oggId;
+    offer.size = between;
+    std::vector<uint8_t> wire;
+    Check(transfer::EncodeOffer(offer, wire, Blob::Song), "a Song Offer past the track cap encodes");
+    Offer back;
+    Check(transfer::DecodeOffer(wire.data(), wire.size(), back, Blob::Song) && back.size == between,
+          "a Song Offer past the track cap decodes");
+    Check(!transfer::DecodeOffer(wire.data(), wire.size(), back, Blob::Track),
+          "the same Offer read as a track is refused");
+    std::vector<uint8_t> refused;
+    Check(!transfer::EncodeOffer(offer, refused, Blob::Track), "a Track Offer past the track cap does not encode");
+    offer.size = static_cast<uint32_t>(transfer::kSongMaxBytes + 1);
+    Check(!transfer::EncodeOffer(offer, refused, Blob::Song), "a Song Offer past 64 MiB does not encode");
+
+    const size_t pastTrack = transfer::kMaxChunks + 1;
+    const std::vector<uint8_t> data(transfer::kChunkData, 0x11);
+    std::vector<uint8_t> chunkWire;
+    Check(transfer::EncodeChunk(oggId, pastTrack, data.data(), data.size(), chunkWire, Blob::Song),
+          "a Song chunk past the track's last index encodes");
+    Chunk chunk;
+    Check(transfer::DecodeChunk(chunkWire.data(), chunkWire.size(), chunk, Blob::Song) && chunk.index == pastTrack,
+          "a Song chunk past the track's last index decodes");
+    Check(!transfer::DecodeChunk(chunkWire.data(), chunkWire.size(), chunk, Blob::Track),
+          "the same chunk read as a track is refused");
+    std::vector<uint8_t> refusedChunk;
+    Check(!transfer::EncodeChunk(oggId, pastTrack, data.data(), data.size(), refusedChunk, Blob::Track),
+          "a Track chunk past the track's last index does not encode");
+    Check(!transfer::EncodeChunk(oggId, transfer::kSongMaxChunks, data.data(), data.size(), refusedChunk, Blob::Song),
+          "a Song chunk past 64 MiB does not encode");
+
+    Check(TrackBuffer::Empty(oggId, between, Blob::Song) != nullptr, "a Song buffer past the track cap opens");
+    Check(TrackBuffer::Empty(oggId, between, Blob::Track) == nullptr, "a Track buffer past the track cap does not");
+    Check(TrackBuffer::Empty(oggId, transfer::kSongMaxBytes + 1, Blob::Song) == nullptr,
+          "a Song buffer past 64 MiB does not open");
+    const auto whole = TrackBuffer::Whole(oggId, ogg.data(), ogg.size(), Blob::Song);
+    Check(whole != nullptr && whole->Carries() == Blob::Song, "an owner's song opens whole as a Song");
+    Check(TrackBuffer::Whole(midiId, midi.data(), midi.size(), Blob::Song) == nullptr,
+          "an owner's file with no song magic is not offered");
+}
+
 int main() {
     Track real;
     if (!BuildTrack(100, real)) {
@@ -992,6 +1102,7 @@ int main() {
     CheckPacing();
     CheckRelay(real);
     CheckLobbyWait();
+    CheckSongRules();
     std::printf("%d checks, %d failed\n", gChecks, gFailures);
     return gFailures == 0 ? 0 : 1;
 }
