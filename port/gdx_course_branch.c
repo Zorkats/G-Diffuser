@@ -911,20 +911,12 @@ f32 gdx_course_branch_gadget_next_t(const CourseSegment* segment, f32 t) {
 
 s32 gdx_course_branch_gadget_chunk(const CourseSegment* segment, f32 t) {
     s32 index = branch_ring2_index(segment);
-    SegmentChunk* chunks = index >= 0 ? sRing2Chunks : gSegmentChunks;
-    s32 count = index >= 0 ? sBranch.ring2ChunkCount : gSegmentChunkCount;
-    s32 found = 0;
-    s32 i;
 
-    if (index < 0) {
-        index = segment->segmentIndex;
+    /* Ring 2's chunks carry ring 2 segment indices (see sRing2ChunkMask in gdx_course_branch_build). */
+    if (index >= 0) {
+        return BRANCH_CHUNKS + gdx_course_chunk_at(sRing2Chunks, sBranch.ring2ChunkCount, index, t);
     }
-    for (i = 0; i < count; i++) {
-        if (chunks[i].segmentIndex == index && chunks[i].segmentTValue <= t) {
-            found = i;
-        }
-    }
-    return branch_ring2_index(segment) >= 0 ? BRANCH_CHUNKS + found : found;
+    return gdx_course_chunk_at(gSegmentChunks, gSegmentChunkCount, segment->segmentIndex, t);
 }
 
 s32 gdx_course_branch_gadget_chunk_visible(s32 encoded) {

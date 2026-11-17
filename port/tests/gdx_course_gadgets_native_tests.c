@@ -216,10 +216,65 @@ static void test_combined_and_refusal(void) {
     assert(((unsigned char*) gCourseEffects)[0] == 0xAB);
 }
 
+/* Stock func_8006FD7C's search: chunk i - 1 when the row lies at or after it and before chunk i, around the ring. */
+static s32 stock_chunk_at(const SegmentChunk* chunks, s32 count, s32 segmentIndex, f32 t) {
+    s32 i;
+
+    for (i = 0; i < count; i++) {
+        const SegmentChunk* previous = &chunks[(i + count - 1) % count];
+        const SegmentChunk* current = &chunks[i];
+
+        if (((previous->segmentIndex < segmentIndex) ||
+             ((segmentIndex == previous->segmentIndex) && (previous->segmentTValue <= t))) &&
+            ((segmentIndex < current->segmentIndex) ||
+             ((segmentIndex == current->segmentIndex) && (t < current->segmentTValue)))) {
+            return (i + count - 1) % count;
+        }
+    }
+    return count - 1;
+}
+
+/* A heal strip row at the start of a continuous segment, whose first chunk starts past t = 0, lies in the
+ * previous segment's last chunk. Mapping it to chunk 0 hid that stretch of strip unless the start line was on
+ * screen. */
+static void test_strip_row_chunk(void) {
+    static const struct {
+        s32 segmentIndex;
+        f32 t;
+    } ring[] = { { 0, 0.0f }, { 0, 0.5f }, { 1, 0.0f }, { 2, 0.4f }, { 2, 0.8f }, { 3, 0.0f } };
+    SegmentChunk chunks[6];
+    s32 count = 6;
+    s32 i;
+    s32 segment;
+
+    memset(chunks, 0, sizeof(chunks));
+    for (i = 0; i < count; i++) {
+        chunks[i].segmentIndex = ring[i].segmentIndex;
+        chunks[i].segmentTValue = ring[i].t;
+    }
+    assert(gdx_course_chunk_at(chunks, count, 2, 0.0f) == 2);
+    assert(gdx_course_chunk_at(chunks, count, 2, 0.39f) == 2);
+    assert(gdx_course_chunk_at(chunks, count, 2, 0.4f) == 3);
+    assert(gdx_course_chunk_at(chunks, count, 2, 0.9f) == 4);
+    assert(gdx_course_chunk_at(chunks, count, 1, 0.7f) == 2);
+    assert(gdx_course_chunk_at(chunks, count, 0, 0.0f) == 0);
+    assert(gdx_course_chunk_at(chunks, count, 0, 0.6f) == 1);
+    assert(gdx_course_chunk_at(chunks, count, 3, 0.5f) == 5);
+    assert(gdx_course_chunk_at(chunks, 0, 2, 0.0f) == 0);
+    for (segment = 0; segment < 4; segment++) {
+        for (i = 0; i < 20; i++) {
+            f32 t = i * 0.05f;
+
+            assert(gdx_course_chunk_at(chunks, count, segment, t) == stock_chunk_at(chunks, count, segment, t));
+        }
+    }
+}
+
 int main(void) {
     test_native_demand();
     test_testdrive_budget();
     test_combined_and_refusal();
+    test_strip_row_chunk();
     printf("All native gadget generation tests passed\n");
     return 0;
 }

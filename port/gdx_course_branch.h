@@ -33,11 +33,30 @@ s32 gdx_course_branch_settings_point(const CourseSegment* segment);
  * for ring 2 while that ring's chunks are built, before the ring is live. */
 s32 gdx_course_branch_segment_road_theme(const CourseSegment* segment);
 f32 gdx_course_branch_gadget_next_t(const CourseSegment* segment, f32 t);
+/* The chunk a gadget strip row at (segment, t) lies in, encoded for gdx_course_branch_gadget_chunk_visible. */
 s32 gdx_course_branch_gadget_chunk(const CourseSegment* segment, f32 t);
 s32 gdx_course_branch_gadget_chunk_visible(s32 encoded);
 s32 gdx_course_branch_gadget_adjacent(const CourseSegment* previous, const CourseSegment* current);
 SegmentChunk* gdx_course_branch_gadget_load_chunk(const CourseSegment* segment, const Vec3f* pos);
 void gdx_course_branch_sync_gadgets(void);
+
+/* The index of the chunk a strip row at (segmentIndex, t) lies in, as stock func_8006FD7C finds it: the last
+ * chunk that starts at or before the row. chunks[0..count) run in segment order from segment 0. The chunks of a
+ * continuous segment need not start at t = 0, so a row before its segment's first chunk lies in the previous
+ * segment's last chunk; a row before chunks[0] wraps to the last chunk, as in stock. */
+static inline s32 gdx_course_chunk_at(const SegmentChunk* chunks, s32 count, s32 segmentIndex, f32 t) {
+    s32 found = (count > 0) ? count - 1 : 0;
+    s32 i;
+
+    for (i = 0; i < count; i++) {
+        if ((chunks[i].segmentIndex > segmentIndex) ||
+            ((chunks[i].segmentIndex == segmentIndex) && (chunks[i].segmentTValue > t))) {
+            break;
+        }
+        found = i;
+    }
+    return found;
+}
 
 /* End of Course_SegmentsInit, before the parts are built: picks the course's settings
  * (gdx_course_settings_view.h) and finds which control point race segment 0 came from. */
