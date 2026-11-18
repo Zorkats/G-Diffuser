@@ -110,6 +110,19 @@ typedef struct GdxGpResumeState {
 /* Field bounds only; the record layout is the table above. Returns GDX_GP_RESUME_OK or ERR_RANGE. */
 GdxGpResumeError gdx_gp_resume_validate(const GdxGpResumeState* state);
 
+/* A life lost in a cup stays lost. The record holds the lives of the last next course boundary, and a pause
+ * retry reloads the race without passing that boundary, so a quit and Continue Cup would hand back every
+ * life spent since. Lowers each record life above lives[i] (game values, below 0 counted as 0) to it and
+ * returns 1 when one changed. Lives gained in a race are left for the next boundary to record. */
+int gdx_gp_resume_keep_lost_lives(GdxGpResumeState* state, const short lives[GDX_GP_RESUME_PLAYERS]);
+
+/* The total ranking the cup showed at the boundary, as 1-based places by racer index (gRacerPositionsById).
+ * The next race's TOTAL RANKING draws its up and down arrows against it; a restore that leaves it at zero
+ * shows every racer fallen by its own place. Ordered by points, most first, the way that screen sorts. Ties
+ * put racer 0 (the player) first, then the lower index: the record does not keep the last race's finishing
+ * order, which the screen uses to split the other ties. */
+void gdx_gp_resume_previous_ranks(const GdxGpResumeState* state, short ranks[GDX_GP_RESUME_RACERS]);
+
 #ifndef GDX_GP_RESUME_STATE_ONLY
 /* Pure codec. Encode refuses a state that fails validation. Decode fills *out only on success. */
 GdxGpResumeError gdx_gp_resume_encode(const GdxGpResumeState* state, unsigned char* out, size_t outCap);

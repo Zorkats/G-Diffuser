@@ -108,6 +108,60 @@ static void test_round_trip(void) {
     check(buf[8] == 0x48 && buf[9] == 0x02 && buf[10] == 0 && buf[11] == 0, "record declares size 584");
 }
 
+/* Aaron, 2026-11-05: a life lost on a retry came back after quitting and Continue Cup. */
+static void test_keep_lost_lives(void) {
+    GdxGpResumeState s;
+    const short lost[GDX_GP_RESUME_PLAYERS] = { 2, 2, 1, 0 };
+    const short gained[GDX_GP_RESUME_PLAYERS] = { 4, 2, 1, 0 };
+    const short gameOver[GDX_GP_RESUME_PLAYERS] = { -1, 2, 1, 0 };
+
+    fill_stock_state(&s); /* lives 3, 2, 1, 0 */
+    check(gdx_gp_resume_keep_lost_lives(&s, lost) == 1 && s.lives[0] == 2 && s.lives[1] == 2,
+          "a life lost since the boundary is written into the record");
+    check(gdx_gp_resume_keep_lost_lives(&s, lost) == 0, "the same lives again change nothing");
+    check(gdx_gp_resume_keep_lost_lives(&s, gained) == 0 && s.lives[0] == 2,
+          "a life gained in the race waits for the next boundary");
+    check(gdx_gp_resume_keep_lost_lives(&s, gameOver) == 1 && s.lives[0] == 0 &&
+              gdx_gp_resume_validate(&s) == GDX_GP_RESUME_OK,
+          "lives below zero are kept as 0, so the record still validates");
+    check(gdx_gp_resume_keep_lost_lives(NULL, lost) == 0 && gdx_gp_resume_keep_lost_lives(&s, NULL) == 0,
+          "NULL arguments change nothing");
+}
+
+/* Owner, 2026-11-18: after Continue Cup every TOTAL RANKING arrow pointed down by the racer's own place. */
+static void test_previous_ranks(void) {
+    GdxGpResumeState s;
+    short ranks[GDX_GP_RESUME_RACERS];
+    int seen[GDX_GP_RESUME_RACERS + 1];
+    int distinct = 1;
+    int i;
+
+    memset(&s, 0, sizeof(s));
+    for (i = 0; i < GDX_GP_RESUME_RACERS; i++) {
+        s.racers[i].points = i; /* racer 29 leads, racer 0 is last */
+    }
+    s.racers[5].points = 100;
+    s.racers[3].points = 40; /* ties racer 7 */
+    s.racers[7].points = 40;
+    s.racers[0].points = 40; /* the player ties them too */
+    gdx_gp_resume_previous_ranks(&s, ranks);
+    check(ranks[5] == 1, "the most points ranks first");
+    check(ranks[0] == 2 && ranks[3] == 3 && ranks[7] == 4,
+          "a tie puts the player first, then the lower racer index");
+    check(ranks[29] == 5 && ranks[1] == 30, "the rest follow by points");
+    memset(seen, 0, sizeof(seen));
+    for (i = 0; i < GDX_GP_RESUME_RACERS; i++) {
+        if (ranks[i] < 1 || ranks[i] > GDX_GP_RESUME_RACERS || seen[ranks[i]]++) {
+            distinct = 0;
+        }
+    }
+    check(distinct, "every racer gets its own place from 1 to 30");
+
+    memset(&s, 0, sizeof(s));
+    gdx_gp_resume_previous_ranks(&s, ranks);
+    check(ranks[0] == 1 && ranks[1] == 2 && ranks[29] == 30, "all equal points rank player first, then by index");
+}
+
 static void test_encode_refuses_bad_input(void) {
     GdxGpResumeState s;
     unsigned char buf[GDX_GP_RESUME_FILE_SIZE];
@@ -391,6 +445,8 @@ static void test_error_text(void) {
 
 int main(void) {
     test_round_trip();
+    test_keep_lost_lives();
+    test_previous_ranks();
     test_encode_refuses_bad_input();
     test_damage();
     test_out_of_range();

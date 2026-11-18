@@ -151,6 +151,46 @@ GdxGpResumeError gdx_gp_resume_validate(const GdxGpResumeState* s) {
     return GDX_GP_RESUME_OK;
 }
 
+void gdx_gp_resume_previous_ranks(const GdxGpResumeState* s, short ranks[GDX_GP_RESUME_RACERS]) {
+    int k;
+    int r;
+
+    if (s == NULL || ranks == NULL) {
+        return;
+    }
+    for (k = 0; k < GDX_GP_RESUME_RACERS; k++) {
+        short place = 1;
+
+        for (r = 0; r < GDX_GP_RESUME_RACERS; r++) {
+            GdxGpS32 pr = s->racers[r].points;
+            GdxGpS32 pk = s->racers[k].points;
+
+            if ((r != k) && ((pr > pk) || ((pr == pk) && ((r == 0) || ((k != 0) && (r < k)))))) {
+                place++;
+            }
+        }
+        ranks[k] = place;
+    }
+}
+
+int gdx_gp_resume_keep_lost_lives(GdxGpResumeState* s, const short lives[GDX_GP_RESUME_PLAYERS]) {
+    int changed = 0;
+    int i;
+
+    if (s == NULL || lives == NULL) {
+        return 0;
+    }
+    for (i = 0; i < GDX_GP_RESUME_PLAYERS; i++) {
+        GdxGpS32 now = (lives[i] < 0) ? 0 : lives[i];
+
+        if (now < s->lives[i]) {
+            s->lives[i] = now;
+            changed = 1;
+        }
+    }
+    return changed;
+}
+
 /* ---------------------------------------------------------------------------------
  * Codec.
  * ------------------------------------------------------------------------------- */

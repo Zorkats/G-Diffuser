@@ -234,7 +234,9 @@ void GdxInputViewer::DrawElement() {
         }
 
         ImGui::SetCursorPos(ImVec2(10.0f, 10.0f));
-        ImGui::InvisibleButton("##GdxInputViewerCanvas", canvasSize);
+        // A Dummy reserves the canvas without being a clickable item. An InvisibleButton here took every click,
+        // and ImGui only starts a window move from a click that lands on no item, so the viewer could not be dragged.
+        ImGui::Dummy(canvasSize);
         if (showAnalogValues) {
             ImGui::SetCursorPos(ImVec2(20.0f, canvasSize.y + 10.0f));
             ImGui::Text("Stick  X %+d   Y %+d", static_cast<int>(stickX), static_cast<int>(stickY));
