@@ -19,6 +19,10 @@ int gdx_meta_view_cpu_target(int raceLaps, int difficulty, int playerRecord, con
  * gEnhancements.CourseEdit.KeepStaffTime is on (the default). */
 void gdx_meta_view_editor_saved(void);
 
+/* 1 when a Course Edit save would stamp an author: the active profile has a name gdx_meta_name_ok accepts. 0
+ * means the save keeps the track's author empty, which the save name entry warns about. */
+int gdx_meta_view_editor_has_author(void);
+
 /* Clears the staff time of courseId and writes the state file. 1 when the course had one to clear. */
 int gdx_meta_view_clear_staff(const char* courseId);
 

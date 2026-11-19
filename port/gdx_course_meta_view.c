@@ -70,6 +70,11 @@ void gdx_meta_view_editor_saved(void) {
     }
 }
 
+int gdx_meta_view_editor_has_author(void) {
+    /* The same test gdx_meta_apply_editor_save makes before it writes a name. */
+    return gdx_meta_name_ok(gdx_profile_state_active_name());
+}
+
 int gdx_meta_view_clear_staff(const char* courseId) {
     GdxCourseMeta meta;
     int rc;

@@ -342,6 +342,8 @@ static void gdx_net_race_cpus_out(void) {
 // font draws them. Taken once when the race is set up: a name does not change during a race, and the room's
 // lock is not taken every frame for it. An empty name is one the room did not know.
 static char sNames[GDX_NET_RACE_HUMANS][GDX_NET_SPECTATE_NAME_BYTES];
+// Their profile colours, 0x00RRGGBB, taken with the names for the name tags; 0 is one the room did not know.
+static unsigned sColours[GDX_NET_RACE_HUMANS];
 
 static void gdx_net_race_names_take(void) {
     char name[GDX_NET_SPECTATE_NAME_BYTES];
@@ -349,8 +351,12 @@ static void gdx_net_race_names_take(void) {
 
     for (human = 0; human < GDX_NET_RACE_HUMANS; human++) {
         sNames[human][0] = '\0';
+        sColours[human] = 0;
         if ((human < sGrid.humans) && gdx_lan_race_name(sRoom.raceIndex, human, name, sizeof(name))) {
             gdx_net_text_filter(GDX_NET_ROOM_FONT_SMALL, name, sNames[human], sizeof(sNames[human]));
+        }
+        if (human < sGrid.humans) {
+            gdx_lan_race_colour(sRoom.raceIndex, human, &sColours[human]);
         }
     }
 }
@@ -413,6 +419,25 @@ void gdx_net_race_spectate_name(int racer, char* out, int size) {
         out[i] = '\0';
         return;
     }
+}
+
+// The name tag over a racer of the room's race (Racer_Draw in racer.c): another human's name as the small
+// stock font draws it, and their profile colour. 0 for this copy's own machine (slot 0), a CPU machine, or
+// outside a room's race.
+int gdx_net_race_name_tag(int racer, char* out, int size, unsigned* colour) {
+    s32 human;
+
+    if ((size <= 0) || (racer == 0) || !sRoomRace || !gdx_net_race_online()) {
+        return 0;
+    }
+    for (human = 0; (human < sGrid.humans) && (human < GDX_NET_RACE_HUMANS); human++) {
+        if (gdx_net_race_local_slot(sRoom.self, human) == racer) {
+            gdx_net_race_spectate_name(racer, out, size);
+            *colour = sColours[human];
+            return out[0] != '\0';
+        }
+    }
+    return 0;
 }
 
 // The player chose to leave the race from the quit box (gdx_net_race_box.c): the next frame goes back to

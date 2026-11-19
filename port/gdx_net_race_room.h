@@ -128,6 +128,10 @@ int gdx_lan_race_results(unsigned raceIndex, GdxNetRaceResults* out);
  * 1 when the room knows it; 0 otherwise, and out is then "". */
 int gdx_lan_race_name(unsigned raceIndex, int human, char* out, int size);
 
+/* The profile colour, 0x00RRGGBB, of the human at that place among the humans of the race's grid. 1 when the
+ * room knows the player; 0 otherwise, and *out is then 0. */
+int gdx_lan_race_colour(unsigned raceIndex, int human, unsigned* out);
+
 #ifdef __cplusplus
 }
 #endif

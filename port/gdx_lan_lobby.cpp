@@ -2315,6 +2315,29 @@ extern "C" int gdx_lan_race_name(unsigned raceIndex, int human, char* out, int s
     return 0;
 }
 
+extern "C" int gdx_lan_race_colour(unsigned raceIndex, int human, unsigned* out) {
+    using namespace gdx::lan;
+    if (out == nullptr) {
+        return 0;
+    }
+    *out = 0;
+    Runtime& rt = Rt();
+    std::lock_guard<std::mutex> guard(rt.lock);
+    const View& view = rt.view;
+    if ((view.mode != Mode::Hosting && view.mode != Mode::Joined) || !view.haveGrid ||
+        view.grid.raceIndex != raceIndex || human < 0 || static_cast<size_t>(human) >= view.grid.humans.size()) {
+        return 0;
+    }
+    const uint8_t id = view.grid.humans[static_cast<size_t>(human)].id;
+    for (const gdx::net::lobby::PlayerInfo& player : view.roster) {
+        if (player.id == id) {
+            *out = player.colour & 0xFFFFFFu;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 extern "C" unsigned gdx_lan_now_ms(void) {
     return gdx::lan::NowMs();
 }
