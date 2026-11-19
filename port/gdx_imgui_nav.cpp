@@ -144,10 +144,12 @@ extern "C" void gdx_imgui_nav_tick(void) {
     io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
     sOwnsFeed = true;
 
-    // Read by libultraship's Gui toggle even while the menu is closed, so these stay fed
-    // unconditionally: Back is the pad's only path to OPEN the menu (CanUseGamepadNavigation is
-    // false while it is hidden).
-    FeedButton(io, c, SDL_CONTROLLER_BUTTON_BACK, ImGuiKey_GamepadBack);
+    // Back must open a hidden menu, but binding capture owns it until physical release.
+    // Publish key-up while gated; raw SDL capture remains unaffected.
+    const bool captureActive = gui != nullptr && gui->IsInputCaptureActive();
+    io.AddKeyEvent(ImGuiKey_GamepadBack,
+                   GatedDown(1u << SDL_CONTROLLER_BUTTON_BACK,
+                             SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_BACK) != 0, !captureActive));
     FeedButton(io, c, SDL_CONTROLLER_BUTTON_START, ImGuiKey_GamepadStart);
 
     // Honor the nav block (input-editor capture popup sets it): while navigation is disallowed a

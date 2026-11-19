@@ -49,6 +49,7 @@
 #include "controller.h"
 #include "fzx_game.h" // GameMode values + GET_MODE (in-race safety checks)
 #include "gdx_input_actions.h" // 3A action layer: per-context N64 button tables (see file header)
+#include "gdx_physical_input.h"
 #include "gdx_input_script.h" // GDX_INPUT_SCRIPT: dev-only deterministic input playback (see file header)
 #include "port_log.h"
 
@@ -790,6 +791,7 @@ void gdx_controller_poll(void) {
     static int s_have_baseline = 0;
     s32 divider;
     int gameBoundary;
+    int context;
     int i;
 
     // The button field is already the N64 bitmask (identical layout to the decomp — see the file
@@ -809,9 +811,12 @@ void gdx_controller_poll(void) {
     // 3A action layer: remap the raw LUS pad bits per context. It runs before mouse steering, the
     // dev overrides and the Course Edit mouse buttons below, so those stay raw N64 bits. Every port
     // is applied (a disconnected port reads zero), so each port's edge state stays in step.
-    gdx_input_actions_begin_frame(gdx_input_actions_frame_context());
+    context = gdx_input_actions_frame_context();
+    gdx_input_actions_begin_frame(context);
     for (i = 0; i < MAXCONTROLLERS; i++) {
         buttons[i] = gdx_input_actions_apply(i, buttons[i]);
+        buttons[i] = gdx_physical_input_apply(i, context, buttons[i]);
+        connected[i] |= gdx_physical_input_has_live_input(i);
     }
 
     // Issue #18 mouse steering: absolute position drive — gdx_mouse_steer_stick_x() maps the

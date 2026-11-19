@@ -2,6 +2,23 @@
 # Top-level build (scaffold — fleshed out in milestone M0).
 cmake_minimum_required(VERSION 3.20)
 
+# A cached vcpkg toolchain is loaded by project(), before libultraship can select its
+# static dependencies. Keep package discovery on the same triplet as auto-vcpkg installs.
+if(CMAKE_HOST_WIN32 AND USE_AUTO_VCPKG)
+    if(NOT DEFINED VCPKG_TARGET_TRIPLET)
+        if(CMAKE_GENERATOR_PLATFORM STREQUAL "Win32")
+            set(VCPKG_TARGET_TRIPLET "x86-windows-static" CACHE STRING "Vcpkg target triplet")
+        elseif(CMAKE_GENERATOR_PLATFORM MATCHES "^[Aa][Rr][Mm]64" OR
+               (NOT CMAKE_GENERATOR_PLATFORM AND CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(ARM64|aarch64)$"))
+            set(VCPKG_TARGET_TRIPLET "arm64-windows-static" CACHE STRING "Vcpkg target triplet")
+        else()
+            set(VCPKG_TARGET_TRIPLET "x64-windows-static" CACHE STRING "Vcpkg target triplet")
+        endif()
+    elseif(VCPKG_TARGET_TRIPLET MATCHES "^(x86|x64|arm64)-windows$")
+        set(VCPKG_TARGET_TRIPLET "${CMAKE_MATCH_1}-windows-static" CACHE STRING "Vcpkg target triplet" FORCE)
+    endif()
+endif()
+
 project(GDiffuser
     LANGUAGES C CXX
     DESCRIPTION "F-Zero X PC source port"

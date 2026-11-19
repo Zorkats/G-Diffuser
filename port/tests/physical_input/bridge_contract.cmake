@@ -1,0 +1,20 @@
+# Static integration guard, not a replacement for a full game/backend integration run.
+file(READ "${GDX_ROOT}/port/input_bridge.c" BRIDGE)
+string(FIND "${BRIDGE}" "void gdx_controller_poll(void)" POLL_OFFSET)
+if(POLL_OFFSET LESS 0)
+    message(FATAL_ERROR "Controller poll entry not found")
+endif()
+string(SUBSTRING "${BRIDGE}" ${POLL_OFFSET} -1 POLL)
+string(REGEX MATCHALL "gdx_lus_read_pads\\(MAXCONTROLLERS, buttons, stick_x, stick_y, connected\\)" READS "${POLL}")
+list(LENGTH READS READ_COUNT)
+string(REGEX MATCHALL "gdx_physical_input_apply\\(" APPLIES "${POLL}")
+list(LENGTH APPLIES APPLY_COUNT)
+if(NOT READ_COUNT EQUAL 1 OR NOT APPLY_COUNT EQUAL 1)
+    message(FATAL_ERROR "Expected exactly one legacy pad read and one physical-apply call site")
+endif()
+# Preserve the button-only integration immediately after legacy action apply. Sticks must stay
+# the values supplied by the one legacy pad read, not be queued or rewritten by this layer.
+if(NOT POLL MATCHES "buttons\\[i\\] = gdx_input_actions_apply\\(i, buttons\\[i\\]\\);[ \t\r\n]*buttons\\[i\\] = gdx_physical_input_apply\\(i, context, buttons\\[i\\]\\);")
+    message(FATAL_ERROR "Physical overrides must update only buttons, directly after legacy action apply")
+endif()
+message(STATUS "Button-only bridge contract passed; stick buffers remain on the legacy path")
