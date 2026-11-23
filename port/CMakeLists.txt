@@ -508,6 +508,7 @@ gdx_add_main_target(G-Diffuser
     gdx_hackmods.cpp           # W3 ROM-hack archive discovery, single-selection and per-hack
                                # save isolation; name helpers are unit-tested standalone
     gdx_hackmods_window.cpp    # W3 ROM Hacks picker, separate from the Workshop pack list
+    gdx_cpu_speed.cpp          # CPU speed (%) enhancement; cpu.c and racer.c read its scale
     gdx_content_window.cpp         # Content Library window; the F12 unified Export/Import shell
     gdx_xcup_seed.c                # M3 X Cup seed codes; hooked from Course_GenerateRandomCourse
     gdx_single_race.c              # Single Race rules for Practice; hooked from racer.c and ovl_i3
@@ -2509,6 +2510,7 @@ if(GDX_BUILD_JP AND NOT ANDROID)
         gdx_mfs_image.c
         gdx_hackmods.cpp
         gdx_hackmods_window.cpp
+        gdx_cpu_speed.cpp
         gdx_content_window.cpp
         gdx_xcup_seed.c
         gdx_single_race.c

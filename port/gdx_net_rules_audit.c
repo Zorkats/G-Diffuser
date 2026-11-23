@@ -28,6 +28,8 @@ static const GdxNetRuleEntry kRules[] = {
 
     /* HOST_CPU: only the host runs the CPUs. */
     { G "AiAggression", GDX_NET_RULE_HOST_CPU, GDX_NET_RULE_SCANNED, "D28.1", "how hard CPUs attack" },
+    { G "CpuSpeed", GDX_NET_RULE_HOST_CPU, GDX_NET_RULE_SCANNED, "D28.1",
+      "how fast CPUs drive (gdx_cpu_speed.cpp, applied in cpu.c and racer.c)" },
     { G "CpuTrackHazards", GDX_NET_RULE_HOST_CPU, GDX_NET_RULE_SCANNED, "D28.1",
       "whether CPUs avoid hazards; the host's CPU code only" },
     { "gEnhancements.CustomGrid.Roster", GDX_NET_RULE_HOST_CPU, GDX_NET_RULE_BY_HAND, "D28.1",

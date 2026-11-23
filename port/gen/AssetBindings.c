@@ -7337,6 +7337,22 @@ const char* gdx_find_o2r_key_by_abs_rom_offset(unsigned int abs_rom_offset) {
     return NULL;
 }
 
+/* Every symbol whose image starts at `offset` inside segment `segment`, from index `start` on.
+ * Returns the index to resume from (> 0) and fills *sym_low32, or 0 when there are no more. A raw
+ * segmented SETTIMG from a compiled DL (aCountdownSignDL, aFinishDL) names only segment + offset;
+ * this recovers the symbols so texture packs can key it. */
+int gdx_find_asset_symbol_at_segment_offset(unsigned int segment, unsigned int offset, int start,
+                                            unsigned int* sym_low32) {
+    int i;
+    for (i = start < 0 ? 0 : start; sAssetSegmentMap[i].sym != NULL; i++) {
+        if (sAssetSegmentMap[i].segment == segment && sAssetSegmentMap[i].offset == offset) {
+            if (sym_low32 != NULL) *sym_low32 = (unsigned int)(unsigned long long)sAssetSegmentMap[i].sym;
+            return i + 1;
+        }
+    }
+    return 0;
+}
+
 typedef struct { unsigned char segment; unsigned int rom_base; unsigned int offset; unsigned int size; unsigned char kind; } GdxAssetFixupEntry;
 static const GdxAssetFixupEntry sAssetFixups[] = {
     { 0x04u, 0x001535B0U, 0x00000000U, 0x000000B8U, 1u },

@@ -705,6 +705,102 @@ extern "C" int GdxWorkshopPaletteVariantsPresent(void) {
     return gPaletteVariants.empty() ? 0 : 1;
 }
 
+// ── Content-keyed overrides ───────────────────────────────────────────────────────────────────────
+// Textures the game builds at load time (the minimap, per-course track textures) have no asset key.
+// GLideN64 keys them by content, so tools/gen_htc_pack.py --crc-unmatched writes those entries at
+// textures/pack/crc/<16 hex digits>: the GLideN64 key, palette CRC high, texel Rice CRC low. The
+// renderer computes the same key on a texture-cache miss and asks here. Indexed once per pack epoch.
+namespace {
+
+std::unordered_map<uint64_t, std::string> gCrcOverrides;
+uint32_t gCrcOverridesEpoch = 0;
+bool gCrcOverridesBuilt = false;
+
+void addCrcOverrides(Ship::ArchiveManager& am, const std::string& prefix) {
+    auto files = am.ListFiles(prefix + "*");
+    if (files == nullptr) {
+        return;
+    }
+    for (const std::string& path : *files) {
+        if (path.size() != prefix.size() + 16 || path.compare(0, prefix.size(), prefix) != 0) {
+            continue;
+        }
+        uint64_t key = 0;
+        bool ok = true;
+        for (size_t i = prefix.size(); i < path.size() && ok; i++) {
+            const char c = path[i];
+            const int digit = (c >= '0' && c <= '9')   ? c - '0'
+                              : (c >= 'A' && c <= 'F') ? c - 'A' + 10
+                              : (c >= 'a' && c <= 'f') ? c - 'a' + 10
+                                                       : -1;
+            ok = digit >= 0;
+            key = (key << 4) | static_cast<uint64_t>(digit < 0 ? 0 : digit);
+        }
+        if (ok) {
+            gCrcOverrides.emplace(key, path); // alt/ is added first and wins
+        }
+    }
+}
+
+// Caller holds gCacheMutex.
+void ensureCrcOverrides() {
+    if (gCrcOverridesBuilt && gCrcOverridesEpoch == gPackEpoch) {
+        return;
+    }
+    gCrcOverrides.clear();
+    gCrcOverridesBuilt = true;
+    gCrcOverridesEpoch = gPackEpoch;
+    auto ctx = Ship::Context::GetInstance();
+    auto rm = (ctx != nullptr) ? ctx->GetResourceManager() : nullptr;
+    auto am = (rm != nullptr) ? rm->GetArchiveManager() : nullptr;
+    if (am == nullptr) {
+        return;
+    }
+    if (rm->IsAltAssetsEnabled()) {
+        addCrcOverrides(*am, Ship::IResource::gAltAssetPrefix + "textures/pack/crc/");
+    }
+    addCrcOverrides(*am, "textures/pack/crc/");
+    if (!gCrcOverrides.empty()) {
+        gdx_port_logf("[workshop] content-keyed overrides: %zu image(s)\n", gCrcOverrides.size());
+    }
+}
+
+} // namespace
+
+extern "C" int GdxWorkshopCrcOverridesPresent(void) {
+    if (!gdx_workshop_texture_packs_enabled()) {
+        return 0;
+    }
+    std::lock_guard<std::mutex> lock(gCacheMutex);
+    ensureCrcOverrides();
+    return gCrcOverrides.empty() ? 0 : 1;
+}
+
+extern "C" const char* GdxWorkshopLookupCrcOverride(uint64_t key) {
+    std::lock_guard<std::mutex> lock(gCacheMutex);
+    ensureCrcOverrides();
+    auto hit = gCrcOverrides.find(key);
+    return hit == gCrcOverrides.end() ? nullptr : hit->second.c_str();
+}
+
+// [crc-pack] diagnostic (GDX_DIAG_CRCPACK=1, checked by the caller): one line per distinct key, or per
+// distinct shape that could not be hashed (key 0), into the run log.
+extern "C" void GdxWorkshopLogCrcKey(uint64_t key, int fmt, int siz, unsigned width, unsigned height, unsigned line,
+                                     unsigned loadedBytes, int fromArchive, const char* result) {
+    static std::mutex sMutex;
+    static std::unordered_set<uint64_t> sSeen;
+    std::lock_guard<std::mutex> lock(sMutex);
+    const uint64_t id = key != 0 ? key
+                                 : (0xFFull << 56) | (uint64_t(fmt & 7) << 48) | (uint64_t(siz & 3) << 44) |
+                                       (uint64_t(width & 0xFFFF) << 20) | (height & 0xFFFFF);
+    if (sSeen.size() >= 1024 || !sSeen.insert(id).second) {
+        return;
+    }
+    gdx_port_logf("[crc-pack] key=%016llX fmt=%d siz=%d %ux%u line=%u loaded=%u %s -> %s\n",
+                  static_cast<unsigned long long>(key), fmt, siz, width, height, line, loadedBytes,
+                  fromArchive ? "archive" : "memory", result != nullptr ? result : "");
+}
+
 extern "C" const char* GdxWorkshopLookupPaletteVariant(const char* baseKey, const uint8_t* palette,
                                                        size_t paletteSize) {
     if (baseKey == nullptr || baseKey[0] == '\0' || palette == nullptr) {

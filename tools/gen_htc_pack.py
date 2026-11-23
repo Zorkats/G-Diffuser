@@ -655,6 +655,36 @@ def encode_matches(matches, channel):
     return out
 
 
+CRC_DIR = "crc/"
+
+
+def crc_path(key, channel):
+    """Where a content-keyed entry sits: textures/pack/crc/<16 hex digits>, the GLideN64 key itself
+    (palette CRC in the high 32 bits, texel Rice CRC in the low 32). --direct-keys has no bare form for
+    these either, so they use the default prefix."""
+    prefix = ALT_PREFIX + PACK_PREFIX if channel == ALT_CHANNEL else PACK_PREFIX
+    return prefix + CRC_DIR + "%016X" % key
+
+
+def encode_crc_entries(entries, skipped, channel):
+    """Encode every no_match entry as a plain RGBA32 image keyed by its GLideN64 CRC. The renderer
+    computes the same key for textures the game builds at load time (the minimap, per-course track
+    textures) and uploads this image in place of the decode. Returns (archive path, bytes) pairs."""
+    by_index = {e["index"]: e for e in entries}
+    out = []
+    for row in skipped:
+        if row["reason"] != "no_match":
+            continue
+        entry = by_index[row["htc_index"]]
+        if entry["key"] is None:
+            continue
+        rgba = decode_htc_payload(entry)
+        blob = packer.build_otex_v1(packer.TT_RGBA32, entry["width"], entry["height"], 1.0, 1.0, bytes(rgba))
+        out.append((crc_path(entry["key"], channel), blob))
+    out.sort(key=lambda e: e[0])
+    return out
+
+
 def pack_metadata(args):
     """Metadata from the packer's own synthesizer, with key_channel set for this pack."""
     shim = argparse.Namespace(
@@ -785,6 +815,9 @@ def main(argv=None):
                          help="write alt/textures/pack/<path>, used while Use alternate assets is on")
     channel.add_argument("--direct-keys", action="store_true",
                          help="write the bare <path>, shadowing the base resource (advanced)")
+    ap.add_argument("--crc-unmatched", action="store_true",
+                    help="also write every entry no base texture matches under textures/pack/crc/<key>, for "
+                         "textures the game builds at load time (minimap, per-course track textures)")
     ap.add_argument("--check", action="store_true", help="plan and report only; write no pack")
     ap.add_argument("--json", default=None, metavar="REPORT.json", help="write a structured report")
     args = ap.parse_intermixed_args(argv)
@@ -831,7 +864,12 @@ def main(argv=None):
             return 2
         out_dir = os.path.dirname(os.path.abspath(args.output_o2r))
         os.makedirs(out_dir, exist_ok=True)
-        write_pack(args.output_o2r, encode_matches(matches, key_channel(args)), manifest)
+        packed = encode_matches(matches, key_channel(args))
+        if args.crc_unmatched:
+            crc_entries = encode_crc_entries(entries, skipped, key_channel(args))
+            packed += crc_entries
+            print("crc: %d unmatched entry(ies) written under %s%s" % (len(crc_entries), PACK_PREFIX, CRC_DIR))
+        write_pack(args.output_o2r, packed, manifest)
         pack_bytes = os.path.getsize(args.output_o2r)
 
     report = build_report(args, versioned, entries, textures, seen, matches, skipped, pack_bytes)
