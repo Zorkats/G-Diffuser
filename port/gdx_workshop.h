@@ -58,6 +58,12 @@ int GdxWorkshopPaletteVariantsPresent(void);
 // path stays valid until the next pack epoch. Callers gate on gdx_workshop_texture_packs_enabled().
 const char* GdxWorkshopLookupPaletteVariant(const char* baseKey, const uint8_t* palette, size_t paletteSize);
 
+// Content-keyed overrides (textures/pack/crc/<16 hex>): non-zero when packs are on and a mounted
+// pack has any. The lookup takes the GLideN64 key (palette CRC << 32 | texel Rice CRC) and returns
+// the image path, valid until the next pack epoch, or NULL.
+int GdxWorkshopCrcOverridesPresent(void);
+const char* GdxWorkshopLookupCrcOverride(uint64_t key);
+
 // ── Texture dump (called from the interpreter's decoded-RGBA32 points) ────────────────────────────
 // Returns non-zero when gEnhancements.Workshop.TextureDump is on.
 int gdx_workshop_texture_dump_enabled(void);
