@@ -6,11 +6,18 @@
 
 #include <libultraship/bridge/consolevariablebridge.h>
 
+#include <cstdlib>
 #include <string>
 
 namespace {
 int ClampPercent(int pct) {
     return pct < GDX_CPU_SPEED_MIN ? GDX_CPU_SPEED_MIN : pct > GDX_CPU_SPEED_MAX ? GDX_CPU_SPEED_MAX : pct;
+}
+
+// [cpu-pace] lines are opt-in: GDX_DIAG_CPUPACE=1.
+bool PaceLogOn() {
+    static const bool sOn = std::getenv("GDX_DIAG_CPUPACE") != nullptr;
+    return sOn;
 }
 } // namespace
 
@@ -45,6 +52,9 @@ extern "C" float gdx_cpu_speed_scale(void) {
 }
 
 extern "C" void gdx_cpu_speed_log_race(int course, int tuningCourse, int difficulty, int targetMs) {
+    if (!PaceLogOn()) {
+        return;
+    }
     gdx_port_logf("[cpu-pace] course=%d tuning=%d difficulty=%d reference=%d ms speed=%d%%\n", course, tuningCourse,
                   difficulty, targetMs, gdx_cpu_speed_percent());
 }
@@ -52,13 +62,16 @@ extern "C" void gdx_cpu_speed_log_race(int course, int tuningCourse, int difficu
 extern "C" void gdx_cpu_speed_log_sample(int id, int lap, int position, float speed, float playerSpeed,
                                          float preCap, int cap, float target, float boost, float accel, int finishMs,
                                          int timeMs) {
+    if (!PaceLogOn()) {
+        return;
+    }
     gdx_port_logf("[cpu-pace] cpu%d lap=%d pos=%d speed=%.1f player=%.1f want=%.1f cap=%d target=%.1f "
                   "boost=%.2f accel=%.3f finish=%d time=%d\n",
                   id, lap, position, speed, playerSpeed, preCap, cap, target, boost, accel, finishMs, timeMs);
 }
 
 extern "C" void gdx_cpu_speed_log_caps(const short* caps, int count) {
-    if (caps == nullptr) {
+    if (caps == nullptr || !PaceLogOn()) {
         return;
     }
     std::string line = "[cpu-pace] caps:";
