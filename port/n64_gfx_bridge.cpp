@@ -246,6 +246,8 @@ extern "C" int gdx_mode_segment_content_matches(unsigned int seg, unsigned int r
 extern "C" const char* GDiffuser_LookupLoadedAssetKey(const void* buffer, size_t minSize, int requireUnmodified);
 extern "C" const char* GDiffuser_LookupLoadedAssetKeyAndSize(const void* buffer, size_t* outSize);
 extern "C" const char* gdx_lookup_asset_segment_o2r_key(unsigned int sym_low32);
+extern "C" int gdx_find_asset_symbol_at_segment_offset(unsigned int segment, unsigned int offset, int start,
+                                                       unsigned int* sym_low32);
 // Workshop texture packs (port/gdx_workshop.cpp).
 extern "C" int gdx_workshop_texture_packs_enabled(void);
 extern "C" const char* GdxWorkshopLookupOverridePath(const char* key);
@@ -1866,6 +1868,53 @@ const char* LookupCarveTextureOverride(uint32_t symbol, uintptr_t source, uint32
         entry.dmaGeneration = gDmaGeneration;
     }
     return entry.unchanged ? entry.path.c_str() : nullptr;
+}
+
+// A raw segmented address (segment in the top byte, as compiled DLs store it) names no symbol, so
+// LookupCarveTextureOverride never matches it. Several banks can bind the same segment offset; the
+// candidates are tried in table order and LookupCarveTextureOverride's own gates (mode-owned
+// segment, resident bank, live source, stock bytes) pick the one that applies. Candidates are
+// cached per address.
+const char* LookupSegmentedCarveTextureOverride(uint32_t raw, uintptr_t source, uint32_t epoch) {
+    const uint32_t segment = raw >> 24;
+    if (segment == 0 || segment >= 16 || source == 0) {
+        return nullptr;
+    }
+    static std::unordered_map<uint32_t, std::vector<uint32_t>> candidates;
+    auto it = candidates.find(raw);
+    if (it == candidates.end()) {
+        if (candidates.size() >= 4096) {
+            return nullptr;
+        }
+        std::vector<uint32_t> syms;
+        uint32_t sym = 0;
+        for (int next = gdx_find_asset_symbol_at_segment_offset(segment, raw & 0x00FFFFFFu, 0, &sym);
+             next > 0 && syms.size() < 8;
+             next = gdx_find_asset_symbol_at_segment_offset(segment, raw & 0x00FFFFFFu, next, &sym)) {
+            syms.push_back(sym);
+        }
+        it = candidates.emplace(raw, std::move(syms)).first;
+    }
+    const char* found = nullptr;
+    for (uint32_t sym : it->second) {
+        if ((found = LookupCarveTextureOverride(sym, source, epoch)) != nullptr) {
+            break;
+        }
+    }
+    static const bool sDiag = std::getenv("GDX_DIAG_HUDPACK") != nullptr;
+    if (sDiag && segment == 4) {
+        static std::vector<uint32_t> sLogged;
+        if (sLogged.size() < 64 && std::find(sLogged.begin(), sLogged.end(), raw) == sLogged.end()) {
+            sLogged.push_back(raw);
+            const uint32_t first = it->second.empty() ? 0u : it->second.front();
+            const char* key = gdx_lookup_asset_segment_o2r_key(first);
+            gdx_port_logf("[seg-carve] %08X -> %zu candidate(s), first %08X %s, seg=%p src=%p -> %s\n", raw,
+                          it->second.size(), first, key ? key : "(none)",
+                          reinterpret_cast<void*>(static_cast<uintptr_t>(gSegments[segment])),
+                          reinterpret_cast<void*>(source), found ? found : "(no override)");
+        }
+    }
+    return found;
 }
 
 /* Game-BUILT wide DLs carry the REAL host address of a generated 1-byte asset stub whenever a
@@ -6417,6 +6466,35 @@ class N64DisplayListAdapter {
                                 packPath = LookupCarveTextureOverride(Low32(in.w1),
                                     w1IsHostPointer ? stubResolved : translated, settimgEpoch);
                                 packViaRdram = packPath != nullptr;
+                            }
+                            // Compiled DLs (aCountdownSignDL, aFinishDL) carry raw segmented addresses
+                            // rather than symbols. Try the symbols bound at that segment offset.
+                            if (packPath == nullptr && !generatedPortrait && !w1IsHostPointer) {
+                                packPath = LookupSegmentedCarveTextureOverride(Low32(in.w1), translated, settimgEpoch);
+                                packViaRdram = packPath != nullptr;
+                            }
+                            // [hud-pack-miss] GDX_DIAG_HUDPACK=1: one line per segment-4 carve offset that
+                            // reached no pack override, so a race shows which HUD textures still draw stock.
+                            static const bool sDiagHudPack = std::getenv("GDX_DIAG_HUDPACK") != nullptr;
+                            if (sDiagHudPack && packPath == nullptr) {
+                                const uintptr_t src = w1IsHostPointer && stubResolved != 0 ? stubResolved : translated;
+                                const uintptr_t carve = static_cast<uintptr_t>(gSegments[4]);
+                                if (carve != 0 && src >= carve && src - carve < 0x00029EA0u) {
+                                    static std::vector<uint32_t> sSeen;
+                                    const uint32_t off = static_cast<uint32_t>(src - carve);
+                                    if (sSeen.size() < 128 &&
+                                        std::find(sSeen.begin(), sSeen.end(), off) == sSeen.end()) {
+                                        sSeen.push_back(off);
+                                        const char* key = gdx_lookup_asset_segment_o2r_key(Low32(in.w1));
+                                        gdx_port_logf("[hud-pack-miss] seg4+%05X w1=%08X wide=%d stub=%d key=%s "
+                                                      "owns=%d content=%d bytes=%zu\n",
+                                                      off, Low32(in.w1), w1IsHostPointer ? 1 : 0,
+                                                      stubResolved != 0 ? 1 : 0, key ? key : "(none)",
+                                                      gdx_mode_owns_segment(4),
+                                                      gdx_mode_segment_content_matches(4, 0x001B8550u),
+                                                      estimatedBytes);
+                                    }
+                                }
                             }
                         }
                         if (packPath) {
