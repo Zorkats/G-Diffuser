@@ -43,6 +43,7 @@
 #include "gdx_machine_capture_runtime.h"
 #include "gdx_lan_lobby_page.h"
 #include "gdx_profile_page.h"
+#include "gdx_cpu_speed.h"
 #include "gdx_export_page.h"
 
 #include <imgui.h>
@@ -390,6 +391,31 @@ const char* const kGridSkinNames[GDX_CUSTOM_GRID_SKIN_COUNT + 1] = { "Random", "
 // and a skin (Random + 4 colors). The roster is one compact string CVar parsed by
 // gdx_custom_grid.c; the CVar is re-parsed every frame so console edits show up live, and an
 // empty string means the feature is off (stock shuffled grid).
+void DrawHackCpuSpeed() {
+    const char* cvar = gdx_cpu_speed_hack_cvar();
+    if (cvar == nullptr) {
+        return; // no ROM hack active: the global option is the only one
+    }
+    int pct = CVarGetInteger(cvar, 0);
+    bool useOwn = pct > 0;
+    if (ImGui::Checkbox("Own CPU speed for this ROM hack", &useOwn)) {
+        CVarSetInteger(cvar, useOwn ? CVarGetInteger("gEnhancements.Gameplay.CpuSpeed", 100) : 0);
+        CVarSave();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Remembered for the active ROM hack only, and used instead of\n"
+                          "CPU speed (%%) while that hack is loaded.");
+    }
+    if (useOwn) {
+        pct = CVarGetInteger(cvar, 100);
+        ImGui::SetNextItemWidth(240.0f);
+        if (ImGui::SliderInt("Hack CPU speed (%)", &pct, GDX_CPU_SPEED_MIN, GDX_CPU_SPEED_MAX)) {
+            CVarSetInteger(cvar, pct);
+            CVarSave();
+        }
+    }
+}
+
 void DrawCustomGrid() {
     static const char* sGridCharNames[GDX_CUSTOM_GRID_SLOTS + 1] = { nullptr };
 
@@ -2361,6 +2387,30 @@ void GdxMenu::RegisterMenu() {
                                         "sets it to 100% on that course."))
                   .ModifiedMarker()
                   .SearchTerms("ai cpu opponent aggressive attack combat difficulty mutator"));
+
+    // CPU speed (%): Cpu_GenerateInputs (ovl_i3/cpu.c) scales the CPU's commanded speed and
+    // racer.c its drive force, so CPUs accelerate harder and reach a higher top speed. 100 = stock.
+    AddWidget("Enhancements", "Gameplay", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "CPU speed (%)", .cVar = "gEnhancements.Gameplay.CpuSpeed",
+                          .type = GdxUI::WIDGET_CVAR_SLIDER_INT }
+                  .Options(UIWidgets::IntSliderOptions()
+                               .Min(GDX_CPU_SPEED_MIN)
+                               .Max(GDX_CPU_SPEED_MAX)
+                               .DefaultValue(100)
+                               .ShowButtons(false)
+                               .LabelPosition(UIWidgets::LabelPositions::Near)
+                               .Tooltip("How fast CPU racers drive in every mode. 100% = stock.\n"
+                                        "Above 100% they accelerate harder, reach a higher top speed\n"
+                                        "and aim for a faster finish; below 100% they are slower.\n"
+                                        "A ROM hack can keep its own value (option below)."))
+                  .ModifiedMarker()
+                  .SearchTerms("ai cpu opponent speed fast faster difficulty rubber band rom hack climax"));
+
+    // Per-hack CPU speed: shown while a ROM hack is active. 0 = use the CPU speed option above.
+    AddWidget("Enhancements", "Gameplay", SECTION_COLUMN_1,
+              WidgetInfo{ .name = "CPU speed for this ROM hack", .type = GdxUI::WIDGET_CUSTOM }
+                  .CustomFunction([](WidgetInfo&) { DrawHackCpuSpeed(); })
+                  .SearchTerms("ai cpu opponent speed rom hack climax per hack"));
 
     // Read when each X Cup course loads, so the race lockout keeps a course from changing under it.
     AddWidget("Enhancements", "Gameplay", SECTION_COLUMN_1,

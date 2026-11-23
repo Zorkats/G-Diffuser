@@ -703,6 +703,10 @@ GdxMenu::GdxMenu() : Ship::GuiWindow("gOpenMenuBar", false, "G-Diffuser Menu") {
     // 100 = stock behavior.
     CVarRegisterInteger("gEnhancements.Gameplay.AiAggression", 100);
 
+    // CPU speed (%): scales the CPU racers' commanded speed and drive force (port/gdx_cpu_speed.h).
+    // 100 = stock. A ROM hack can carry its own value in gEnhancements.Hacks.CpuSpeed.<name>.
+    CVarRegisterInteger("gEnhancements.Gameplay.CpuSpeed", 100);
+
     // CONTENT (E1 .gdxc export). Default 0 = track exports strip author ghosts + records
     // (privacy-first; POST_1_0_SCOPING section 2). Read in port/gdx_content_io.c.
     CVarRegisterInteger("gEnhancements.Content.ExportIncludeGhosts", 0);
